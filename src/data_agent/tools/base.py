@@ -1,0 +1,80 @@
+"""工具基类 —— 定义「一个工具需要提供什么」。
+
+三个设计要点：
+
+1. 参数用 pydantic 模型声明，JSON Schema 自动生成。不用手写 schema，
+   而且模型传回来的参数会先过一遍校验。
+
+2. run() 里抛的任何异常都会被 execute() 捕获，变成 ToolOutput(ok=False)。
+   **工具出错不应该中断 Agent** —— 把错误告诉模型，让它自己决定重试还是换路子。
+   这是 Agent 能「自愈」的关键。
+
+3. 工具的依赖（数据库连接等）在 __init__ 里注入，不用全局变量。
+   这样写测试时塞个假的 Database 进去就行。
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, ClassVar
+
+from pydantic import BaseModel, ValidationError
+
+MAX_OUTPUT_CHARS = 6000  # 单个工具结果的上限，防止一条结果吃掉半个上下文
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutput:
+    ok: bool
+    content: str
+
+    def capped(self, limit: int = MAX_OUTPUT_CHARS) -> "ToolOutput":
+        if len(self.content) <= limit:
+            return self
+        omitted = len(self.content) - limit
+        return ToolOutput(
+            self.ok,
+            self.content[:limit] + f"\n…（输出过长，已截断 {omitted} 字符，请缩小查询范围）",
+        )
+
+
+class Tool(ABC):
+    """所有工具的基类。
+
+    子类必须提供：
+        name        工具名，模型用它来指定调用哪个
+        description 说明书 —— 模型唯一的判断依据，**本质上是提示词**
+        Args        pydantic 模型，声明参数
+        run()       真正干活的代码
+    """
+
+    name: ClassVar[str]
+    description: ClassVar[str]
+    Args: ClassVar[type[BaseModel]]
+
+    def schema(self) -> dict[str, Any]:
+        """生成中立格式的工具描述，由各 provider 再翻译成自家格式。"""
+        params = self.Args.model_json_schema()
+        params.pop("title", None)
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": params,
+        }
+
+    @abstractmethod
+    def run(self, args: Any) -> str:
+        """真正干活。args 是已经校验过的 Args 实例。"""
+
+    def execute(self, raw_args: dict[str, Any]) -> ToolOutput:
+        """统一入口：校验参数 -> 执行 -> 兜住异常。"""
+        try:
+            args = self.Args(**raw_args)
+        except ValidationError as exc:
+            # 把校验错误原样告诉模型，它通常下一轮就能改对
+            return ToolOutput(False, f"参数不合法：{exc}").capped()
+        try:
+            return ToolOutput(True, str(self.run(args))).capped()
+        except Exception as exc:  # noqa: BLE001 —— 故意兜住所有异常喂回模型
+            return ToolOutput(False, f"{type(exc).__name__}: {exc}").capped()

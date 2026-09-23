@@ -1,0 +1,14 @@
+# 模型 SDK（用哪个装哪个，都装也行）
+anthropic>=0.70
+openai>=1.60
+
+# 数据库
+psycopg[binary]>=3.2
+
+# 配置
+pydantic>=2.0
+pydantic-settings>=2.0
+python-dotenv>=1.0
+
+# 测试（可选）
+pytest>=8.0

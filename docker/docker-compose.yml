@@ -1,0 +1,26 @@
+services:
+  postgres:
+    # 用 pgvector 镜像而不是原版 postgres：以后做 RAG 可以直接在同一个库里存向量，
+    # 不用再加一个向量数据库组件。现在用不到 vector 也没有额外开销。
+    image: pgvector/pgvector:pg17
+    container_name: dataagent-postgres
+    environment:
+      POSTGRES_DB: analytics
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      TZ: Asia/Shanghai
+    ports:
+      # 宿主机用 5433，避开你其他项目占 5432 的情况
+      - "5433:5432"
+    volumes:
+      - dataagent_pgdata:/var/lib/postgresql/data
+      # 容器首次初始化时，这个目录下的 .sql 会按文件名顺序自动执行
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d analytics"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  dataagent_pgdata:
