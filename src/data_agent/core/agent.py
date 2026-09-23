@@ -206,11 +206,29 @@ class Agent:
                 self.context.add(Message.user(nudge))
                 self.on_event(TurnContinued(step=step, nudge=nudge))
 
+        # 步数耗尽 —— 循环是被强行打断的，模型没机会说收尾那句话。
+        #
+        # ⚠️ 这条兜底消息**必须进历史**，不能只 return 给用户。两个理由：
+        #
+        # 1. 历史形状：正常一轮总是以 assistant 收尾。这里不补的话，历史会以
+        #    tool 结果（模型一直在调工具）或 nudge 的 user 消息（finish_turn
+        #    一直说继续）结尾。用户下一次提问再追加一条 user，就变成：
+        #        [..., tool,        user]  → Anthropic 把 tool_result 包进
+        #                                    user 消息 → 连续两条 user → 400
+        #        [..., user(nudge), user]  → 中立结构里就已经连续了
+        #    和被截断、悬空 tool_call 是同一个死亡模式的第三个入口。
+        #    区别是前两个走异常路径（被 run() 的事务兜住），这个是**正常返回**，
+        #    事务照常提交 —— 所以必须在这里自己收尾。
+        #
+        # 2. 模型知情：不进历史的话，下一轮模型完全不知道上一轮卡住了，
+        #    很可能原样再试一遍同样的死路。
         self.on_event(StepLimitReached(self.max_steps))
-        return (
+        fallback = (
             f"已达到最大步数 {self.max_steps} 仍未得出结论。"
             "可以把问题拆小一点，或者调大 max_steps。"
         )
+        self.context.add(Message.assistant(fallback))
+        return fallback
 
     # ------------------------------------------------------------------
     def _check_stop_reason(self, response: LLMResponse) -> None:

@@ -8,11 +8,20 @@
     的结果**必须成对出现**，从中间一刀切下去，API 直接返回 400。
     真要裁剪，得以「一个完整回合」为单位 —— 见 TurnWindowContext。
 
-同一个坑还有另外两个入口，都是「半截状态毒化历史」：
-    · assistant 有 tool_calls 但没有对应的 tool 结果  → 每轮都 400
-    · 连着两条 user 消息（提问后这轮失败了，用户又问一次）→ Anthropic 角色
-      不交替，同样每轮都 400（OpenAI 兼容接口宽容，所以只在换厂商时才炸）
-两个都靠 snapshot/restore 兜住 —— 见 Agent.run() 的事务语义。
+同一个坑一共有三个入口，都是「半截状态毒化历史」，症状一样：
+之后**每一轮**请求都 400，一次失败升级成整个会话报废。
+
+    1. assistant 有 tool_calls 但没有对应的 tool 结果
+    2. 连着两条 user 消息（提问后这轮失败了，用户又问一次）
+    3. 历史以 tool 结果或 nudge 的 user 消息结尾，没有收尾的 assistant
+       —— 下一轮追加 user 之后同样变成连续 user
+
+前两个走异常路径，靠 Agent.run() 的事务语义（snapshot/restore）兜住；
+第三个走**正常返回**路径（步数耗尽），事务照常提交，所以由 run() 自己
+补一条收尾的 assistant 消息。
+
+⚠️ 这三个在 OpenAI 兼容接口（DeepSeek 等）上都不报错 —— 它容忍连续 user。
+   所以靠真实调用永远测不出来，只能靠 tests/ 里按 Anthropic 约束写的哨兵。
 """
 
 from __future__ import annotations

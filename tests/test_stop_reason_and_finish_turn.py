@@ -16,6 +16,7 @@ from data_agent.core.errors import (
 )
 from data_agent.core.events import Event, TurnContinued, collect_sink
 from data_agent.core.messages import LLMResponse, ToolCall
+from data_agent.llm.anthropic_provider import AnthropicProvider
 from data_agent.llm.base import LLMProvider
 from data_agent.tools.base import Tool
 from data_agent.tools.registry import ToolRegistry
@@ -356,3 +357,165 @@ def test_requested_tools_包含被审批拒掉的调用():
     # 被拒也要有 tool_result，否则历史形状不合法（悬空的 tool_call）
     history = agent.context.render()
     assert len([m for m in history if m.role == "tool"]) == 1
+
+
+# ====================== 步数耗尽：第三个「半截状态」入口（正常返回路径）
+#
+# 前两个入口走异常路径，被 run() 的事务兜住了。这个是**正常返回**，
+# 事务照常提交 —— 所以必须自己保证提交的历史形状合法。
+
+class _NeverStops(LLMProvider):
+    """永远调工具，永不收尾 —— 模拟模型陷在循环里。"""
+    model = "never-stops"
+
+    def chat(self, messages, tools=None, system=None) -> LLMResponse:
+        return LLMResponse(text="再查一次", stop_reason="tool_use",
+                           tool_calls=[ToolCall("c", "echo", {"text": "x"})])
+
+
+def _has_consecutive_user(messages) -> bool:
+    roles = [m.role for m in messages]
+    return any(a == b == "user" for a, b in zip(roles, roles[1:]))
+
+
+def test_步数耗尽时历史以assistant收尾():
+    """不补收尾的话历史会以 tool 结果结尾，下一轮追加 user 就非法了。"""
+    agent, _ = make_agent([], max_steps=2)
+    agent.llm = _NeverStops()
+
+    answer = agent.run("停不下来的问题")
+    history = agent.context.render()
+
+    assert "最大步数 2" in answer
+    assert history[-1].role == "assistant"
+    assert history[-1].content == answer, "兜底文案必须进历史，不能只返回给用户"
+
+
+def test_步数耗尽后再提问不会产生连续user():
+    """注意要验**转换后**的形状。
+
+    这一路历史以 tool 消息结尾，中立结构里 [tool, user] 并不算连续 user ——
+    只有 Anthropic 把 tool_result 包进 user 消息之后才暴露。
+    光验中立结构的话这个测试没牙，撤掉修复也是绿的。
+    """
+    agent, _ = make_agent([], max_steps=2)
+    agent.llm = _NeverStops()
+    agent.run("问题一")
+    agent.run("问题二")
+
+    assert not _has_consecutive_user(agent.context.render())
+
+    roles = [m["role"] for m in AnthropicProvider.convert_messages(agent.context.render())]
+    assert not any(a == b for a, b in zip(roles, roles[1:])), roles
+
+
+def test_finish_turn撞上限时同样以assistant收尾():
+    """另一个变体：历史以 nudge 的 user 消息结尾，中立结构里就已经非法。"""
+    agent, _ = make_agent(
+        [LLMResponse(text="我觉得答完了", stop_reason="end_turn")],
+        max_steps=2,
+        finish_turn_hook=lambda o: TurnDecision.keep_going("继续"),
+    )
+    agent.run("问题一")
+    assert agent.context.render()[-1].role == "assistant"
+
+    agent.run("问题二")
+    assert not _has_consecutive_user(agent.context.render())
+
+
+def test_模型能看到上一轮卡住了():
+    """兜底消息进历史的第二个理由：不告诉模型，它下一轮会原样再试一遍死路。"""
+    agent, _ = make_agent([], max_steps=2)
+    agent.llm = _NeverStops()
+    agent.run("停不下来的问题")
+
+    seen_by_model = [m.content for m in agent.context.render()]
+    assert any("最大步数" in c for c in seen_by_model)
+
+
+# ============================================ 综合哨兵：所有路径的历史都合法
+def test_所有退出路径产生的历史在anthropic格式下都合法():
+    """不手写形状，而是让 Agent 真跑一遍各条路径，再统一验。
+
+    这样以后新增退出路径（新的钩子、新的错误类型）会自动被这个测试覆盖，
+    不用记得回来补形状。守的是「不变量」而不是「某个已知 bug」。
+
+    不变量有两条，都是 Anthropic 的硬约束（OpenAI 兼容接口宽容，
+    所以只靠真实调用永远测不出来）：
+        1. user / assistant 必须交替
+        2. 每个 tool_use 必须有对应的 tool_result
+    """
+    def normal():
+        a, _ = make_agent([LLMResponse(text="答完了", stop_reason="end_turn")])
+        a.run("问题")
+        return a
+
+    def with_tools():
+        a, _ = make_agent([
+            LLMResponse(text="查一下", stop_reason="tool_use",
+                        tool_calls=[ToolCall("c1", "echo", {"text": "a"})]),
+            LLMResponse(text="答完了", stop_reason="end_turn"),
+        ])
+        a.run("问题")
+        return a
+
+    def step_limit():
+        a, _ = make_agent([], max_steps=2)
+        a.llm = _NeverStops()
+        a.run("停不下来")
+        a.run("再问一个")
+        return a
+
+    def nudged():
+        a, _ = make_agent(
+            [LLMResponse(text="第一版", stop_reason="end_turn"),
+             LLMResponse(text="补全了", stop_reason="end_turn")],
+            finish_turn_hook=lambda o: (
+                TurnDecision.keep_going("补上占比") if o.step == 1 else TurnDecision.end()
+            ),
+        )
+        a.run("问题")
+        return a
+
+    def after_truncation():
+        a, _ = make_agent([
+            LLMResponse(text="半截", stop_reason="max_tokens"),
+            LLMResponse(text="这次好了", stop_reason="end_turn"),
+        ])
+        with pytest.raises(OutputTruncated):
+            a.run("问题一")
+        a.run("问题二")
+        return a
+
+    def after_denial():
+        a, _ = make_agent(
+            [LLMResponse(text="要调工具", stop_reason="tool_use",
+                         tool_calls=[ToolCall("c1", "echo", {"text": "a"})]),
+             LLMResponse(text="换个办法", stop_reason="end_turn")],
+            approval_hook=lambda call: (False, "测试拒绝"),
+        )
+        a.run("问题")
+        return a
+
+    scenarios = {
+        "普通问答": normal, "带工具": with_tools, "步数耗尽": step_limit,
+        "钩子推动继续": nudged, "截断后重试": after_truncation, "工具被拒": after_denial,
+    }
+
+    for name, build in scenarios.items():
+        history = build().context.render()
+        converted = AnthropicProvider.convert_messages(history)
+
+        roles = [m["role"] for m in converted]
+        dup = [(i, r) for i, (r, nxt) in enumerate(zip(roles, roles[1:])) if r == nxt]
+        assert not dup, f"{name}: 角色没交替 {roles}（重复在 {dup}）"
+
+        uses, results = set(), set()
+        for m in converted:
+            if isinstance(m["content"], list):
+                for b in m["content"]:
+                    if b.get("type") == "tool_use":
+                        uses.add(b["id"])
+                    elif b.get("type") == "tool_result":
+                        results.add(b["tool_use_id"])
+        assert uses == results, f"{name}: 悬空的工具调用 {uses ^ results}"
