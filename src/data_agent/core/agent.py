@@ -121,7 +121,41 @@ class Agent:
 
     # ------------------------------------------------------------------
     def run(self, user_input: str) -> str:
-        """跑一轮完整对话（内部可能调用多次工具），返回最终回答。"""
+        """跑一轮完整对话（内部可能调用多次工具），返回最终回答。
+
+        **事务语义：要么完整完成，要么历史回到进来之前的样子。**
+
+        为什么必须这样：一轮失败时（截断、模型拒绝、网络错、Ctrl-C），历史里会
+        留下半截状态，而这些状态会让**之后每一轮**都失败：
+
+            提问后失败      → [user]，用户再问一次 → [user, user]
+                              Anthropic 要求角色交替，直接 400
+            工具调用后失败  → assistant 有 tool_calls 却没有对应结果
+                              两家都 400
+
+        两者是同一个死亡模式的两个入口：**一次失败升级成整个会话报废**，
+        用户只能 /reset 清空所有上下文。
+
+        ⚠️ 特别注意第一种：OpenAI 兼容接口（DeepSeek 等）容忍连续 user 消息，
+           所以这个 bug 在本地怎么测都不出来，换到 Anthropic 才炸。
+           抽象层的意义之一就是不让这种差异漏到上层 —— 所以这里统一按
+           **最严格**的那家的约束来保证。
+        """
+        snapshot = self.context.snapshot()
+        completed = False
+        try:
+            answer = self._run_turn(user_input)
+            completed = True
+            return answer
+        finally:
+            # 用 finally 而不是 except，是为了连 KeyboardInterrupt 一起兜住 ——
+            # 用户 Ctrl-C 打断的半截回合同样会毒化历史。
+            if not completed:
+                self.context.restore(snapshot)
+
+    # ------------------------------------------------------------------
+    def _run_turn(self, user_input: str) -> str:
+        """run() 的实际循环体。失败时由 run() 负责回滚，这里只管往前跑。"""
         self.context.add(Message.user(user_input))
 
         for step in range(1, self.max_steps + 1):

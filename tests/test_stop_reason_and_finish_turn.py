@@ -209,26 +209,29 @@ def test_钩子不会让死循环逃过步数上限():
     assert "最大步数 3" in agent.run("x")
 
 
-# ====================================== 截断后历史必须保持可用（回归测试）
-def test_截断的消息不进历史():
-    """被截断的半截话不能留在历史里，否则模型下一轮会当成自己的结论。"""
+# ============================ run() 的事务语义（历史不能留半截状态）
+#
+# 一轮失败时历史里可能留下两种半截状态，都会让**之后每一轮**都 400：
+#     [user] 没有回复      → 用户再问 → [user, user]，Anthropic 角色不交替
+#     assistant 有 tool_calls 却没有结果  → 两家都拒
+# 所以 run() 是原子的：要么完整完成，要么历史回到进来之前。
+
+def test_截断后整轮回滚():
+    """不只是 assistant 那条 —— 连用户的提问一起回滚。
+
+    只删 assistant 会留下 [user]，用户重试就变成 [user, user]。
+    """
     agent, _ = make_agent([
         LLMResponse(text="华东大区的销售额是", stop_reason="max_tokens"),
     ])
     with pytest.raises(OutputTruncated):
         agent.run("华东卖了多少？")
 
-    assert all(m.role != "assistant" for m in agent.context.render())
-    assert [m.role for m in agent.context.render()] == ["user"]
+    assert agent.context.render() == [], "失败的一轮必须不留任何痕迹"
 
 
-def test_截断在工具调用中途时历史里不留悬空的tool_call():
-    """这是最致命的一种：历史里留下没有结果的 tool_call，
-    下一次请求会 400 ——
-        An assistant message with 'tool_calls' must be followed by
-        tool messages responding to each 'tool_call_id'
-    而且此后每一轮都报同样的错，整个会话就废了。
-    """
+def test_截断在工具调用中途时不留悬空的tool_call():
+    """最致命的一种：没有结果的 tool_call 会让之后每一轮都 400。"""
     agent, _ = make_agent([
         LLMResponse(
             text="", stop_reason="max_tokens",
@@ -238,13 +241,13 @@ def test_截断在工具调用中途时历史里不留悬空的tool_call():
     with pytest.raises(OutputTruncated):
         agent.run("查一下")
 
-    history = agent.context.render()
-    dangling = [m for m in history if m.role == "assistant" and m.tool_calls]
-    assert dangling == [], "历史里留下了没有结果的 tool_call，下一轮必然 400"
+    assert agent.context.render() == []
 
 
-def test_截断后对话还能继续():
-    """截断只该让这一轮失败，不该让整个会话报废。"""
+def test_失败后重试不会产生连续的user消息():
+    """核心回归：OpenAI 兼容接口容忍连续 user，Anthropic 不容忍。
+    在本地（DeepSeek）怎么测都不出来，换厂商才炸 —— 所以必须有测试守着。
+    """
     script = [
         LLMResponse(text="被砍断的半句", stop_reason="max_tokens",
                     tool_calls=[ToolCall("c1", "echo", {"text": "x"})]),
@@ -254,19 +257,66 @@ def test_截断后对话还能继续():
 
     with pytest.raises(OutputTruncated):
         agent.run("第一个问题")
-
-    # 用户看到报错后继续提问 —— 必须正常工作
     assert agent.run("第二个问题") == "这次答完了"
 
     roles = [m.role for m in agent.context.render()]
-    assert roles == ["user", "user", "assistant"]
+    assert roles == ["user", "assistant"]
+    assert not any(
+        a == b == "user" for a, b in zip(roles, roles[1:])
+    ), f"出现了连续的 user 消息：{roles}"
 
 
-def test_被拒绝的回复同样不进历史():
+def test_只回滚失败的那一轮():
+    """之前已经成功的对话必须保住 —— 别把澡盆和孩子一起倒了。"""
+    ok = LLMResponse(text="第一轮答完了", stop_reason="end_turn")
+    bad = LLMResponse(text="半截", stop_reason="max_tokens")
+
+    agent, _ = make_agent([ok])
+    agent.run("问题一")
+    before = list(agent.context.render())
+    assert len(before) == 2
+
+    agent.llm.script = [bad]
+    agent.llm.calls = 0
+    with pytest.raises(OutputTruncated):
+        agent.run("问题二")
+
+    assert agent.context.render() == before
+
+
+def test_被拒绝的回复同样整轮回滚():
     agent, _ = make_agent([LLMResponse(text="", stop_reason="refusal")])
     with pytest.raises(ModelRefused):
         agent.run("x")
-    assert [m.role for m in agent.context.render()] == ["user"]
+    assert agent.context.render() == []
+
+
+def test_用户中断也回滚():
+    """Ctrl-C 打断的半截回合同样会毒化历史，所以用 finally 而不是 except。"""
+    class Interrupting(LLMProvider):
+        model = "interrupting"
+        def chat(self, messages, tools=None, system=None):
+            raise KeyboardInterrupt
+
+    agent, _ = make_agent([])
+    agent.llm = Interrupting()
+    with pytest.raises(KeyboardInterrupt):
+        agent.run("x")
+    assert agent.context.render() == []
+
+
+def test_任意异常都回滚():
+    """网络错、SDK 报错……都一样。历史不该因为一次失败而残缺。"""
+    class Exploding(LLMProvider):
+        model = "exploding"
+        def chat(self, messages, tools=None, system=None):
+            raise RuntimeError("503 Service is too busy")
+
+    agent, _ = make_agent([])
+    agent.llm = Exploding()
+    with pytest.raises(RuntimeError):
+        agent.run("x")
+    assert agent.context.render() == []
 
 
 def test_正常回复照常进历史():

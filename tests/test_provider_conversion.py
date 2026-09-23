@@ -134,3 +134,67 @@ def test_openai_工具schema包在function里():
     converted = OpenAICompatibleProvider.convert_tools(TOOLS)[0]
     assert converted["type"] == "function"
     assert converted["function"]["parameters"] == TOOLS[0]["parameters"]
+
+
+# ============================================ Anthropic 的角色交替约束
+def _roles(converted: list[dict]) -> list[str]:
+    return [m["role"] for m in converted]
+
+
+def test_anthropic_连续的user消息是非法的():
+    """守住这类错误本身。
+
+    Anthropic 要求 user / assistant 交替。OpenAI 兼容接口（DeepSeek 等）
+    对此宽容，所以「连续两条 user」在本地怎么测都不出来，换厂商才炸。
+    这个测试就是那个在本地也会红的哨兵。
+    """
+    bad = [Message.user("第一个问题"), Message.user("第二个问题")]
+    roles = _roles(AnthropicProvider.convert_messages(bad))
+    consecutive = [a for a, b in zip(roles, roles[1:]) if a == b]
+    assert consecutive, "这个测试本身失效了：它应该能造出非法输入"
+
+
+def test_agent产生的历史在anthropic格式下角色永远交替():
+    """把 Agent 可能产生的几种历史形状都过一遍。"""
+    shapes = {
+        "纯问答": [
+            Message.user("你好"),
+            Message(role="assistant", content="你好"),
+        ],
+        "带工具调用": history_with_parallel_calls() + [
+            Message(role="assistant", content="分析完了"),
+        ],
+        "多轮": [
+            Message.user("问题一"),
+            Message(role="assistant", content="答案一"),
+            Message.user("问题二"),
+            Message(role="assistant", content="答案二"),
+        ],
+        "finish_turn 推动继续": [
+            Message.user("问题"),
+            Message(role="assistant", content="第一版答案"),
+            Message.user("还缺占比，补上"),          # nudge
+            Message(role="assistant", content="补充后的答案"),
+        ],
+    }
+    for name, history in shapes.items():
+        roles = _roles(AnthropicProvider.convert_messages(history))
+        pairs = [(a, b) for a, b in zip(roles, roles[1:]) if a == b]
+        assert not pairs, f"{name}: 角色没交替 {roles}"
+
+
+def test_anthropic_每个tool_use都有对应的tool_result():
+    """另一个入口的同款死亡模式：悬空的 tool_use 让之后每轮都 400。"""
+    converted = AnthropicProvider.convert_messages(history_with_parallel_calls())
+
+    use_ids, result_ids = set(), set()
+    for m in converted:
+        if not isinstance(m["content"], list):
+            continue
+        for block in m["content"]:
+            if block.get("type") == "tool_use":
+                use_ids.add(block["id"])
+            elif block.get("type") == "tool_result":
+                result_ids.add(block["tool_use_id"])
+
+    assert use_ids == result_ids, f"悬空的调用: {use_ids ^ result_ids}"

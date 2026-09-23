@@ -7,11 +7,18 @@
     不能简单地「只保留最后 N 条消息」。assistant 的 tool_calls 和后面 role="tool"
     的结果**必须成对出现**，从中间一刀切下去，API 直接返回 400。
     真要裁剪，得以「一个完整回合」为单位 —— 见 TurnWindowContext。
+
+同一个坑还有另外两个入口，都是「半截状态毒化历史」：
+    · assistant 有 tool_calls 但没有对应的 tool 结果  → 每轮都 400
+    · 连着两条 user 消息（提问后这轮失败了，用户又问一次）→ Anthropic 角色
+      不交替，同样每轮都 400（OpenAI 兼容接口宽容，所以只在换厂商时才炸）
+两个都靠 snapshot/restore 兜住 —— 见 Agent.run() 的事务语义。
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from .messages import Message
 
@@ -35,6 +42,22 @@ class BaseContext(ABC):
     def clear(self) -> None:
         """清空。"""
 
+    @abstractmethod
+    def snapshot(self) -> Any:
+        """拍一张当前状态的快照，交给 restore() 用。
+
+        用来给 Agent.run() 提供**事务语义**：一轮对话要么完整完成，
+        要么历史回到进来之前的样子，不留任何残骸。
+
+        为什么需要：一轮失败（被截断、网络错、用户 Ctrl-C）时，历史里可能
+        留下「有提问没回答」或「有工具调用没结果」的半截状态。这种状态会让
+        **之后每一轮**请求都 400，一次失败升级成整个会话报废。
+        """
+
+    @abstractmethod
+    def restore(self, snapshot: Any) -> None:
+        """回滚到 snapshot() 拍下的状态。"""
+
 
 class FullContext(BaseContext):
     """全量保留。够用到你开始撞上下文上限为止。"""
@@ -50,6 +73,15 @@ class FullContext(BaseContext):
 
     def clear(self) -> None:
         self._history.clear()
+
+    # 快照存整个列表的浅拷贝，而不是只记长度。
+    # 只记长度对「只追加」的实现够用，但压缩类上下文会**改写**已有消息，
+    # 那时候长度回滚不了内容。拷贝一份最省心，历史规模也就几百条。
+    def snapshot(self) -> list[Message]:
+        return list(self._history)
+
+    def restore(self, snapshot: list[Message]) -> None:
+        self._history[:] = snapshot
 
     def __len__(self) -> int:
         return len(self._history)
