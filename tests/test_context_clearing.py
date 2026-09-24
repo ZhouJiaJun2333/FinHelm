@@ -16,14 +16,15 @@ from pydantic import BaseModel
 from data_agent.core.agent import Agent
 from data_agent.core.context import ToolResultClearingContext
 from data_agent.core.errors import OutputTruncated
-from data_agent.core.events import ContextCleared, Event, collect_sink
+from data_agent.core.events import ContextCleared
 from data_agent.core.messages import LLMResponse, Message, ToolCall, Usage
 from data_agent.core.tokens import estimate_context, estimate_message
 from data_agent.llm.anthropic_provider import AnthropicProvider
-from data_agent.llm.base import LLMProvider
 from data_agent.llm.openai_provider import OpenAICompatibleProvider
 from data_agent.tools.base import Tool, ToolOutput
 from data_agent.tools.registry import ToolRegistry
+
+from fakes import ScriptedProvider, make_agent
 
 # 一张像样的 SQL 结果表：约 1.4k token
 BIG_RESULT = "| 华东 | 8100531.47 | 3017 |\n" * 60
@@ -232,18 +233,6 @@ class BigTool(Tool):
         return ToolOutput(True, BIG_RESULT, summary=f"60 行 × 3 列（{args.sql}）")
 
 
-class RecordingProvider(LLMProvider):
-    model = "recording"
-
-    def __init__(self, script: list[LLMResponse]) -> None:
-        self.script = script
-        self.seen: list[list[Message]] = []
-
-    def chat(self, messages, tools=None, system=None) -> LLMResponse:
-        self.seen.append(list(messages))
-        return self.script[min(len(self.seen) - 1, len(self.script) - 1)]
-
-
 def calls(n: int) -> list[LLMResponse]:
     return [
         LLMResponse(text="", stop_reason="tool_use",
@@ -252,21 +241,13 @@ def calls(n: int) -> list[LLMResponse]:
     ]
 
 
-def make_agent(script, **ctx_kw) -> tuple[Agent, RecordingProvider, list[Event]]:
+def make_clearing_agent(script, **ctx_kw):
+    """带清理上下文、工具是一张大表的 Agent。返回 (agent, 事件)。"""
     ctx_kw.setdefault("trigger_tokens", 3_000)
     ctx_kw.setdefault("keep_recent", 1)
     ctx_kw.setdefault("clear_at_least", 500)
-    events: list[Event] = []
-    llm = RecordingProvider(script)
-    agent = Agent(
-        llm=llm,
-        tools=ToolRegistry([BigTool()]),
-        system_prompt="测试",
-        context=ToolResultClearingContext(**ctx_kw),
-        on_event=collect_sink(events),
-        max_steps=20,
-    )
-    return agent, llm, events
+    return make_agent(script, tools=[BigTool()],
+                      context=ToolResultClearingContext(**ctx_kw), max_steps=20)
 
 
 def test_传进去的空上下文不会被悄悄换掉():
@@ -274,19 +255,19 @@ def test_传进去的空上下文不会被悄悄换掉():
     空的上下文是 False，配好的清理策略被换成了全量保留 —— 不报错，就是不生效。
     """
     ctx = ToolResultClearingContext()
-    agent = Agent(llm=RecordingProvider([]), tools=ToolRegistry([]),
+    agent = Agent(llm=ScriptedProvider(), tools=ToolRegistry([]),
                   system_prompt="", context=ctx)
     assert agent.context is ctx
 
 
 def test_agent在请求前清理_模型看到的是占位():
-    agent, llm, events = make_agent(calls(4) + [LLMResponse(text="完", stop_reason="end_turn")])
+    agent, events = make_clearing_agent(calls(4) + [LLMResponse(text="完", stop_reason="end_turn")])
     agent.run("各区域销售额")
 
     assert any(isinstance(e, ContextCleared) for e in events)
-    assert any(cleared(c) for c in tool_contents(llm.seen[-1]))
+    assert any(cleared(c) for c in tool_contents(agent.llm.seen[-1]))
     # 工具给的摘要一路穿过 ToolOutput → Agent → Message，最后出现在占位里
-    assert "60 行 × 3 列（SELECT 0）" in tool_contents(llm.seen[-1])[0]
+    assert "60 行 × 3 列（SELECT 0）" in tool_contents(agent.llm.seen[-1])[0]
 
 
 def test_除了清理那一步_每次请求都是上一次请求的纯追加():
@@ -295,7 +276,7 @@ def test_除了清理那一步_每次请求都是上一次请求的纯追加():
     如果每次请求都改历史（比如「永远只留最近 3 条」的滑动窗口），
     这个测试里违规次数会等于请求次数。
     """
-    agent, llm, events = make_agent(calls(8) + [LLMResponse(text="完", stop_reason="end_turn")])
+    agent, events = make_clearing_agent(calls(8) + [LLMResponse(text="完", stop_reason="end_turn")])
     agent.run("各区域销售额")
 
     def shape(msgs):
@@ -304,7 +285,7 @@ def test_除了清理那一步_每次请求都是上一次请求的纯追加():
                 for m in msgs]
 
     rewrites = [
-        i for i, (prev, cur) in enumerate(zip(llm.seen, llm.seen[1:]))
+        i for i, (prev, cur) in enumerate(zip(agent.llm.seen, agent.llm.seen[1:]))
         if shape(cur)[: len(prev)] != shape(prev)
     ]
     clearings = sum(1 for e in events if isinstance(e, ContextCleared))
@@ -317,7 +298,7 @@ def test_除了清理那一步_每次请求都是上一次请求的纯追加():
 
 
 def test_一轮失败回滚时清理状态也回滚():
-    agent, llm, _ = make_agent(
+    agent, _ = make_clearing_agent(
         calls(4) + [LLMResponse(text="写到一半", stop_reason="max_tokens")]
     )
     with pytest.raises(OutputTruncated):
@@ -328,7 +309,7 @@ def test_一轮失败回滚时清理状态也回滚():
 
 
 def test_清理后历史在anthropic格式下仍然合法():
-    agent, _, _ = make_agent(calls(6) + [LLMResponse(text="完", stop_reason="end_turn")])
+    agent, _ = make_clearing_agent(calls(6) + [LLMResponse(text="完", stop_reason="end_turn")])
     agent.run("问题一")
     agent.run("问题二")
 

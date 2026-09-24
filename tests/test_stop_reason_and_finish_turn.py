@@ -6,55 +6,19 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel, Field
 
-from data_agent.core.agent import Agent, TurnDecision, TurnOutcome
+from data_agent.core.agent import TurnDecision, TurnOutcome
 from data_agent.core.errors import (
     ModelRefused,
     OutputTruncated,
     UnexpectedStopReason,
 )
-from data_agent.core.events import Event, TurnContinued, collect_sink
+from data_agent.core.events import TurnContinued
 from data_agent.core.messages import LLMResponse, ToolCall, Usage
 from data_agent.llm.anthropic_provider import AnthropicProvider
 from data_agent.llm.base import LLMProvider
-from data_agent.tools.base import Tool
-from data_agent.tools.registry import ToolRegistry
 
-
-class ScriptedProvider(LLMProvider):
-    model = "scripted"
-
-    def __init__(self, script: list[LLMResponse]) -> None:
-        self.script = script
-        self.calls = 0
-
-    def chat(self, messages, tools=None, system=None) -> LLMResponse:
-        self.calls += 1
-        return self.script[min(self.calls - 1, len(self.script) - 1)]
-
-
-class EchoTool(Tool):
-    name = "echo"
-    description = "回显"
-
-    class Args(BaseModel):
-        text: str = Field(default="x")
-
-    def run(self, args: Args) -> str:
-        return f"echo: {args.text}"
-
-
-def make_agent(script, **kw) -> tuple[Agent, list[Event]]:
-    events: list[Event] = []
-    agent = Agent(
-        llm=ScriptedProvider(script),
-        tools=ToolRegistry([EchoTool()]),
-        system_prompt="测试",
-        on_event=collect_sink(events),
-        **kw,
-    )
-    return agent, events
+from fakes import make_agent
 
 
 # ====================================================== stop_reason 分诊

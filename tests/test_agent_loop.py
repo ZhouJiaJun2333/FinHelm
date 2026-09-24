@@ -10,44 +10,18 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from data_agent.core.agent import Agent
 from data_agent.core.context import FullContext, TurnWindowContext
-from data_agent.core.events import Event, LLMResponded, ToolFinished, collect_sink
+from data_agent.core.events import LLMResponded, ToolFinished
 from data_agent.core.messages import LLMResponse, Message, ToolCall
-from data_agent.llm.base import LLMProvider
 from data_agent.tools.base import Tool
 from data_agent.tools.registry import ToolRegistry
 
+from fakes import EchoTool, make_agent
+
 
 # ------------------------------------------------------------------ 测试替身
-class ScriptedProvider(LLMProvider):
-    """照剧本走的假模型：第 n 次被调用就返回剧本第 n 条。"""
-
-    model = "scripted"
-
-    def __init__(self, script: list[LLMResponse]) -> None:
-        self.script = script
-        self.seen_messages: list[list[Message]] = []
-
-    def chat(self, messages, tools=None, system=None) -> LLMResponse:
-        self.seen_messages.append(list(messages))
-        idx = min(len(self.seen_messages) - 1, len(self.script) - 1)
-        return self.script[idx]
-
-
-class EchoTool(Tool):
-    name = "echo"
-    description = "把输入原样返回"
-
-    class Args(BaseModel):
-        text: str = Field(description="要回显的文本")
-
-    def run(self, args: Args) -> str:
-        return f"echo: {args.text}"
-
-
 class BoomTool(Tool):
     name = "boom"
     description = "总是抛异常，用来测试错误处理"
@@ -64,21 +38,9 @@ def registry() -> ToolRegistry:
     return ToolRegistry([EchoTool(), BoomTool()])
 
 
-def make_agent(script: list[LLMResponse], registry: ToolRegistry, **kw) -> tuple[Agent, list[Event]]:
-    events: list[Event] = []
-    agent = Agent(
-        llm=ScriptedProvider(script),
-        tools=registry,
-        system_prompt="测试用",
-        on_event=collect_sink(events),
-        **kw,
-    )
-    return agent, events
-
-
 # ------------------------------------------------------------------ 测试用例
 def test_没有工具调用时直接返回(registry):
-    agent, _ = make_agent([LLMResponse(text="直接回答")], registry)
+    agent, _ = make_agent([LLMResponse(text="直接回答")], tools=registry)
     assert agent.run("你好") == "直接回答"
 
 
@@ -87,7 +49,7 @@ def test_调用工具后再回答(registry):
         LLMResponse(text="我查一下", tool_calls=[ToolCall("c1", "echo", {"text": "hi"})]),
         LLMResponse(text="查完了"),
     ]
-    agent, events = make_agent(script, registry)
+    agent, events = make_agent(script, tools=registry)
 
     assert agent.run("回显 hi") == "查完了"
 
@@ -103,7 +65,7 @@ def test_工具抛异常不会中断Agent(registry):
         LLMResponse(text="试试", tool_calls=[ToolCall("c1", "boom", {})]),
         LLMResponse(text="知道了，换个方式"),
     ]
-    agent, events = make_agent(script, registry)
+    agent, events = make_agent(script, tools=registry)
 
     assert agent.run("跑一下") == "知道了，换个方式"
 
@@ -117,7 +79,7 @@ def test_参数不合法时返回错误而不是抛异常(registry):
         LLMResponse(text="", tool_calls=[ToolCall("c1", "echo", {"wrong_field": 1})]),
         LLMResponse(text="改好了"),
     ]
-    agent, events = make_agent(script, registry)
+    agent, events = make_agent(script, tools=registry)
     agent.run("x")
 
     finished = [e for e in events if isinstance(e, ToolFinished)]
@@ -130,7 +92,7 @@ def test_调用不存在的工具(registry):
         LLMResponse(text="", tool_calls=[ToolCall("c1", "不存在的工具", {})]),
         LLMResponse(text="好吧"),
     ]
-    agent, events = make_agent(script, registry)
+    agent, events = make_agent(script, tools=registry)
     agent.run("x")
 
     finished = [e for e in events if isinstance(e, ToolFinished)]
@@ -144,7 +106,7 @@ def test_审批钩子拒绝时模型仍能收到结果(registry):
         LLMResponse(text="那算了"),
     ]
     agent, _ = make_agent(
-        script, registry, approval_hook=lambda call: (False, "用户不同意"),
+        script, tools=registry, approval_hook=lambda call: (False, "用户不同意"),
     )
     assert agent.run("x") == "那算了"
 
@@ -158,7 +120,7 @@ def test_审批钩子拒绝时模型仍能收到结果(registry):
 def test_达到步数上限会停下(registry):
     # 剧本只有一条：永远要求调工具，会一直循环
     script = [LLMResponse(text="", tool_calls=[ToolCall("c", "echo", {"text": "x"})])]
-    agent, _ = make_agent(script, registry, max_steps=3)
+    agent, _ = make_agent(script, tools=registry, max_steps=3)
 
     answer = agent.run("死循环")
     assert "最大步数 3" in answer
@@ -170,7 +132,7 @@ def test_每轮都会把完整工具表发给模型(registry):
         LLMResponse(text="", tool_calls=[ToolCall("c1", "echo", {"text": "a"})]),
         LLMResponse(text="done"),
     ]
-    agent, events = make_agent(script, registry)
+    agent, events = make_agent(script, tools=registry)
     agent.run("x")
 
     responded = [e for e in events if isinstance(e, LLMResponded)]
