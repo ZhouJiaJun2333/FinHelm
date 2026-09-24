@@ -106,7 +106,7 @@ pytest
 │   ├── runner.py / graders.py    跑一道题 / 判分（判分器有单元测试）
 │   ├── report.py / run.py        报告 / 命令行入口
 │   └── runs/                     每次运行的记录（不进 git）
-└── tests/                      246 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
+└── tests/                      248 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
     ├── test_agent_loop.py                    主循环行为
     ├── test_stop_reason_and_finish_turn.py   完成判定 + 结束钩子
     ├── test_provider_conversion.py           两家 provider 的格式转换

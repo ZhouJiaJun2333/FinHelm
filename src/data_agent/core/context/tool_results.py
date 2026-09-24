@@ -105,7 +105,7 @@ class ClearOldToolResults(ContextEdit):
         return ToolResultsCleared(frozenset(m.tool_call_id for m in targets))
 
     def _clearable(self, entries: list[Entry]) -> list[Message]:
-        """能清的工具结果：还没清过、不在排除名单里、不是最近 keep_recent 条。"""
+        """能清的工具结果：还没清过、不在排除名单里、不是最近 keep_recent 条，而且换成占位确实更短。"""
         messages = [e for e in entries if isinstance(e, Message)]
         cleared = _cleared_ids(entries)
         tool_names = {c.id: c.name for m in messages for c in m.tool_calls}
@@ -115,7 +115,18 @@ class ClearOldToolResults(ContextEdit):
             m for m in older
             if m.tool_call_id not in cleared
             and tool_names.get(m.tool_call_id) not in self.exclude_tools
+            and self._saves_space(m)
         ]
+
+    def _saves_space(self, m: Message) -> bool:
+        """占位比原文短才值得换。
+
+        占位本身有七八十个字，短结果换了反而更长：审批拒绝的「用户拒绝执行：xxx」、
+        「1 行：total=4242」这种。拒绝消息被换掉还会**改变意思** —— 占位说「重新调用一次即可」，
+        等于鼓励模型再去试一次被拒绝的操作。按长度一刀切，这两个问题一起没了，不用给拒绝消息
+        单独打标记（Claude Code 的 microcompact 也只清大结果）。
+        """
+        return estimate_message(m) > estimate_text(self.placeholder(m))
 
     def status(self, entries: list[Entry]) -> str | None:
         n = len(_cleared_ids(entries))

@@ -127,7 +127,7 @@ def test_强制清理不看阈值_也不看最少要省多少():
     ctx = Context([clear])
     ctx.add(Message.user("q"))
     ctx.add(Message(role="assistant", tool_calls=[ToolCall("c1", "run_sql", {})]))
-    ctx.add(Message.tool_result("c1", "一点点结果"))
+    ctx.add(Message.tool_result("c1", "| 华东 | 8100531.47 |\n" * 20))   # 比占位长，但远不到 clear_at_least
 
     assert ctx.maintain(measure) == []
     [event] = ctx.maintain(measure, force=True)

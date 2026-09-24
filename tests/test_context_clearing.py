@@ -321,3 +321,30 @@ def test_清理后历史在anthropic格式下仍然合法():
         if isinstance(m["content"], list):
             for b in m["content"]:
                 assert b.get("type") != "tool_result" or b["content"], "tool_result 不能是空的"
+
+
+# ============================================ 占位比原文还长的，不换
+def _history_with(result: str) -> Context:
+    ctx = Context([ClearOldToolResults(trigger_tokens=1, keep_recent=0, clear_at_least=1)])
+    ctx.add(Message.user("q"))
+    ctx.add(Message(role="assistant", tool_calls=[ToolCall("c1", "run_sql", {})]))
+    ctx.add(Message.tool_result("c1", result))
+    return ctx
+
+
+def test_审批拒绝的结果不会被换成_重新调用即可():
+    """拒绝消息只有一句话，换成占位反而更长；更糟的是占位会说「重新调用一次即可」，
+    等于鼓励模型再试一次被拒绝的操作。"""
+    ctx = _history_with("用户拒绝执行：这张表有敏感字段")
+    assert ctx.maintain(measure, force=True) == []
+    assert ctx.render()[-1].content == "用户拒绝执行：这张表有敏感字段"
+
+
+def test_很小的结果不换_大结果照常换():
+    small = _history_with("| total |\n| 4242 |")
+    assert small.maintain(measure, force=True) == []
+
+    big = _history_with("| 华东 | 8100531.47 |\n" * 80)
+    [event] = big.maintain(measure, force=True)
+    assert big.render()[-1].content.startswith(ClearOldToolResults.CLEARED_PREFIX)
+    assert event.tokens_after < event.tokens_before
