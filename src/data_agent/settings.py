@@ -73,12 +73,6 @@ class Settings(BaseSettings):
     # 实测 deepseek-flash 写一份两三千字的摘要，输出 5000~7000 token，平时的 8192 太紧。
     # 不能再高：Anthropic SDK 不开流式时，max_tokens 超过约 21333 直接报错。
     context_compact_max_tokens: int = 16_000
-    # 写摘要时原样发对话、末尾追加「请写摘要」，复用平时请求的缓存（学 Claude Code）。
-    # 关掉就是把对话序列化成文本再发（学 pi），命中不了。见 llm_summarizer。
-    # 多轮评测（2026-09-25，DeepSeek 官方，B/C 段各 3 次）：写摘要命中 27% → 99%，
-    # 每段会话未命中 13.9 万 → 9.1 万；写一份摘要的输出 5.8k → 1.6k token（少想很多）；
-    # 准确率、回忆、口径约定都没掉
-    context_compact_reuse_cache: bool = True
     # 给模型输出留的余量。窗口小的模型，触发线会被压到「窗口 - 这个数」以下。
     # 安全余量放在这里，而不是加在估算系数上 —— 估算只管尽量准。
     context_reserve_tokens: int = 16_384

@@ -14,13 +14,11 @@
     · 保留最近约 2 万 token 的原文（pi 的 keepRecentTokens），其余换成摘要
     · 切口不落在工具结果上（tool_call 和结果必须成对）
     · 摘要滚动更新：第二次压缩时，输入里带着上一份摘要，要求保留并更新它
-    · 对话先序列化成一段文本再交给模型，不带工具 —— 模型不会接着对话往下聊，
-      也不会去调工具，请求体里也没有 tool_use 块（Anthropic 要求有 tool_use
-      就得带工具定义）。代价是吃不到缓存 —— 所以现在默认换成了 Claude Code 的发法
-      （原样发对话、末尾追加要求，见 llm_summarizer），序列化只在兜底时用
     · 摘要是一个标记，原文还在历史里（pi 是日志里的一条 compaction 记录）
 
 ── 和 pi 不一样的地方 ──────────────────────────────────────────────
+    · 写摘要不把对话序列化成文本，而是原样发、末尾追加要求（学 Claude Code），
+      和平时的请求共用前缀、命中缓存。评测数据见 llm_summarizer
     · 切口只落在**真人提问**上（turns.turn_starts），且至少保留当前这一轮。
       pi 能切在一轮中间（split turn），再给前半轮单写一份摘要。我们一轮最多
       十几步、轮内膨胀有清理兜着，先不做。
@@ -33,13 +31,12 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Callable, Protocol
 
 from ..errors import CompactionFailed
-from ..messages import LLMResponse, Message, Usage
+from ..messages import Message, Usage
 from ..tokens import estimate_message
 from .base import ContextEdit, Entry, Marker, Prompt
 from .turns import turn_starts
@@ -61,7 +58,7 @@ class Summarize(Protocol):
 
     messages  要压掉的那些消息（可能以上一份摘要开头）—— 正好是上一次请求的**开头一段**
     prompt    上一次请求的系统提示词和工具定义。带上它们、原样发 messages，写摘要的请求
-              就和上一次请求共用前缀，能命中缓存（见 llm_summarizer 的 reuse_cache）
+              就和上一次请求共用前缀，能命中缓存（见 llm_summarizer）
     """
 
     def __call__(self, messages: list[Message], prompt: Prompt | None = None) -> Summary: ...
@@ -179,27 +176,14 @@ def _last_compaction(entries: list[Entry]) -> int | None:
 
 
 # ====================================================== 用模型写摘要
-SUMMARY_SYSTEM = "你是一个对话摘要助手。你只输出摘要，不回答对话里的问题，也不调用任何工具。"
-
+# 对话原样留在前面（和上一次请求同一个前缀），末尾追加这一条。模型这时还是「数据分析师」、
+# 手边还有工具，所以开头先把话说死：这不是新问题，别调工具。
 # 小节参考 pi（目标 / 约束偏好 / 进度 / 关键决定 / 下一步 / 关键上下文）和
 # Claude Code 的 /compact，按数据分析场景改：表结构和数字是最贵的，丢了就得重查。
-SUMMARY_PROMPT = """下面是一个数据分析助手和用户的对话记录。请把它写成一份摘要，之后的对话只能看到这份摘要，看不到原文。
+SUMMARY_PROMPT = """[这不是新的分析问题。上下文快满了，请先停下手上的工作，把上面到这里为止的整段对话写成一份摘要，
+之后的对话只能看到这份摘要，看不到原文。不要调用任何工具，不要继续回答之前的问题。]
 
-<conversation>
-{conversation}
-</conversation>
-
-{instructions}"""
-
-# 复用缓存的写法：对话原样留在前面（和上一次请求同一个前缀），末尾追加这一条。
-# 模型这时还是「数据分析师」、手边还有工具，所以开头先把话说死：这不是新问题，别调工具。
-CACHED_SUMMARY_PROMPT = """[这不是新的分析问题。上下文快满了，请先停下手上的工作，把上面到这里为止的整段对话写成一份摘要，
-之后的对话只能看到这份摘要，看不到原文。不要调用任何工具，不要继续回答之前的问题。
-对话里「请继续完成上面的任务」这类催促是 Agent 自动追加的，不是用户说的。]
-
-{instructions}"""
-
-SUMMARY_INSTRUCTIONS = """按下面的小节写，某一节没有内容就写「无」：
+按下面的小节写，某一节没有内容就写「无」：
 
 ## 用户的目标
 一两句话：用户想分析什么。
@@ -207,7 +191,8 @@ SUMMARY_INSTRUCTIONS = """按下面的小节写，某一节没有内容就写「
 ## 用户的原话
 按顺序列出用户的每一条消息，原样或接近原样保留；很长的消息保留关键部分。
 用户的原话是整段对话里最不能丢的 —— 模型的转述会悄悄漏掉「不含退款」这类限定。
-之前摘要里已有的原话也照样保留。（「Agent 自动追加的提示」不是用户说的，不要列。）
+之前摘要里已有的原话也照样保留。「请继续完成上面的任务」这类催促是 Agent 自动追加的，
+不是用户说的，不要列。
 
 ## 口径与偏好
 用户指定或确认过的统计口径、时间范围、单位、格式要求。
@@ -243,35 +228,6 @@ SCRATCHPAD_OUTPUT = """- 先在 <analysis> 标签里按时间顺序逐条过一�
   查到了什么数字、报过什么错。确认没有遗漏后，再在 <summary> 标签里输出摘要。
   <analysis> 只是草稿，不会被保留。"""
 
-# 序列化时每条工具结果最多保留多少字符。完整的表格对写摘要没什么用，
-# 结论一般在助手的回复里；留个开头足够看出查到了什么。
-TOOL_RESULT_CLIP = 2000
-
-
-def serialize(messages: list[Message]) -> str:
-    """把消息列表写成一段纯文本记录，交给模型写摘要。"""
-    parts: list[str] = []
-    for m in messages:
-        if m.role == "user":
-            # nudge 也是 user 角色，但不是用户说的 —— 标出来，别被当成「用户的原话」
-            speaker = "Agent 自动追加的提示" if m.meta.synthetic else "用户"
-            parts.append(f"[{speaker}]\n{m.content}")
-        elif m.role == "assistant":
-            if m.content:
-                parts.append(f"[助手]\n{m.content}")
-            for c in m.tool_calls:
-                args = json.dumps(c.arguments, ensure_ascii=False)
-                parts.append(f"[助手调用工具 {c.name}]\n{args}")
-        elif m.role == "tool":
-            parts.append(f"[工具结果]\n{_clip(m.content)}")
-    return "\n\n".join(parts)
-
-
-def _clip(text: str) -> str:
-    if len(text) <= TOOL_RESULT_CLIP:
-        return text
-    return f"{text[:TOOL_RESULT_CLIP]}\n…（后面省略 {len(text) - TOOL_RESULT_CLIP} 字符）"
-
 
 def extract_summary(text: str) -> str:
     """从回复里取出摘要正文：有 <summary> 就取里面的，没有就去掉草稿后取剩下的。
@@ -287,51 +243,46 @@ def extract_summary(text: str) -> str:
 
 def llm_summarizer(
     llm: LLMProvider, *, scratchpad: bool | None = None, max_tokens: int | None = None,
-    reuse_cache: bool = True,
 ) -> Summarize:
     """用 llm 写摘要。
 
     Args:
-        scratchpad:  要不要让模型先在 <analysis> 里打草稿。默认看模型自己会不会
-                     思考（llm.native_thinking）：会思考的再打草稿等于想两遍，白花输出 token。
-        max_tokens:  这一次的输出上限。思考 token 也算输出，平时的上限可能不够。
-        reuse_cache: 两种发法，见下。
+        scratchpad: 要不要让模型先在 <analysis> 里打草稿。默认看模型自己会不会
+                    思考（llm.native_thinking）：会思考的再打草稿等于想两遍，白花输出 token。
+        max_tokens: 这一次的输出上限。思考 token 也算输出，平时的上限可能不够。
 
-    ── 两种发法 ──────────────────────────────────────────────────────
-    序列化（学 pi）：对话写成一段纯文本，换一个「摘要助手」的系统提示词、不带工具发。
-        模型只是在读一份记录，不会接着聊、不会调工具。但请求从第一个字就和平时不同，
-        一个 token 都命中不了缓存 —— 压缩时上下文最大，这一次全价。
-    复用缓存（reuse_cache，默认，学 Claude Code）：系统提示词、工具定义、消息都和上一次请求
-        一模一样，只在末尾追加一条「请写摘要」。前面几万 token 全部命中。
-        代价是模型还是「数据分析师」、手边有工具：可能去调工具而不写摘要。
-        那样就退回序列化再写一次（两次的花费都记账）。
-    没传 prompt（不知道平时的请求长什么样）时只能序列化。
+    ── 为什么原样发（学 Claude Code） ────────────────────────────────
+    系统提示词、工具定义、消息都和上一次请求一模一样，只在末尾追加一条「请写摘要」，
+    前面几万 token 全部命中缓存。压缩发生在上下文最大的时候，这一次最贵。
+
+    以前学 pi：对话序列化成一段纯文本，换一个「摘要助手」的系统提示词、不带工具发 ——
+    模型只是在读一份记录，不会接着聊、不会调工具。但请求从第一个字就和平时不同，
+    一个 token 都命中不了。多轮评测（2026-09-25，DeepSeek 官方）里换过来之后：写摘要命中
+    27% → 99%，每段会话未命中少 35%，一份摘要的输出 5.8k → 1.6k token（原文就在上下文里，
+    不用把几万字的记录从头理一遍），准确率、回忆、用户定的口径都没掉。
+
+    代价是模型手边有工具，可能去调工具而不写摘要：那就原样再发一次（还是命中缓存，很便宜），
+    还不写就算失败，这一轮按事务回滚。
+
+    没传 prompt（调用方没说平时的请求长什么样）时不带系统提示词和工具发：照样能写，
+    只是吃不到缓存。Agent 每次都会传。
     """
     if scratchpad is None:
         scratchpad = not llm.native_thinking
-    instructions = SUMMARY_INSTRUCTIONS.format(
-        output_format=SCRATCHPAD_OUTPUT if scratchpad else DIRECT_OUTPUT)
-
-    def serialized(messages: list[Message]) -> LLMResponse:
-        text = SUMMARY_PROMPT.format(conversation=serialize(messages), instructions=instructions)
-        return llm.chat(messages=[Message.user(text)], system=SUMMARY_SYSTEM, max_tokens=max_tokens)
-
-    def cached(messages: list[Message], prompt: Prompt) -> LLMResponse:
-        ask = Message.user(CACHED_SUMMARY_PROMPT.format(instructions=instructions))
-        return llm.chat(messages=[*messages, ask], tools=list(prompt.tools) or None,
-                        system=prompt.system, max_tokens=max_tokens)
+    ask = Message.user(SUMMARY_PROMPT.format(
+        output_format=SCRATCHPAD_OUTPUT if scratchpad else DIRECT_OUTPUT))
 
     def summarize(messages: list[Message], prompt: Prompt | None = None) -> Summary:
+        prompt = prompt or Prompt()
         usage = Usage()
-        if reuse_cache and prompt is not None:
-            response = cached(messages, prompt)
+        for _ in range(2):
+            response = llm.chat(messages=[*messages, ask], tools=list(prompt.tools) or None,
+                                system=prompt.system, max_tokens=max_tokens)
             usage += response.usage
-            if response.tool_calls and not extract_summary(response.text):
-                response = serialized(messages)      # 模型去调工具了：换个发法再写
-                usage += response.usage
+            if not (response.tool_calls and not extract_summary(response.text)):
+                break
         else:
-            response = serialized(messages)
-            usage += response.usage
+            raise CompactionFailed("写摘要时模型两次都去调工具了，没写摘要。")
         if response.truncated:
             raise CompactionFailed(
                 f"写摘要时输出被截断（已生成 {response.usage.output} 个 token）。"

@@ -16,7 +16,7 @@ from data_agent.core.context import (
     Summary,
     llm_summarizer,
 )
-from data_agent.core.context.compaction import TOOL_RESULT_CLIP, extract_summary, serialize
+from data_agent.core.context.compaction import extract_summary
 from data_agent.core.errors import CompactionFailed
 from data_agent.core.events import ContextEdited
 from data_agent.core.messages import LLMResponse, Message, MessageMeta, ToolCall, Usage
@@ -252,31 +252,6 @@ def test_排在清理后面_写摘要看到的是清理过的视图():
 
 
 # ============================================================ 写摘要的请求
-def test_对话序列化成文本_工具结果太长就截断():
-    text = serialize([
-        Message.user("华东卖了多少"),
-        Message(role="assistant", content="我查一下", tool_calls=[
-            ToolCall("c1", "run_sql", {"sql": "SELECT sum(gmv) FROM orders"}),
-        ]),
-        Message.tool_result("c1", "x" * (TOOL_RESULT_CLIP + 500)),
-        Message.assistant("810 万"),
-    ])
-    assert "[用户]\n华东卖了多少" in text
-    assert '[助手调用工具 run_sql]\n{"sql": "SELECT sum(gmv) FROM orders"}' in text
-    assert "后面省略 500 字符" in text
-    assert text.endswith("[助手]\n810 万")
-
-
-def test_llm写摘要_不带工具_只发一条user():
-    llm = ScriptedProvider([LLMResponse(text="  摘要正文  ", stop_reason="end_turn",
-                                        usage=Usage(input=300, output=50))])
-    summary = llm_summarizer(llm)([Message.user("问题"), Message.assistant("答案")])
-    assert summary == Summary("摘要正文", Usage(input=300, output=50))
-    [request] = llm.seen
-    assert [m.role for m in request] == ["user"]
-    assert "[用户]\n问题" in request[0].content
-
-
 @pytest.mark.parametrize("response", [
     LLMResponse(text="写到一半", stop_reason="max_tokens"),
     LLMResponse(text="   ", stop_reason="end_turn"),
@@ -329,16 +304,6 @@ def test_finish_turn继续时_压缩不会把当前这轮的问题切掉():
 
 
 # ============================================================ 写摘要：4b 的调整
-def test_nudge在记录里标成Agent的提示_不算用户的原话():
-    text = serialize([
-        Message.user("华东卖了多少"),
-        Message.assistant("810 万"),
-        Message.user("还缺占比，补上").with_meta(synthetic=True),
-    ])
-    assert "[用户]\n华东卖了多少" in text
-    assert "[Agent 自动追加的提示]\n还缺占比，补上" in text
-
-
 def test_写摘要可以单独指定输出上限():
     llm = ScriptedProvider([LLMResponse(text="摘要", stop_reason="end_turn")])
     llm_summarizer(llm, max_tokens=16_000)([Message.user("q")])
@@ -349,14 +314,14 @@ def test_会思考的模型直接写_不会思考的先打草稿():
     thinker = ScriptedProvider([LLMResponse(text="摘要", stop_reason="end_turn")])
     thinker.native_thinking = True
     llm_summarizer(thinker)([Message.user("q")])
-    assert "<analysis>" not in thinker.seen[0][0].content
+    assert "<analysis>" not in thinker.seen[0][-1].content
 
     plain = ScriptedProvider([LLMResponse(
         text="<analysis>第 1 条用户消息问了华东……</analysis>\n<summary>\n## 用户的目标\n看华东\n</summary>",
         stop_reason="end_turn",
     )])
     summary = llm_summarizer(plain)([Message.user("q")])
-    assert "<analysis>" in plain.seen[0][0].content
+    assert "<analysis>" in plain.seen[0][-1].content
     assert summary.text == "## 用户的目标\n看华东", "草稿扔掉，只留 <summary> 里的"
 
 
@@ -371,13 +336,13 @@ def test_从回复里取摘要_格式不规范也尽量取到(reply, expected):
     assert extract_summary(reply) == expected
 
 
-# ============================================================ 写摘要：复用缓存（第 5 步）
+# ============================================================ 写摘要：原样发，复用缓存（第 5 步）
 def _shape(messages: list[Message]) -> list[tuple]:
     """比较「发出去的内容」：角色、正文、工具调用。meta 是本地信息，不发给模型，不比。"""
     return [(m.role, m.content, tuple((c.name, str(c.arguments)) for c in m.tool_calls)) for m in messages]
 
 
-def test_复用缓存_写摘要的请求是上一次请求原样加一条要求():
+def test_写摘要的请求是上一次请求原样加一条要求():
     """前缀缓存从第一个不同的字开始全部重算。系统提示词、工具定义、前面的消息都得和上一次一模一样。"""
     from data_agent.core.agent import Agent
     from data_agent.tools.registry import ToolRegistry
@@ -389,7 +354,7 @@ def test_复用缓存_写摘要的请求是上一次请求原样加一条要求(
         LLMResponse(text="摘要正文", stop_reason="end_turn"),
         LLMResponse(text="答2", stop_reason="end_turn"),
     ])
-    summarize = llm_summarizer(llm, reuse_cache=True)
+    summarize = llm_summarizer(llm)
     agent = Agent(llm=llm, tools=ToolRegistry([EchoTool()]), system_prompt="你是分析师",
                   context=Context([CompactHistory(summarize, trigger_tokens=1, keep_recent_tokens=1)]))
     agent.run("问题1")
@@ -403,28 +368,27 @@ def test_复用缓存_写摘要的请求是上一次请求原样加一条要求(
     assert after[0].content.startswith(CompactHistory.SUMMARY_HEADER + "摘要正文")
 
 
-def test_复用缓存时模型去调工具_退回序列化再写_两次都记账():
+def test_模型去调工具就原样再发一次_还不写就报错():
     from data_agent.core.context import Prompt
 
-    llm = ScriptedProvider([
-        LLMResponse(text="", stop_reason="tool_use", tool_calls=[ToolCall("c9", "echo", {"text": "x"})],
-                    usage=Usage(input=100, cache_read=900)),
-        LLMResponse(text="摘要正文", stop_reason="end_turn", usage=Usage(input=500, output=80)),
-    ])
-    summary = llm_summarizer(llm, reuse_cache=True)(
-        [Message.user("问题"), Message.assistant("答案")], Prompt("你是分析师", ({"name": "echo"},)))
-    assert summary == Summary("摘要正文", Usage(input=600, output=80, cache_read=900))
-    retry = llm.seen[1]
-    assert [m.role for m in retry] == ["user"] and "[用户]\n问题" in retry[0].content
-    assert llm.system_seen[1] != "你是分析师" and llm.tools_seen[1] is None
+    tool_call = LLMResponse(text="", stop_reason="tool_use", usage=Usage(input=100, cache_read=900),
+                            tool_calls=[ToolCall("c9", "echo", {"text": "x"})])
+    llm = ScriptedProvider([tool_call, LLMResponse(text="摘要正文", stop_reason="end_turn",
+                                                   usage=Usage(input=50, cache_read=950, output=80))])
+    messages = [Message.user("问题"), Message.assistant("答案")]
+    summary = llm_summarizer(llm)(messages, Prompt("你是分析师", ({"name": "echo"},)))
+    assert summary == Summary("摘要正文", Usage(input=150, output=80, cache_read=1850)), "两次都记账"
+    assert _shape(llm.seen[0]) == _shape(llm.seen[1]) and llm.system_seen[1] == "你是分析师"
+
+    stubborn = ScriptedProvider([tool_call])
+    with pytest.raises(CompactionFailed):
+        llm_summarizer(stubborn)(messages, Prompt("你是分析师", ({"name": "echo"},)))
+    assert stubborn.calls == 2
 
 
-def test_不知道平时的请求长什么样_或者没开复用_都走序列化():
-    from data_agent.core.context import Prompt
-
-    for summarizer, prompt in [(lambda llm: llm_summarizer(llm, reuse_cache=True), None),
-                               (lambda llm: llm_summarizer(llm, reuse_cache=False), Prompt("你是分析师"))]:
-        llm = ScriptedProvider([LLMResponse(text="摘要", stop_reason="end_turn")])
-        summarizer(llm)([Message.user("问题"), Message.assistant("答案")], prompt)
-        [request] = llm.seen
-        assert [m.role for m in request] == ["user"] and "[用户]\n问题" in request[0].content
+def test_不知道平时的请求长什么样_就不带系统提示词和工具发():
+    llm = ScriptedProvider([LLMResponse(text="摘要", stop_reason="end_turn")])
+    llm_summarizer(llm)([Message.user("问题"), Message.assistant("答案")])
+    [request] = llm.seen
+    assert [m.content for m in request[:2]] == ["问题", "答案"]
+    assert llm.system_seen == [None] and llm.tools_seen == [None]
