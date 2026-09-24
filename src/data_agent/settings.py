@@ -41,7 +41,11 @@ class Settings(BaseSettings):
 
     # ---------------- Agent ----------------
     max_steps: int = 12
-    max_tokens: int = 8192
+    # 一次回复的输出上限。思考模型的思考 token 也算在里面：8192 时，用户让它「列出 2025 年
+    # 8 月的全部订单」（上百行），它把表写进回答、思考再占一截，就被截断报错了（多轮评测里
+    # 每组 5~11 轮）。上限只是封顶，调高不多花钱。DeepSeek 官方允许到 393216。
+    # Anthropic 不开流式有上限，见下面 build_provider
+    max_tokens: int = 32768
 
     # ---------------- 上下文管理 ----------------
     # 请求估算超过这个数，就把较早的工具结果换成占位（留一句线索）。
@@ -86,7 +90,8 @@ def build_provider(settings: Settings) -> LLMProvider:
         return AnthropicProvider(
             api_key=settings.anthropic_api_key,
             model=settings.anthropic_model,
-            max_tokens=max(settings.max_tokens, 16000),
+            # Anthropic SDK 不开流式时，max_tokens 超过约 21333 直接报错（怕 HTTP 超时）
+            max_tokens=min(max(settings.max_tokens, 16000), 21_000),
             context_window=settings.anthropic_context_window,
         )
 

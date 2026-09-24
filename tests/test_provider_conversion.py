@@ -328,3 +328,13 @@ def test_anthropic_写摘要的请求和平时的请求_缓存前缀一样():
     summary = provider._request_kwargs([*history, Message.user("请写摘要")], TOOLS, "你是分析师", 16000)
     assert summary["tools"] == normal["tools"] and summary["system"] == normal["system"]
     assert summary["messages"][:2] == normal["messages"][:2]
+
+
+def test_anthropic_输出上限夹在16000和21000之间():
+    """全局上限调到了 32768（DeepSeek 允许），Anthropic 不开流式超过约 21333 直接报错。"""
+    from data_agent.settings import Settings, build_provider
+
+    def cap(n: int) -> int:
+        return build_provider(Settings(provider="anthropic", anthropic_api_key="x", max_tokens=n)).max_tokens
+
+    assert (cap(32768), cap(4096), cap(18000)) == (21_000, 16_000, 18_000)
