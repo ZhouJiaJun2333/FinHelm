@@ -37,7 +37,8 @@ from .events import (
     TurnContinued,
     noop_sink,
 )
-from .messages import LLMResponse, Message, ToolCall
+from .messages import LLMResponse, Message, ToolCall, Usage
+from .tokens import ContextEstimate, estimate_context, estimate_overhead
 
 # 执行工具前的审批钩子：返回 (是否放行, 拒绝理由)
 ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]
@@ -119,6 +120,13 @@ class Agent:
         # 每轮动态拼到系统提示词末尾的内容（数据库概览、记忆、RAG 检索结果…）
         self.dynamic_context = dynamic_context
 
+        # 本次会话一共花了多少 token —— 算钱用，和「上下文多大」是两回事。
+        #
+        # ⚠️ 它和历史里的锚点对回滚的态度**正好相反**：
+        #    失败的一轮会从历史里抹掉（锚点跟着消失），但那几次调用的钱已经花了，
+        #    所以这里不回滚。/reset 也不清零。
+        self.session_usage = Usage()
+
     # ------------------------------------------------------------------
     def run(self, user_input: str) -> str:
         """跑一轮完整对话（内部可能调用多次工具），返回最终回答。
@@ -126,20 +134,18 @@ class Agent:
         **事务语义：要么完整完成，要么历史回到进来之前的样子。**
 
         为什么必须这样：一轮失败时（截断、模型拒绝、网络错、Ctrl-C），历史里会
-        留下半截状态，而这些状态会让**之后每一轮**都失败：
+        留下半截状态：
 
-            提问后失败      → [user]，用户再问一次 → [user, user]
-                              Anthropic 要求角色交替，直接 400
             工具调用后失败  → assistant 有 tool_calls 却没有对应结果
-                              两家都 400
+                              两家都 400，而且**之后每一轮**都 400 ——
+                              一次失败升级成整个会话报废，只能 /reset
+            提问后失败      → [user]，用户再问一次 → [user, user]
+                              不报错（两家都会把连续 user 合并成一条），
+                              但模型看到的是「同一个问题问了两遍」，
+                              或者上一个没答的问题混进了新问题里
 
-        两者是同一个死亡模式的两个入口：**一次失败升级成整个会话报废**，
-        用户只能 /reset 清空所有上下文。
-
-        ⚠️ 特别注意第一种：OpenAI 兼容接口（DeepSeek 等）容忍连续 user 消息，
-           所以这个 bug 在本地怎么测都不出来，换到 Anthropic 才炸。
-           抽象层的意义之一就是不让这种差异漏到上层 —— 所以这里统一按
-           **最严格**的那家的约束来保证。
+        第一种是致命的，第二种是静默的 —— 不报错，只是答案莫名其妙地变怪。
+        一个 snapshot/restore 把两种都兜住，不用分别打补丁。
         """
         snapshot = self.context.snapshot()
         completed = False
@@ -164,11 +170,14 @@ class Agent:
                 tools=self.tools.schemas(),
                 system=self._render_system_prompt(),
             )
+            # 在分诊之前记账：被截断的回复同样收费。
+            self.session_usage += response.usage
             self.on_event(LLMResponded(
                 step=step,
                 text=response.text,
                 tool_calls=[c.name for c in response.tool_calls],
                 usage=response.usage,
+                context_window=self.llm.context_window,
             ))
 
             # 先分诊，**再**决定要不要写进历史 —— 顺序很重要。
@@ -200,8 +209,9 @@ class Agent:
                 return response.text
 
             if not requested_tools:
-                # 本轮没有工具结果，历史以 assistant 结尾。
-                # 必须补一条 user 消息，否则下一轮请求的角色不交替，API 会报错。
+                # 本轮没有工具结果，历史以 assistant 结尾。必须补一条 user 消息：
+                # 以 assistant 结尾发请求，Anthropic 会当成 prefill（让模型接着
+                # 这段往下写），Opus 4.6 之后的模型不支持 prefill，直接 400。
                 nudge = decision.nudge or "请继续完成上面的任务。"
                 self.context.add(Message.user(nudge))
                 self.on_event(TurnContinued(step=step, nudge=nudge))
@@ -210,18 +220,18 @@ class Agent:
         #
         # ⚠️ 这条兜底消息**必须进历史**，不能只 return 给用户。两个理由：
         #
-        # 1. 历史形状：正常一轮总是以 assistant 收尾。这里不补的话，历史会以
+        # 1. 模型知情：不进历史的话，下一轮模型完全不知道上一轮卡住了，
+        #    很可能原样再试一遍同样的死路。
+        #
+        # 2. 历史形状：正常一轮总是以 assistant 收尾。这里不补的话，历史会以
         #    tool 结果（模型一直在调工具）或 nudge 的 user 消息（finish_turn
         #    一直说继续）结尾。用户下一次提问再追加一条 user，就变成：
         #        [..., tool,        user]  → Anthropic 把 tool_result 包进
-        #                                    user 消息 → 连续两条 user → 400
-        #        [..., user(nudge), user]  → 中立结构里就已经连续了
-        #    和被截断、悬空 tool_call 是同一个死亡模式的第三个入口。
-        #    区别是前两个走异常路径（被 run() 的事务兜住），这个是**正常返回**，
+        #                                    user 消息，和新问题合并成一条
+        #        [..., user(nudge), user]  → nudge 和新问题合并成一条
+        #    不报错，但新问题前面粘着一段上一轮的残留。
+        #    被截断之类走的是异常路径，由 run() 的事务兜住；这里是**正常返回**，
         #    事务照常提交 —— 所以必须在这里自己收尾。
-        #
-        # 2. 模型知情：不进历史的话，下一轮模型完全不知道上一轮卡住了，
-        #    很可能原样再试一遍同样的死路。
         self.on_event(StepLimitReached(self.max_steps))
         fallback = (
             f"已达到最大步数 {self.max_steps} 仍未得出结论。"
@@ -243,7 +253,7 @@ class Agent:
         if reason in TRUNCATED_STOP_REASONS:
             raise OutputTruncated(
                 f"模型输出被截断（stop_reason={response.stop_reason}），这不是「完成」。"
-                f"已生成 {response.usage.get('output_tokens', '?')} 个 token。"
+                f"已生成 {response.usage.output} 个 token。"
                 "解决办法：调大 .env 里的 MAX_TOKENS，或让它分步输出。"
             )
 
@@ -310,6 +320,14 @@ class Agent:
         if self.dynamic_context is None:
             return self.system_prompt
         return f"{self.system_prompt}\n\n{self.dynamic_context()}"
+
+    def context_usage(self) -> ContextEstimate:
+        """如果现在发下一次请求，输入大概有多大。
+
+        估的是 render() 之后的消息，也就是真正会发出去的那份。
+        """
+        overhead = estimate_overhead(self._render_system_prompt(), self.tools.schemas())
+        return estimate_context(self.context.render(), overhead=overhead)
 
     def reset(self) -> None:
         self.context.clear()

@@ -17,6 +17,10 @@ class LLMProvider(ABC):
 
     model: str
 
+    # 这个模型的上下文窗口（token）。API 响应里不会告诉你，只能配置。
+    # None = 不知道，界面上就只显示用了多少、不显示百分比。
+    context_window: int | None = None
+
     @abstractmethod
     def chat(
         self,

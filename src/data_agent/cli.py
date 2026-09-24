@@ -21,6 +21,7 @@ from .core.events import (
     ToolStarted,
     TurnContinued,
 )
+from .core.messages import Usage
 from .settings import Settings
 
 BANNER = """
@@ -28,7 +29,8 @@ BANNER = """
 │  SQL 数据分析 Agent                               │
 │                                                  │
 │  /tables  看库里有哪些表      /tools  看有哪些工具 │
-│  /reset   清空对话            /exit   退出        │
+│  /context 看上下文用量        /reset  清空对话   │
+│  /exit    退出                                   │
 └──────────────────────────────────────────────────┘"""
 
 
@@ -37,13 +39,14 @@ def make_console_sink(verbose: bool):
 
     def sink(event: Event) -> None:
         match event:
-            case LLMResponded(text=text, tool_calls=calls):
+            case LLMResponded(text=text, tool_calls=calls, usage=usage, context_window=window):
                 # 只打印「动手之前说的话」。最终回答由主循环统一打印，
                 # 否则同一段话会出现两遍。
                 if calls:
                     if text:
                         print(f"\n🤖 {text}")
                     print(f"   ↳ 调用：{', '.join(calls)}")
+                print(f"   📊 {_usage_line(usage, window)}")
 
             case ToolStarted(name=name, arguments=args):
                 shown = _preview(args, 400 if verbose else 200)
@@ -64,6 +67,43 @@ def make_console_sink(verbose: bool):
                 print(f"\n⚠️ 触发步数上限 {n}")
 
     return sink
+
+
+def _k(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def _of_window(tokens: int, window: int | None) -> str:
+    if not window:
+        return _k(tokens)
+    return f"{_k(tokens)} / {_k(window)}（{tokens / window:.1%}）"
+
+
+def _usage_line(usage: Usage, window: int | None) -> str:
+    """一次调用之后：对话占了多少上下文，这次输入里多少走了缓存。"""
+    if usage.context_tokens == 0:
+        return "用量：厂商没有返回"
+    return (
+        f"上下文 {_of_window(usage.context_tokens, window)}"
+        f" · 本次输入 {_k(usage.prompt_tokens)}（缓存命中 {_k(usage.cache_read)}）"
+        f" · 输出 {_k(usage.output)}"
+    )
+
+
+def _print_context(app: Application) -> None:
+    est = app.agent.context_usage()
+    total = app.agent.session_usage
+    print(f"下一次请求的输入（估算）：{_of_window(est.tokens, app.llm.context_window)}")
+    if est.anchor_index is None:
+        print("  全部是估算（还没有模型返回过用量），含系统提示词和工具定义")
+    else:
+        print(f"  ├ 精确 {_k(est.usage_tokens):>7}  ← 第 {est.anchor_index + 1} 条消息的 usage")
+        print(f"  └ 估算 {_k(est.trailing_tokens):>7}  ← 之后新加的消息")
+    print(
+        f"本次会话累计：输入 {_k(total.prompt_tokens)}"
+        f"（缓存命中 {_k(total.cache_read)}，写入 {_k(total.cache_write)}）"
+        f" · 输出 {_k(total.output)}"
+    )
 
 
 def _preview(obj: object, limit: int) -> str:
@@ -91,6 +131,9 @@ def handle_command(cmd: str, app: Application) -> bool:
 
         case "/tables":
             print(app.inspector.overview())
+
+        case "/context":
+            _print_context(app)
 
         case _:
             return False

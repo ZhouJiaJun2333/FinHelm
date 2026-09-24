@@ -19,10 +19,14 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-opus-5"
+    anthropic_context_window: int = 1_000_000
 
     openai_api_key: str | None = None
     openai_base_url: str | None = None
     openai_model: str = "deepseek-flash"
+    # 默认值是 DeepSeek 官方给的 1M。换别家要按官方文档改 ——
+    # 不确定就往小了填：填小了只是早点压缩，填大了会撞上限直接报错。
+    openai_context_window: int = 1_000_000
 
     # ---------------- 数据库 ----------------
     # 默认连 docker/docker-compose.yml 起的那个，用只读账号
@@ -46,6 +50,7 @@ def build_provider(settings: Settings) -> LLMProvider:
             api_key=settings.anthropic_api_key,
             model=settings.anthropic_model,
             max_tokens=max(settings.max_tokens, 16000),
+            context_window=settings.anthropic_context_window,
         )
 
     if settings.provider == "openai":
@@ -58,6 +63,7 @@ def build_provider(settings: Settings) -> LLMProvider:
             model=settings.openai_model,
             base_url=settings.openai_base_url,
             max_tokens=settings.max_tokens,
+            context_window=settings.openai_context_window,
         )
 
     raise ValueError(f"未知的 provider：{settings.provider}")

@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from .messages import Usage
+
 
 @dataclass(slots=True)
 class LLMResponded:
@@ -21,7 +23,9 @@ class LLMResponded:
     step: int
     text: str
     tool_calls: list[str] = field(default_factory=list)
-    usage: dict[str, int] = field(default_factory=dict)
+    usage: Usage = field(default_factory=Usage)
+    # 带上窗口大小，界面才能算百分比 —— 事件自带完整信息，消费者不用回头问 Agent
+    context_window: int | None = None
 
 
 @dataclass(slots=True)

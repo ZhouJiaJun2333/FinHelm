@@ -136,18 +136,16 @@ def test_openai_工具schema包在function里():
     assert converted["function"]["parameters"] == TOOLS[0]["parameters"]
 
 
-# ============================================ Anthropic 的角色交替约束
+# ============================================ 角色交替（我们自己的不变量）
+# API 并不强制交替 —— 连续同角色的消息会被合并成一条，不报错。
+# 我们仍然守着它，因为「不交替」几乎总是意味着历史里有残留：
+# 没答完的问题、上一轮的 nudge，悄悄粘到了下一个问题前面。
 def _roles(converted: list[dict]) -> list[str]:
     return [m["role"] for m in converted]
 
 
-def test_anthropic_连续的user消息是非法的():
-    """守住这类错误本身。
-
-    Anthropic 要求 user / assistant 交替。OpenAI 兼容接口（DeepSeek 等）
-    对此宽容，所以「连续两条 user」在本地怎么测都不出来，换厂商才炸。
-    这个测试就是那个在本地也会红的哨兵。
-    """
+def test_anthropic_连续的user消息能被检测出来():
+    """哨兵自检：确认这套检测真的能抓到连续 user，而不是永远绿。"""
     bad = [Message.user("第一个问题"), Message.user("第二个问题")]
     roles = _roles(AnthropicProvider.convert_messages(bad))
     consecutive = [a for a, b in zip(roles, roles[1:]) if a == b]

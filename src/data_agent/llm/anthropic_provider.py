@@ -14,7 +14,7 @@ from typing import Any
 
 import anthropic
 
-from ..core.messages import LLMResponse, Message, ToolCall
+from ..core.messages import LLMResponse, Message, ToolCall, Usage
 from .base import LLMProvider
 
 
@@ -24,10 +24,12 @@ class AnthropicProvider(LLMProvider):
         api_key: str | None = None,
         model: str = "claude-opus-5",
         max_tokens: int = 16000,
+        context_window: int | None = None,
     ) -> None:
         self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
         self.model = model
         self.max_tokens = max_tokens
+        self.context_window = context_window
 
     # ------------------------------------------------ 中立格式 -> 厂商格式
     @staticmethod
@@ -114,9 +116,21 @@ class AnthropicProvider(LLMProvider):
             text="\n".join(text_parts).strip(),
             tool_calls=tool_calls,
             raw_content=resp.content,
-            usage={
-                "input_tokens": resp.usage.input_tokens,
-                "output_tokens": resp.usage.output_tokens,
-            },
+            usage=self.convert_usage(resp.usage),
             stop_reason=resp.stop_reason,
+        )
+
+    @staticmethod
+    def convert_usage(u: Any) -> Usage:
+        """Anthropic 的 input_tokens 是**扣掉缓存之后**剩下的部分。
+
+        开了缓存以后，一个 50k 的对话 input_tokens 可能只有几百 —— 只看它会以为
+        上下文还很空。完整输入要三块加起来，Usage 里已经拆好了，直接对应。
+        两个缓存字段在没开缓存时可能是 None。
+        """
+        return Usage(
+            input=u.input_tokens,
+            output=u.output_tokens,
+            cache_read=u.cache_read_input_tokens or 0,
+            cache_write=u.cache_creation_input_tokens or 0,
         )

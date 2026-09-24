@@ -15,7 +15,7 @@ from data_agent.core.errors import (
     UnexpectedStopReason,
 )
 from data_agent.core.events import Event, TurnContinued, collect_sink
-from data_agent.core.messages import LLMResponse, ToolCall
+from data_agent.core.messages import LLMResponse, ToolCall, Usage
 from data_agent.llm.anthropic_provider import AnthropicProvider
 from data_agent.llm.base import LLMProvider
 from data_agent.tools.base import Tool
@@ -75,7 +75,7 @@ def test_被截断时抛异常而不是当成完成(reason):
     但那是半句话，绝不能当最终答案返回。"""
     agent, _ = make_agent([
         LLMResponse(text="华东大区的销售额是", stop_reason=reason,
-                    usage={"output_tokens": 8192}),
+                    usage=Usage(output=8192)),
     ])
     with pytest.raises(OutputTruncated, match="截断"):
         agent.run("x")
@@ -84,7 +84,7 @@ def test_被截断时抛异常而不是当成完成(reason):
 def test_截断异常里带了可操作的提示():
     agent, _ = make_agent([
         LLMResponse(text="半句", stop_reason="max_tokens",
-                    usage={"output_tokens": 4096}),
+                    usage=Usage(output=4096)),
     ])
     with pytest.raises(OutputTruncated) as exc:
         agent.run("x")
@@ -212,9 +212,10 @@ def test_钩子不会让死循环逃过步数上限():
 
 # ============================ run() 的事务语义（历史不能留半截状态）
 #
-# 一轮失败时历史里可能留下两种半截状态，都会让**之后每一轮**都 400：
-#     [user] 没有回复      → 用户再问 → [user, user]，Anthropic 角色不交替
-#     assistant 有 tool_calls 却没有结果  → 两家都拒
+# 一轮失败时历史里可能留下两种半截状态：
+#     assistant 有 tool_calls 却没有结果  → 两家都 400，之后每一轮都 400
+#     [user] 没有回复      → 用户再问 → [user, user]，不报错但被合并成一条，
+#                            模型看到的是同一个问题问了两遍
 # 所以 run() 是原子的：要么完整完成，要么历史回到进来之前。
 
 def test_截断后整轮回滚():
@@ -246,8 +247,8 @@ def test_截断在工具调用中途时不留悬空的tool_call():
 
 
 def test_失败后重试不会产生连续的user消息():
-    """核心回归：OpenAI 兼容接口容忍连续 user，Anthropic 不容忍。
-    在本地（DeepSeek）怎么测都不出来，换厂商才炸 —— 所以必须有测试守着。
+    """连续 user 两家都不报错（会被合并成一条），所以真实调用永远发现不了，
+    只会表现为答案莫名其妙地变怪 —— 必须有测试守着。
     """
     script = [
         LLMResponse(text="被砍断的半句", stop_reason="max_tokens",
@@ -410,7 +411,7 @@ def test_步数耗尽后再提问不会产生连续user():
 
 
 def test_finish_turn撞上限时同样以assistant收尾():
-    """另一个变体：历史以 nudge 的 user 消息结尾，中立结构里就已经非法。"""
+    """另一个变体：历史以 nudge 的 user 消息结尾，中立结构里就已经连续了。"""
     agent, _ = make_agent(
         [LLMResponse(text="我觉得答完了", stop_reason="end_turn")],
         max_steps=2,
@@ -440,10 +441,11 @@ def test_所有退出路径产生的历史在anthropic格式下都合法():
     这样以后新增退出路径（新的钩子、新的错误类型）会自动被这个测试覆盖，
     不用记得回来补形状。守的是「不变量」而不是「某个已知 bug」。
 
-    不变量有两条，都是 Anthropic 的硬约束（OpenAI 兼容接口宽容，
-    所以只靠真实调用永远测不出来）：
-        1. user / assistant 必须交替
-        2. 每个 tool_use 必须有对应的 tool_result
+    不变量有两条：
+        1. user / assistant 严格交替 —— API 不强制（会合并），是我们自己要的，
+           保证每个问题有且只有一个回答、没有上一轮的残留粘在新问题上
+        2. 每个 tool_use 必须有对应的 tool_result —— 这条是 API 硬约束，违反就 400
+    第 1 条违反了不报错，所以只靠真实调用永远发现不了。
     """
     def normal():
         a, _ = make_agent([LLMResponse(text="答完了", stop_reason="end_turn")])

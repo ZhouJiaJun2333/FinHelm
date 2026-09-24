@@ -25,7 +25,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from ..core.messages import LLMResponse, Message, ToolCall
+from ..core.messages import LLMResponse, Message, ToolCall, Usage
 from .base import LLMProvider
 
 
@@ -36,10 +36,12 @@ class OpenAICompatibleProvider(LLMProvider):
         model: str,
         base_url: str | None = None,
         max_tokens: int = 8192,
+        context_window: int | None = None,
     ) -> None:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.max_tokens = max_tokens
+        self.context_window = context_window
 
     # ------------------------------------------------ 中立格式 -> 厂商格式
     @staticmethod
@@ -132,19 +134,40 @@ class OpenAICompatibleProvider(LLMProvider):
                 ToolCall(id=call.id, name=call.function.name, arguments=arguments)
             )
 
-        usage: dict[str, int] = {}
-        if resp.usage:
-            usage = {
-                "input_tokens": resp.usage.prompt_tokens,
-                "output_tokens": resp.usage.completion_tokens,
-            }
-
         return LLMResponse(
             text=(message.content or "").strip(),
             tool_calls=tool_calls,
             # 存原生 message（含 reasoning_content 等厂商私有字段），回传时原样用它。
             # exclude_none 去掉 refusal / audio 这些没用到的空字段，请求体干净些。
             raw_content=message.model_dump(exclude_none=True),
-            usage=usage,
+            usage=self.convert_usage(resp.usage),
             stop_reason=choice.finish_reason,
+        )
+
+    @staticmethod
+    def convert_usage(u: Any) -> Usage:
+        """OpenAI 系的 prompt_tokens **已经包含**缓存命中的部分，要拆出来。
+
+        缓存命中数各家放的位置不一样：
+            OpenAI    prompt_tokens_details.cached_tokens
+            DeepSeek  prompt_cache_hit_tokens（顶层私有字段，SDK 里是 extra 属性）
+        都没有就当 0。缓存写入 OpenAI 系一般不单独报（写缓存不额外收费）。
+
+        有些兼容接口干脆不返回 usage，那就全 0 —— to_message() 不会拿它当锚点。
+        """
+        if u is None:
+            return Usage()
+
+        details = getattr(u, "prompt_tokens_details", None)
+        cache_read = (
+            getattr(details, "cached_tokens", None)
+            or getattr(u, "prompt_cache_hit_tokens", None)
+            or 0
+        )
+        cache_write = getattr(details, "cache_write_tokens", None) or 0
+        return Usage(
+            input=u.prompt_tokens - cache_read - cache_write,
+            output=u.completion_tokens,
+            cache_read=cache_read,
+            cache_write=cache_write,
         )

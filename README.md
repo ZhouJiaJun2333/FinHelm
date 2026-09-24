@@ -73,6 +73,7 @@ pytest
 │   │   ├── events.py             运行事件（解耦「运行」和「展示」）
 │   │   ├── errors.py             运行时异常（截断 / 拒绝 / 未知停止原因）
 │   │   ├── context.py            上下文管理（扩展点）
+│   │   ├── tokens.py             上下文用量：锚点 + 增量估算（/context 命令看）
 │   │   └── agent.py              主循环 ← 心脏（run() 约 50 行，
 │   │                             其余是 stop_reason 分诊和两个钩子）
 │   │
