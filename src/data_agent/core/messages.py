@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 Role = Literal["system", "user", "assistant", "tool"]
@@ -56,7 +56,7 @@ class Usage:
         )
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ToolCall:
     """模型发出的一次工具调用请求。注意：它只是「请求」，执行的是我们自己的代码。"""
 
@@ -65,9 +65,37 @@ class ToolCall:
     arguments: dict[str, Any]    # 已解析成 dict 的参数
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
+class MessageMeta:
+    """挂在消息上、**只在本地用、不发给模型**的信息。
+
+    和 Message 的其余字段分开放，是为了让边界一眼可见：
+        Message 本身的字段   → provider 会翻译成请求体发出去
+        meta 里的字段        → 只给上下文管理、记账、界面用，provider 碰都不碰
+
+    以后要给消息加本地信息（来源、时间、检索片段 ID…），加在这里，
+    不要再往 Message 上加字段 —— 那会让「什么会发给模型」越来越说不清。
+    """
+
+    # 只有模型真实返回的 assistant 消息才带。它是估算上下文大小的「锚点」：
+    # 这条消息之前（含它自己）的 token 数是 API 报的精确值，之后的才需要估。
+    # 挂在消息上而不是 Agent 上：一轮失败被回滚时，它跟着消息一起消失。
+    usage: Usage | None = None
+
+    # 工具结果的一句话摘要（「42 行 × 4 列（region, gmv, …）」），由工具自己给。
+    # 结果被清理时，它留在占位文字里当线索（可恢复的压缩）。
+    summary: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
-    """一条对话消息。"""
+    """一条对话消息。
+
+    **不可变**（frozen）。上下文管理要「改」一条消息时，只能生成新对象 ——
+    原消息还在历史和快照里，原地修改会让回滚恢复出被改过的内容。
+    以前这条规则只写在注释里，现在由语言保证：直接赋值会抛异常。
+    需要改的时候用 dataclasses.replace() 或下面的 with_meta()。
+    """
 
     role: Role
     content: str = ""
@@ -78,21 +106,11 @@ class Message:
     # 回传历史时优先用它 —— 自己拼 text 回去会丢掉 thinking 块等信息。
     raw: Any = None
 
-    # 只有模型真实返回的 assistant 消息才带。它是估算上下文大小的「锚点」：
-    # 这条消息之前（含它自己）的 token 数是 API 报的精确值，之后的才需要估。
-    #
-    # 为什么挂在消息上而不是 Agent 上：一轮失败被回滚时，这条消息连同它的
-    # usage 一起消失，不会留下一个已经不对的数。
-    #
-    # ⚠️ 锚点成立的前提是「它之前的消息没被改过」。以后做压缩时，被改写位置
-    #    之后的 assistant 消息必须换成 usage=None 的新对象，否则锚点就是错的。
-    usage: "Usage | None" = None
+    meta: MessageMeta = field(default_factory=MessageMeta)
 
-    # 工具结果的一句话摘要（「42 行 × 4 列（region, gmv, …）」），由工具自己给。
-    # 平时**不发给模型**；结果被清理时，它留在占位文字里当线索 ——
-    # 模型看到线索就能判断要不要重新调用，不用一律重跑。
-    # 这就是「可恢复的压缩」：内容可以丢，找回它的线索要留下。
-    summary: str = ""
+    def with_meta(self, **changes: Any) -> "Message":
+        """返回一个只改了 meta 某几项的新消息。"""
+        return replace(self, meta=replace(self.meta, **changes))
 
     @staticmethod
     def user(text: str) -> "Message":
@@ -105,7 +123,7 @@ class Message:
     @staticmethod
     def tool_result(tool_call_id: str, content: str, summary: str = "") -> "Message":
         return Message(role="tool", content=content, tool_call_id=tool_call_id,
-                       summary=summary)
+                       meta=MessageMeta(summary=summary))
 
 
 @dataclass(slots=True)
@@ -125,5 +143,5 @@ class LLMResponse:
             tool_calls=self.tool_calls,
             raw=self.raw_content,
             # 全 0 说明厂商没报用量（有些兼容接口会这样），不能当锚点用
-            usage=self.usage if self.usage.context_tokens > 0 else None,
+            meta=MessageMeta(usage=self.usage if self.usage.context_tokens > 0 else None),
         )

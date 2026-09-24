@@ -12,7 +12,7 @@ from openai.types.completion_usage import PromptTokensDetails
 
 from data_agent.core.errors import OutputTruncated
 from data_agent.core.events import LLMResponded
-from data_agent.core.messages import LLMResponse, Message, ToolCall, Usage
+from data_agent.core.messages import LLMResponse, Message, MessageMeta, ToolCall, Usage
 from data_agent.core.tokens import (
     estimate_context,
     estimate_message,
@@ -73,7 +73,7 @@ def test_没返回usage的兼容接口不崩():
 
 def test_全0的usage不能当锚点():
     msg = LLMResponse(text="hi", usage=Usage()).to_message()
-    assert msg.usage is None
+    assert msg.meta.usage is None
 
 
 def test_usage可以累加():
@@ -108,7 +108,7 @@ def test_工具调用的参数也要算进去():
 
 # ====================================================== 锚点 + 增量估算
 def _asst(text: str, usage: Usage | None) -> Message:
-    return Message(role="assistant", content=text, usage=usage)
+    return Message(role="assistant", content=text, meta=MessageMeta(usage=usage))
 
 
 def test_没有锚点时全靠估_而且要加上固定开销():
@@ -173,7 +173,7 @@ def test_模型返回的assistant消息带着usage进历史():
     agent.run("问题")
 
     history = agent.context.render()
-    assert [m.usage for m in history if m.role == "assistant"] == [U1, U2]
+    assert [m.meta.usage for m in history if m.role == "assistant"] == [U1, U2]
     # 刚答完，最后一条就是锚点，没有需要估的部分
     est = agent.context_usage()
     assert est.anchor_index == len(history) - 1

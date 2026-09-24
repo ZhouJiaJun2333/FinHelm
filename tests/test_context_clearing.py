@@ -17,7 +17,7 @@ from data_agent.core.agent import Agent
 from data_agent.core.context import ToolResultClearingContext
 from data_agent.core.errors import OutputTruncated
 from data_agent.core.events import ContextCleared
-from data_agent.core.messages import LLMResponse, Message, ToolCall, Usage
+from data_agent.core.messages import LLMResponse, Message, MessageMeta, ToolCall, Usage
 from data_agent.core.tokens import estimate_context, estimate_message
 from data_agent.llm.anthropic_provider import AnthropicProvider
 from data_agent.llm.openai_provider import OpenAICompatibleProvider
@@ -38,7 +38,7 @@ def add_tool_round(ctx, call_id: str, name: str = "run_sql", result: str = BIG_R
                    usage: Usage | None = None) -> None:
     ctx.add(Message(role="assistant", content="查一下",
                     tool_calls=[ToolCall(call_id, name, {"sql": f"SELECT {call_id}"})],
-                    usage=usage))
+                    meta=MessageMeta(usage=usage)))
     ctx.add(Message.tool_result(call_id, result))
 
 
@@ -194,14 +194,14 @@ def test_同一条消息每次生成的占位完全一样():
 def test_清理位置之后的旧锚点作废_之前的保留():
     ctx = ToolResultClearingContext(trigger_tokens=3_000, keep_recent=1, clear_at_least=500)
     ctx.add(Message.user("q"))
-    ctx.add(Message(role="assistant", content="先看看", usage=Usage(input=900, output=10)))
+    ctx.add(Message(role="assistant", content="先看看", meta=MessageMeta(usage=Usage(input=900, output=10))))
     ctx.add(Message.user("继续"))
     add_tool_round(ctx, "c0", usage=Usage(input=1_000, output=10))
     add_tool_round(ctx, "c1", usage=Usage(input=2_500, output=10))
     add_tool_round(ctx, "c2", usage=Usage(input=4_000, output=10))
 
     ctx.maintain(measure)
-    usages = [m.usage for m in ctx.render() if m.role == "assistant"]
+    usages = [m.meta.usage for m in ctx.render() if m.role == "assistant"]
 
     # 第 1 条在被清理的 c0 结果之前，量它的时候视图和现在一样 → 有效
     # 第 2 条（发起 c0 的那条）也在 c0 结果之前 → 有效
@@ -214,10 +214,10 @@ def test_清理之后才加进来的锚点有效():
     ctx = make_ctx(5)
     ctx.maintain(measure)
     fresh = Usage(input=2_000, output=30)
-    ctx.add(Message(role="assistant", content="答完了", usage=fresh))
+    ctx.add(Message(role="assistant", content="答完了", meta=MessageMeta(usage=fresh)))
 
     rendered = ctx.render()
-    assert rendered[-1].usage == fresh
+    assert rendered[-1].meta.usage == fresh
     assert estimate_context(rendered).usage_tokens == fresh.context_tokens
 
 

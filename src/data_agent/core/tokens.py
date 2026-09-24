@@ -128,7 +128,7 @@ def estimate_context(messages: list[Message], *, overhead: int = 0) -> ContextEs
         trailing = overhead + sum(estimate_message(m) for m in messages)
         return ContextEstimate(trailing, 0, trailing, None)
 
-    usage_tokens = messages[anchor].usage.context_tokens
+    usage_tokens = messages[anchor].meta.usage.context_tokens
     trailing = sum(estimate_message(m) for m in messages[anchor + 1:])
     return ContextEstimate(usage_tokens + trailing, usage_tokens, trailing, anchor)
 
@@ -142,6 +142,6 @@ def _last_anchor(messages: list[Message]) -> int | None:
     """
     for i in range(len(messages) - 1, -1, -1):
         m = messages[i]
-        if m.role == "assistant" and m.usage is not None:
+        if m.role == "assistant" and m.meta.usage is not None:
             return i
     return None

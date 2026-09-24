@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from data_agent.core.messages import Message, ToolCall
+from data_agent.core.messages import Message, ToolCall, Usage
 from data_agent.llm.anthropic_provider import AnthropicProvider
 from data_agent.llm.openai_provider import OpenAICompatibleProvider
 
@@ -196,3 +196,34 @@ def test_anthropic_每个tool_use都有对应的tool_result():
                 result_ids.add(block["tool_use_id"])
 
     assert use_ids == result_ids, f"悬空的调用: {use_ids ^ result_ids}"
+
+
+# ============================================ meta 是本地信息，不发给模型
+def test_meta里的东西不会出现在请求体里():
+    """Message 的字段会被翻译成请求体，meta 里的不会 —— 这条边界是 MessageMeta 存在的理由。"""
+    bare = [
+        Message.user("问题"),
+        Message(role="assistant", tool_calls=[ToolCall("c1", "run_sql", {"sql": "SELECT 1"})]),
+        Message.tool_result("c1", "结果"),
+    ]
+    with_meta = [
+        bare[0],
+        bare[1].with_meta(usage=Usage(input=1234, output=56)),
+        bare[2].with_meta(summary="只在本地用的线索"),
+    ]
+    assert AnthropicProvider.convert_messages(with_meta) == AnthropicProvider.convert_messages(bare)
+    assert (OpenAICompatibleProvider.convert_messages(with_meta, system=None)
+            == OpenAICompatibleProvider.convert_messages(bare, system=None))
+
+
+def test_消息不可变_要改只能生成新对象():
+    """上下文管理改消息时如果原地改，快照里的同一个对象也会跟着变，回滚就失效了。"""
+    import dataclasses
+
+    import pytest
+
+    msg = Message.user("原文")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        msg.content = "改了"
+    changed = msg.with_meta(summary="x")
+    assert changed is not msg and msg.meta.summary == ""

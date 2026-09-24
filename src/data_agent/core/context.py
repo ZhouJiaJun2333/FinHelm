@@ -171,7 +171,7 @@ class ToolResultClearingContext(FullContext):
         同一条消息每次生成的占位必须一模一样，否则每次请求前缀都变，缓存全废。
         所以这里只依赖消息本身，不掺时间、计数之类会变的东西。
         """
-        clue = m.summary or f"约 {len(m.content)} 字符"
+        clue = m.meta.summary or f"约 {len(m.content)} 字符"
         return (
             f"{cls.CLEARED_PREFIX}原结果：{clue}。"
             "调用参数还在上面的工具调用里；如果还需要完整数据，重新调用一次即可。]"
@@ -203,9 +203,9 @@ class ToolResultClearingContext(FullContext):
             if m.role == "tool" and m.tool_call_id in self._cleared:
                 stale_before = max(stale_before, self._cleared[m.tool_call_id])
                 m = Message.tool_result(m.tool_call_id, self.placeholder(m))
-            elif m.usage is not None and i < stale_before:
+            elif m.meta.usage is not None and i < stale_before:
                 # 生成新对象，不改原消息 —— 原消息还在历史和快照里
-                m = replace(m, usage=None)
+                m = m.with_meta(usage=None)
             out.append(m)
         return out
 
