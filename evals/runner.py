@@ -108,6 +108,19 @@ class Trial:
         d.update(result_ok=self.result_ok, answer_ok=self.answer_ok, failure=self.failure)
         return d
 
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Trial":
+        """to_dict 的反操作，给 --rebuild 用。to_dict 多写的几个结论字段（result_ok 等）丢掉，现算。"""
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        d["sql_calls"] = [SqlCall(**c) for c in d.get("sql_calls", [])]
+        d["usage"] = Usage(**d["usage"])
+        d["calls"] = [Usage(**u) for u in d.get("calls", [])]
+        if d.get("result"):
+            d["result"] = ResultMatch(**d["result"])
+        if d.get("answer_check"):
+            d["answer_check"] = AnswerCheck(**d["answer_check"])
+        return cls(**d)
+
 
 # ================================================================ 跑一次
 def run_trial(case: Case, trial: int, settings: Settings, db: Database,
@@ -199,6 +212,12 @@ class SessionTrial:
         d = asdict(self)
         d["turns"] = [t.to_dict() for t in self.turns]
         return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SessionTrial":
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        d["turns"] = [Trial.from_dict(t) for t in d["turns"]]
+        return cls(**d)
 
 
 def run_session(session: Session, trial: int, settings: Settings, db: Database,

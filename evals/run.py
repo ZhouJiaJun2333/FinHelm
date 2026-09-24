@@ -7,6 +7,8 @@
     --compare last|none|路径   和哪次运行对比，默认和同一题库、同一标签的上一次比
     --set KEY=VALUE           临时改一项配置（可以写多次），优先级高于会话自带的 settings
     --label 名字              给这次运行起个名，写进目录名和报告，比较几种配置时用
+    --rebuild 目录            不跑模型，用存下的 trials/sessions.jsonl 重新出报告
+                              （报告那一步崩了，或者改了报告格式想重出一遍）
 
 比较几种配置（三个进程可以同时跑）：
     python -m evals.run --cases shop_multi --trials 2 --label 现状
@@ -35,7 +37,7 @@ from data_agent.db.connection import Database
 from data_agent.prompts import SYSTEM_PROMPT
 from data_agent.settings import Settings
 
-from .cases import load_cases
+from .cases import CaseSet, load_cases
 from .graders import check_answer, compare_results
 from .report import compare, render, summarize, summarize_sessions
 from .runner import SessionTrial, Trial, run_gold, run_session, run_trial
@@ -54,9 +56,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--compare", default="last")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", dest="sets")
     ap.add_argument("--label", default="")
+    ap.add_argument("--rebuild", type=Path, metavar="目录")
     args = ap.parse_args(argv)
 
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if args.rebuild:
+        rebuild(args.rebuild, args.compare)
+        return
     load_dotenv(ROOT / ".env")
     forced = _parse_sets(args.sets)
     overrides = {"openai_model": args.model} if args.model else {}
@@ -105,6 +111,8 @@ def main(argv: list[str] | None = None) -> None:
         "max_steps": settings.max_steps,
         **_git(),
     }
+    # 先写一份：跑了半小时、最后出报告时崩了，有 meta + jsonl 就能 --rebuild
+    _write_json(run_dir / "meta.json", meta)
 
     multi = bool(case_set.sessions)
     units = case_set.sessions if multi else case_set.cases
@@ -129,15 +137,19 @@ def main(argv: list[str] | None = None) -> None:
                 f.flush()
                 print(f"[{done:>3}/{len(jobs)}] {_progress(r)}")
     meta["elapsed_s"] = round(time.perf_counter() - t0, 1)
+    finish(run_dir, meta, case_set, results, args.compare)
 
-    if multi:
+
+def finish(run_dir: Path, meta: dict, case_set: CaseSet, results: list, compare_spec: str) -> None:
+    """汇总、和上一次比、写 summary.json 和 report.md。"""
+    if case_set.sessions:
         results.sort(key=lambda st: (st.session_id, st.trial))
         summary = summarize_sessions(case_set, results)
         trials = [t for st in results for t in st.turns if t.graded]
     else:
         trials = sorted(results, key=lambda t: (t.case_id, t.trial))
         summary = summarize(case_set.cases, trials)
-    prev_dir = _previous_run(args.compare, args.cases, args.label, run_dir)
+    prev_dir = _previous_run(compare_spec, meta["cases"], meta.get("label", ""), run_dir)
     diff = None
     if prev_dir is not None:
         prev_meta = json.loads((prev_dir / "meta.json").read_text(encoding="utf-8"))
@@ -146,11 +158,31 @@ def main(argv: list[str] | None = None) -> None:
             meta["compared_with"] += "（⚠️ 题库改过，逐题对比仅供参考）"
         diff = compare(json.loads((prev_dir / "summary.json").read_text(encoding="utf-8")), summary)
 
-    (run_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json(run_dir / "meta.json", meta)
+    _write_json(run_dir / "summary.json", summary)
     report = render(meta, summary, diff, trials)
     (run_dir / "report.md").write_text(report, encoding="utf-8")
     print("\n" + report)
+
+
+def rebuild(run_dir: Path, compare_spec: str) -> None:
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    only = set(meta["only"]) if meta.get("only") else None
+    case_set = load_cases(meta["cases"], only)
+    if case_set.sha1 != meta["cases_sha1"]:
+        print(f"⚠️ 题库 {meta['cases']} 在这次运行之后改过，按现在的题库汇总")
+    if case_set.sessions:
+        rows = (run_dir / "sessions.jsonl").read_text(encoding="utf-8").splitlines()
+        results = [SessionTrial.from_dict(json.loads(r)) for r in rows if r.strip()]
+    else:
+        rows = (run_dir / "trials.jsonl").read_text(encoding="utf-8").splitlines()
+        results = [Trial.from_dict(json.loads(r)) for r in rows if r.strip()]
+    meta.pop("compared_with", None)
+    finish(run_dir, meta, case_set, results, compare_spec)
+
+
+def _write_json(path: Path, data: object) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
 def _parse_sets(items: list[str]) -> dict[str, object]:
@@ -204,9 +236,9 @@ def _previous_run(spec: str, cases: str, label: str, current: Path) -> Path | No
     return runs[-1] if runs else None
 
 
-if __name__ == "__main__":
-    main()
-
-
 def _same_kind(meta: dict, cases: str, label: str) -> bool:
     return meta.get("cases") == cases and meta.get("label", "") == label
+
+
+if __name__ == "__main__":
+    main()

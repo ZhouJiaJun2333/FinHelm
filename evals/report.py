@@ -122,6 +122,9 @@ def summarize_sessions(case_set: CaseSet, sessions: list[SessionTrial]) -> dict[
         "回忆轮": len(recalls),
         "回忆轮答对": sum(t.answer_ok for t in recalls),
         "回忆轮重查": sum(bool(t.sql_calls) for t in recalls),
+        # 填充轮不判分，出错不进「运行出错」—— 但它会让这一轮回滚、上下文没按预期变大，得单独看
+        "填充轮出错": dict(Counter(t.error.split(":")[0] for st in sessions for t in st.turns
+                                    if not t.graded and t.error)),
         "平均会话输入token": round(sum(st.usage.prompt_tokens for st in sessions) / n),
         "平均会话耗时s": round(sum(st.elapsed_s for st in sessions) / n, 1),
         "逐段": {
@@ -189,6 +192,8 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
             f"- {ss['会话数']} 段会话，平均每段 {ss['平均会话输入token']:,} 输入 token、{ss['平均会话耗时s']}s",
             f"- 平均每段清理 {ss['平均清理次数']} 次、压缩 {ss['平均压缩次数']} 次",
             f"- 回忆轮 {ss['回忆轮']} 次：答对 {ss['回忆轮答对']}，其中重新查了 {ss['回忆轮重查']} 次",
+            *([f"- ⚠️ 填充轮出错（这一轮回滚，没撑大上下文）："
+               + "，".join(f"{k} × {v}" for k, v in ss["填充轮出错"].items())] if ss.get("填充轮出错") else []),
             "",
         ]
         for sid, runs in ss["逐段"].items():

@@ -308,3 +308,41 @@ def test_命令行临时配置_数字布尔按JSON解析_字段名要存在():
                    "openai_native_thinking": False, "openai_model": "deepseek-flash"}
     with pytest.raises(SystemExit):
         _parse_sets(["context_clear_trigger=1"])          # 少了 _tokens，字段名不对
+
+
+def test_运行记录存下再读回来一模一样():
+    """--rebuild 靠它：报告那一步崩了，能从 jsonl 重新出报告。"""
+    import json
+
+    from data_agent.core.messages import Usage
+    from evals.graders import AnswerCheck, ResultMatch
+    from evals.runner import SessionTrial
+
+    t = Trial("m/1", 2, answer="华东 810 万", sql_calls=[SqlCall("SELECT 1", True, "试试")],
+              usage=Usage(10, 2, 30, 0), calls=[Usage(5, 1), Usage(5, 1, 30)], after_edit=[1],
+              result=ResultMatch(True, False, ""), answer_check=AnswerCheck(False, [8.1e6], 2))
+    st = SessionTrial("m", 2, turns=[t, Trial("m/2", 2, graded=False, error="OutputTruncated: …")],
+                      edits=[{"turn": 1, "kind": "ToolResultsCleared", "before": 9, "after": 3}])
+    back = SessionTrial.from_dict(json.loads(json.dumps(st.to_dict())))
+    assert back == st
+    assert back.turns[0].answer_ok is False and back.turns[1].failure == ""
+
+
+def test_找上一次运行_只认同一题库同一标签(tmp_path, monkeypatch):
+    import json
+
+    import evals.run as run
+
+    def fake(name, cases, label):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "meta.json").write_text(json.dumps({"cases": cases, "label": label}), encoding="utf-8")
+        (d / "summary.json").write_text("{}", encoding="utf-8")
+        return d
+
+    monkeypatch.setattr(run, "RUNS_DIR", tmp_path)
+    fake("20260101-000000_shop_multi_m", "shop_multi", "")
+    want = fake("20260102-000000_shop_multi_m_现状", "shop_multi", "现状")
+    fake("20260103-000000_shop_multi_m_不清理", "shop_multi", "不清理")
+    fake("20260104-000000_shop_m", "shop", "")
+    assert run._previous_run("last", "shop_multi", "现状", tmp_path / "now") == want
