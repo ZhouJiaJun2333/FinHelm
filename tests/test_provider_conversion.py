@@ -307,3 +307,24 @@ def test_单次调用可以指定输出上限(monkeypatch):
     with pytest.raises(openai.BadRequestError):
         provider.chat([Message.user("q")])
     assert sent["max_tokens"] == 8192
+
+
+# ============================================================ Anthropic 的 prompt 缓存（第 5 步）
+def test_anthropic_开缓存_系统提示词一个断点_顶层自动缓存对话():
+    """Anthropic 不打 cache_control 就一个 token 都不缓存（DeepSeek / 百炼是自动的）。"""
+    provider = AnthropicProvider(api_key="x")
+    kw = provider._request_kwargs([Message.user("问题")], TOOLS, "你是分析师", None)
+    assert kw["cache_control"] == {"type": "ephemeral"}
+    assert kw["system"] == [{"type": "text", "text": "你是分析师", "cache_control": {"type": "ephemeral"}}]
+    # 断点数量上限是 4 个：系统提示词 1 个 + 自动缓存 1 个
+    assert str(kw).count("cache_control") == 2
+
+
+def test_anthropic_写摘要的请求和平时的请求_缓存前缀一样():
+    """写摘要 = 上一次请求的开头 + 追加一条要求。tools、system 必须逐字相同，才读得到缓存。"""
+    provider = AnthropicProvider(api_key="x")
+    history = [Message.user("问题"), Message.assistant("答案")]
+    normal = provider._request_kwargs([*history, Message.user("下一个问题")], TOOLS, "你是分析师", None)
+    summary = provider._request_kwargs([*history, Message.user("请写摘要")], TOOLS, "你是分析师", 16000)
+    assert summary["tools"] == normal["tools"] and summary["system"] == normal["system"]
+    assert summary["messages"][:2] == normal["messages"][:2]
