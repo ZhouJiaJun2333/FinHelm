@@ -101,7 +101,7 @@ pytest
 ├── examples/
 │   └── event_demo.py           事件/回调机制的最小演示
 ├── docs/                       可运行的「为什么这么写」说明（见上面的表）
-└── tests/                      208 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
+└── tests/                      211 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
     ├── test_agent_loop.py                    主循环行为
     ├── test_stop_reason_and_finish_turn.py   完成判定 + 结束钩子
     ├── test_provider_conversion.py           两家 provider 的格式转换

@@ -240,6 +240,11 @@ def test_消息不可变_要改只能生成新对象():
     "input length and `max_tokens` exceed context limit: 190000 + 16000 > 200000",  # Anthropic
     "Error code: 400 - {'error': {'code': 'context_length_exceeded'}}",              # OpenAI
     "This model's maximum context length is 131072 tokens. However, you requested 140000 tokens",
+    # 阿里云百炼，两个端点的真实报错原文（2026-09-24 实测）
+    "Error code: 400 - {'error': {'code': 'invalid_parameter_error', 'param': None, "
+    "'message': 'Range of input length should be [1, 983616]', 'type': 'invalid_request_error'}}",
+    "Error code: 400 - {'request_id': 'c21804f9', 'code': 'InvalidParameter', "
+    "'message': 'Range of input length should be [1, 1000000]'}",
 ])
 def test_认得各家的上下文超长报错(message):
     assert is_context_overflow(message)
@@ -249,6 +254,9 @@ def test_认得各家的上下文超长报错(message):
     "Invalid max_tokens value, the valid range of max_tokens is [1, 393216]",
     "messages: roles must alternate between user and assistant",
     "tool_use ids were found without tool_result blocks",
+    # 百炼的其他参数错误也用 invalid_parameter_error，不能只看 code
+    "Error code: 400 - {'error': {'code': 'invalid_parameter_error', "
+    "'message': 'Range of max_tokens should be [1, 65536]'}}",
 ])
 def test_别的400不当成超长(message):
     """认错了会白白压缩一次，然后原来的错照样出现。"""
