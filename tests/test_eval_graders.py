@@ -297,3 +297,14 @@ def test_记下哪几次调用紧跟在整理之后():
     assert t2.after_compact == [0] and st.after_compact == [2]
     assert s["清理后调用次数"] == 1 and s["清理后调用命中率"] == 400 / 1000
     assert s["压缩后调用次数"] == 1 and s["压缩后调用命中率"] == 100 / 1000
+
+
+def test_命令行临时配置_数字布尔按JSON解析_字段名要存在():
+    from evals.run import _parse_sets
+
+    got = _parse_sets(["context_clear_min_result_tokens=1000", "CONTEXT_CLEAR_LOW_WATER_RATIO=0.75",
+                       "openai_native_thinking=false", "openai_model=deepseek-flash"])
+    assert got == {"context_clear_min_result_tokens": 1000, "context_clear_low_water_ratio": 0.75,
+                   "openai_native_thinking": False, "openai_model": "deepseek-flash"}
+    with pytest.raises(SystemExit):
+        _parse_sets(["context_clear_trigger=1"])          # 少了 _tokens，字段名不对

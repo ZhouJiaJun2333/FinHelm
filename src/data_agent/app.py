@@ -90,6 +90,8 @@ def build_application(
             trigger_tokens=cap(settings.context_clear_trigger_tokens),
             keep_recent=settings.context_keep_tool_results,
             clear_at_least=settings.context_clear_at_least,
+            min_result_tokens=settings.context_clear_min_result_tokens,
+            low_water_ratio=settings.context_clear_low_water_ratio,
         ),
         CompactHistory(
             summarize=llm_summarizer(llm, max_tokens=settings.context_compact_max_tokens),

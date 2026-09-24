@@ -202,13 +202,16 @@ class SessionTrial:
 
 
 def run_session(session: Session, trial: int, settings: Settings, db: Database,
-                golds: dict[str, Gold]) -> SessionTrial:
-    """同一个 Agent 按顺序回答每一轮。某一轮出错（Agent.run 是事务，历史会回滚）就记下来接着问。"""
+                golds: dict[str, Gold], forced: dict[str, Any] | None = None) -> SessionTrial:
+    """同一个 Agent 按顺序回答每一轮。某一轮出错（Agent.run 是事务，历史会回滚）就记下来接着问。
+
+    配置的优先级：forced（命令行 --set）> 会话自带的 settings > .env。
+    """
     st = SessionTrial(session.id, trial)
     events: list[Event] = []
     started = time.perf_counter()
     try:
-        app = build_application(settings.model_copy(update=session.settings),
+        app = build_application(settings.model_copy(update={**session.settings, **(forced or {})}),
                                 on_event=collect_sink(events))
     except Exception as exc:  # noqa: BLE001
         st.error = f"{type(exc).__name__}: {exc}"

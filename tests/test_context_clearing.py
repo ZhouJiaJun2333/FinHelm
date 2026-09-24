@@ -101,6 +101,46 @@ def test_省得不够clear_at_least就不清():
     assert not any(cleared(c) for c in tool_contents(ctx.render()))
 
 
+def test_小结果不清_断点挪到第一条大结果():
+    """最早的往往是几百字的汇总：清它省几十 token，缓存却从开头断掉。"""
+    ctx = Context([ClearOldToolResults(trigger_tokens=3_000, keep_recent=2, clear_at_least=500,
+                                       min_result_tokens=500)])
+    ctx.add(Message.user("各区域销售额"))
+    small = "| 华东 | 8100531.47 |\n" * 8                    # 两三百 token，比占位长
+    add_tool_round(ctx, "s0", result=small)
+    for i in range(4):
+        add_tool_round(ctx, f"c{i}")
+
+    ctx.maintain(measure)
+    contents = tool_contents(ctx.render())
+    assert contents[0] == small
+    assert [cleared(c) for c in contents] == [False, True, True, False, False]
+
+
+def test_清完降不到低水位就不清():
+    """清理跟不上（清完还贴着门槛）时不清：隔几步又会过门槛、又断一次缓存，不如交给压缩。"""
+    size = measure(make_ctx(5).render())
+    freed = size - measure(_cleared_view(make_ctx(5)))
+    after = size - freed
+
+    too_high = make_ctx(5, low_water_ratio=(after - 1) / 3_000)
+    assert too_high.maintain(measure) == []
+
+    low_enough = make_ctx(5, low_water_ratio=(after + 1) / 3_000)
+    assert low_enough.maintain(measure) != []
+
+
+def test_强制整理时不看低水位():
+    """API 已经报超长了，能省一点是一点。"""
+    ctx = make_ctx(5, low_water_ratio=0.01)
+    assert ctx.maintain(measure, force=True) != []
+
+
+def _cleared_view(ctx: Context) -> list[Message]:
+    ctx.maintain(measure)
+    return ctx.render()
+
+
 def test_清完远低于阈值_下一次请求不会再清():
     """一次清一批，之后是纯追加 —— 否则每次请求都改历史，缓存永远命中不了。"""
     ctx = make_ctx(5)

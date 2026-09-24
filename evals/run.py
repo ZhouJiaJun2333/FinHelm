@@ -4,7 +4,13 @@
     --model qwen3.6-flash     换个模型比一比（token plan 里的都行）
     --only shop-003,shop-011  只跑这几道（调试某道题时用）
     --workers 4               同时跑几个 trial（太多会撞 API 限流）
-    --compare last|none|路径   和哪次运行对比，默认和同一题库的上一次比
+    --compare last|none|路径   和哪次运行对比，默认和同一题库、同一标签的上一次比
+    --set KEY=VALUE           临时改一项配置（可以写多次），优先级高于会话自带的 settings
+    --label 名字              给这次运行起个名，写进目录名和报告，比较几种配置时用
+
+比较几种配置（三个进程可以同时跑）：
+    python -m evals.run --cases shop_multi --trials 2 --label 现状
+    python -m evals.run --cases shop_multi --trials 2 --label 只清大结果         --set context_clear_min_result_tokens=1000 --set context_clear_low_water_ratio=0.75
 
 多轮题库（python -m evals.run --cases shop_multi --trials 2）：一个 trial = 整段会话跑一遍，
 --only 填会话 id。
@@ -46,12 +52,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--model", help="覆盖 .env 里的 OPENAI_MODEL")
     ap.add_argument("--only", help="逗号分隔的题目 id")
     ap.add_argument("--compare", default="last")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", dest="sets")
+    ap.add_argument("--label", default="")
     args = ap.parse_args(argv)
 
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     load_dotenv(ROOT / ".env")
+    forced = _parse_sets(args.sets)
     overrides = {"openai_model": args.model} if args.model else {}
-    settings = Settings(**overrides)
+    settings = Settings(**overrides, **forced)
     model = settings.openai_model if settings.provider == "openai" else settings.anthropic_model
 
     only = set(args.only.split(",")) if args.only else None
@@ -77,7 +86,8 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(f"{c.id} 的 answer_sql 查不出可核对的数字（空、太多行或没有数）")
 
     started = datetime.now()
-    run_dir = RUNS_DIR / f"{started:%Y%m%d-%H%M%S}_{args.cases}_{model}"
+    label = f"_{args.label}" if args.label else ""
+    run_dir = RUNS_DIR / f"{started:%Y%m%d-%H%M%S}_{args.cases}_{model}{label}"
     run_dir.mkdir(parents=True)
     meta = {
         "cases": args.cases,
@@ -85,6 +95,10 @@ def main(argv: list[str] | None = None) -> None:
         "only": sorted(only) if only else None,
         "model": model,
         "provider": settings.provider,
+        # 同一个模型在不同端点上缓存规则、限流都不一样（百炼 vs DeepSeek 官方）
+        "base_url": settings.openai_base_url if settings.provider == "openai" else None,
+        "label": args.label,
+        "overrides": forced,
         "trials": args.trials,
         "started": f"{started:%Y-%m-%d %H:%M:%S}",
         "prompt_sha1": hashlib.sha1(SYSTEM_PROMPT.encode()).hexdigest()[:12],
@@ -103,7 +117,7 @@ def main(argv: list[str] | None = None) -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as pool, \
             open(run_dir / ("sessions.jsonl" if multi else "trials.jsonl"), "w", encoding="utf-8") as f:
         futures = [
-            pool.submit(run_session, u, i, settings, db, gold) if multi
+            pool.submit(run_session, u, i, settings, db, gold, forced) if multi
             else pool.submit(run_trial, u, i, settings, db, gold[u.id])
             for u, i in jobs
         ]
@@ -123,7 +137,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         trials = sorted(results, key=lambda t: (t.case_id, t.trial))
         summary = summarize(case_set.cases, trials)
-    prev_dir = _previous_run(args.compare, args.cases, run_dir)
+    prev_dir = _previous_run(args.compare, args.cases, args.label, run_dir)
     diff = None
     if prev_dir is not None:
         prev_meta = json.loads((prev_dir / "meta.json").read_text(encoding="utf-8"))
@@ -137,6 +151,21 @@ def main(argv: list[str] | None = None) -> None:
     report = render(meta, summary, diff, trials)
     (run_dir / "report.md").write_text(report, encoding="utf-8")
     print("\n" + report)
+
+
+def _parse_sets(items: list[str]) -> dict[str, object]:
+    """--set KEY=VALUE → {key: value}。值按 JSON 解析（数字、true/false），解析不了就当字符串。"""
+    out: dict[str, object] = {}
+    for item in items:
+        key, sep, raw = item.partition("=")
+        key = key.strip().lower()
+        if not sep or key not in Settings.model_fields:
+            sys.exit(f"--set {item}：要写成 KEY=VALUE，KEY 是 Settings 里的字段名")
+        try:
+            out[key] = json.loads(raw)
+        except json.JSONDecodeError:
+            out[key] = raw
+    return out
 
 
 def _progress(r: Trial | SessionTrial) -> str:
@@ -160,7 +189,7 @@ def _git() -> dict[str, object]:
             "dirty": bool(git("status", "--porcelain"))}
 
 
-def _previous_run(spec: str, cases: str, current: Path) -> Path | None:
+def _previous_run(spec: str, cases: str, label: str, current: Path) -> Path | None:
     if spec == "none":
         return None
     if spec != "last":
@@ -170,10 +199,14 @@ def _previous_run(spec: str, cases: str, current: Path) -> Path | None:
     runs = sorted(
         d for d in RUNS_DIR.glob(f"*_{cases}_*")
         if d != current and (d / "summary.json").exists()
-        and json.loads((d / "meta.json").read_text(encoding="utf-8")).get("cases") == cases
+        and _same_kind(json.loads((d / "meta.json").read_text(encoding="utf-8")), cases, label)
     )
     return runs[-1] if runs else None
 
 
 if __name__ == "__main__":
     main()
+
+
+def _same_kind(meta: dict, cases: str, label: str) -> bool:
+    return meta.get("cases") == cases and meta.get("label", "") == label
