@@ -72,7 +72,7 @@ pytest
 │   │   ├── messages.py           统一消息结构 = 整个项目的「通用语」
 │   │   ├── events.py             运行事件（解耦「运行」和「展示」）
 │   │   ├── errors.py             运行时异常（截断 / 拒绝 / 未知停止原因）
-│   │   ├── context.py            上下文管理（扩展点）
+│   │   ├── context.py            上下文管理：清理旧工具结果（ToolResultClearingContext）
 │   │   ├── tokens.py             上下文用量：锚点 + 增量估算（/context 命令看）
 │   │   └── agent.py              主循环 ← 心脏（run() 约 50 行，
 │   │                             其余是 stop_reason 分诊和两个钩子）
@@ -276,7 +276,7 @@ docker exec dataagent-postgres psql -U agent_ro -d analytics -c "DELETE FROM ord
 
 | 想加的东西 | 动哪里 | 大致做法 |
 |---|---|---|
-| **上下文压缩** | `core/context.py` 派生新类 | 超阈值时把早期回合交给小模型做摘要，替换成一条 summary |
+| **上下文压缩** | `core/context.py` 派生新类 | 第一层已实现：超阈值时把较早的工具结果换成占位（`ToolResultClearingContext`）。下一层：把早期回合交给模型做摘要 |
 | **长期记忆** | `app.py` 里的 `dynamic_context` 钩子 | 用户偏好、历史结论落盘，每轮检索相关片段拼进系统提示词 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
 | **画图** | `tools/` 下开个 `chart/` 子包 | 查询结果交给 matplotlib，存图返回路径 |

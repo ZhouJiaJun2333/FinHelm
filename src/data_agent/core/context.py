@@ -36,9 +36,15 @@ tests/ 里的哨兵仍然按「严格交替 + tool_use 配对」来验。交替�
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from dataclasses import replace
+from typing import Any, Callable, Iterable
 
+from .events import ContextCleared
 from .messages import Message
+from .tokens import estimate_message
+
+# 给一份消息列表估 token 数。由 Agent 提供 —— 只有它知道系统提示词和工具定义。
+Measure = Callable[[list[Message]], int]
 
 
 class BaseContext(ABC):
@@ -55,6 +61,16 @@ class BaseContext(ABC):
         注意方法名是 render 不是 messages —— 它强调这是「算出来的视图」，
         可以和内部存的历史不一样（压缩、裁剪、插入检索结果都发生在这里）。
         """
+
+    def maintain(self, measure: Measure) -> ContextCleared | None:
+        """每次请求模型**之前**调用一次，给上下文一个整理自己的机会。
+
+        默认什么都不做。需要压缩的子类覆盖它，做了事就返回一个事件供界面展示。
+
+        为什么是「请求前」而不是「追加消息时」：要不要压缩取决于**整个请求**
+        有多大（含系统提示词、工具定义），这只有在马上要发的时候才算得准。
+        """
+        return None
 
     @abstractmethod
     def clear(self) -> None:
@@ -103,6 +119,128 @@ class FullContext(BaseContext):
 
     def __len__(self) -> int:
         return len(self._history)
+
+
+class ToolResultClearingContext(FullContext):
+    """超过阈值时，把较早的工具结果换成一句占位文字。最便宜的一种压缩。
+
+    参数照抄 Anthropic 服务端的同款功能（context editing 的 clear_tool_uses）：
+
+        trigger_tokens  请求估算超过它才动手
+        keep_recent     最近几条工具结果不动（模型多半正在用）
+        clear_at_least  一次至少要省下这么多，否则不清 —— 见下面「缓存」
+        exclude_tools   这些工具的结果永远不清
+
+    为什么先清工具结果：它是上下文里最大的一块（SQL 结果表格），而且
+    **能重新拿到** —— 调用参数（那条 SQL）还留在 assistant 消息里，模型需要
+    数据时再跑一次就行。用户的原话、模型的结论清掉就找不回来了，那是摘要
+    （第 4 步）的事。
+
+    ── 原件不删，只改视图 ────────────────────────────────────────────
+    内部历史一个字不动，清理只记在 _cleared 里，render() 时才换成占位。
+    好处：原件还在（以后能做「按需取回」），回滚只要连 _cleared 一起恢复。
+
+    ── 缓存：为什么要攒一批才清 ──────────────────────────────────────
+    prompt 缓存是前缀匹配。改了第 k 条消息，第 k 条之后的缓存全部失效，
+    下一次请求要重新写缓存（Anthropic 写缓存比正常输入还贵 25%）。
+    如果规则是「永远只留最近 3 条」，每来一条新结果，边界就往后挪一格，
+    **每次请求都改历史** —— 缓存永远命中不了，省下的 token 还不够赔写缓存的钱。
+    所以：超过 trigger 才动手，一动手就把能清的全清掉，而且省得不够
+    clear_at_least 就干脆不动。清完以后远低于阈值，之后的请求都是纯追加，
+    缓存又能命中，直到下一次涨过阈值。
+
+    ── 锚点会失效 ────────────────────────────────────────────────────
+    usage 锚点的前提是「它之前的消息没被改过」（见 Message.usage）。
+    清掉第 k 条之后，第 k 条后面、清理**之前**就已存在的锚点量的是清理前的
+    视图，都作废；清理**之后**才追加的锚点，量的就是清理后的视图，照样有效。
+    _cleared 里记的「清理时历史有多长」就是用来区分这两种的。
+    """
+
+    PLACEHOLDER = (
+        "[这条工具结果已被清理，以节省上下文。调用参数还在上面的工具调用里；"
+        "如果还需要这些数据，重新调用一次即可。]"
+    )
+
+    def __init__(
+        self,
+        trigger_tokens: int = 100_000,
+        keep_recent: int = 3,
+        clear_at_least: int = 10_000,
+        exclude_tools: Iterable[str] = (),
+    ) -> None:
+        super().__init__()
+        self.trigger_tokens = trigger_tokens
+        self.keep_recent = keep_recent
+        self.clear_at_least = clear_at_least
+        self.exclude_tools = frozenset(exclude_tools)
+        # tool_call_id → 清理那一刻历史的长度。
+        # 下标小于这个长度的消息都是清理之前加进来的。
+        self._cleared: dict[str, int] = {}
+
+    # ------------------------------------------------------------ 视图
+    def render(self) -> list[Message]:
+        out: list[Message] = []
+        # 到目前为止，前面被清理的消息里「清理时历史长度」的最大值。
+        # 下标比它小的锚点是在那次清理之前量的，已经不准了。
+        stale_before = 0
+        for i, m in enumerate(self._history):
+            if m.role == "tool" and m.tool_call_id in self._cleared:
+                stale_before = max(stale_before, self._cleared[m.tool_call_id])
+                m = Message.tool_result(m.tool_call_id, self.PLACEHOLDER)
+            elif m.usage is not None and i < stale_before:
+                # 生成新对象，不改原消息 —— 原消息还在历史和快照里
+                m = replace(m, usage=None)
+            out.append(m)
+        return out
+
+    # ------------------------------------------------------------ 清理
+    def maintain(self, measure: Measure) -> ContextCleared | None:
+        before = measure(self.render())
+        if before <= self.trigger_tokens:
+            return None
+
+        targets = self._clearable()
+        placeholder_cost = estimate_message(Message.tool_result("", self.PLACEHOLDER))
+        freed = sum(estimate_message(m) - placeholder_cost for m in targets)
+        if freed < self.clear_at_least:
+            # 省得太少，不值得为此让缓存失效一次
+            return None
+
+        for m in targets:
+            self._cleared[m.tool_call_id] = len(self._history)
+        return ContextCleared(len(targets), before, measure(self.render()))
+
+    def _clearable(self) -> list[Message]:
+        """能清的工具结果：还没清过、不在排除名单里、不是最近 keep_recent 条。"""
+        tool_names = {
+            c.id: c.name for m in self._history for c in m.tool_calls
+        }
+        results = [m for m in self._history if m.role == "tool"]
+        older = results[: max(len(results) - self.keep_recent, 0)]
+        return [
+            m for m in older
+            if m.tool_call_id not in self._cleared
+            and tool_names.get(m.tool_call_id) not in self.exclude_tools
+        ]
+
+    # ------------------------------------------------------ 状态 / 事务
+    def clear(self) -> None:
+        super().clear()
+        self._cleared.clear()
+
+    # 清理状态也是上下文的一部分，必须一起进快照。否则一轮失败回滚后，
+    # 历史回去了，_cleared 里却还留着这一轮清理的记录。
+    def snapshot(self) -> tuple[list[Message], dict[str, int]]:
+        return list(self._history), dict(self._cleared)
+
+    def restore(self, snapshot: tuple[list[Message], dict[str, int]]) -> None:
+        history, cleared = snapshot
+        self._history[:] = history
+        self._cleared = dict(cleared)
+
+    @property
+    def cleared_count(self) -> int:
+        return len(self._cleared)
 
 
 class TurnWindowContext(FullContext):

@@ -63,9 +63,18 @@ class StepLimitReached:
     max_steps: int
 
 
+@dataclass(slots=True)
+class ContextCleared:
+    """上下文管理器在请求前清理了一批旧工具结果。token 数都是估算值。"""
+
+    cleared: int             # 这次清理了几条
+    tokens_before: int
+    tokens_after: int
+
+
 Event = (
     LLMResponded | ToolStarted | ToolFinished | ToolDenied
-    | TurnContinued | StepLimitReached
+    | TurnContinued | StepLimitReached | ContextCleared
 )
 
 

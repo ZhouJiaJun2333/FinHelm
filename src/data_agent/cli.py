@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from .app import Application, build_application
 from .core.errors import AgentError
 from .core.events import (
+    ContextCleared,
     Event,
     LLMResponded,
     StepLimitReached,
@@ -66,6 +67,9 @@ def make_console_sink(verbose: bool):
             case StepLimitReached(max_steps=n):
                 print(f"\n⚠️ 触发步数上限 {n}")
 
+            case ContextCleared(cleared=n, tokens_before=before, tokens_after=after):
+                print(f"\n🧹 清理了 {n} 条较早的工具结果：上下文 {_k(before)} → {_k(after)}（估算）")
+
     return sink
 
 
@@ -99,6 +103,9 @@ def _print_context(app: Application) -> None:
     else:
         print(f"  ├ 精确 {_k(est.usage_tokens):>7}  ← 第 {est.anchor_index + 1} 条消息的 usage")
         print(f"  └ 估算 {_k(est.trailing_tokens):>7}  ← 之后新加的消息")
+    cleared = getattr(app.agent.context, "cleared_count", 0)
+    if cleared:
+        print(f"已清理的旧工具结果：{cleared} 条（原件还在，只是不再发给模型）")
     print(
         f"本次会话累计：输入 {_k(total.prompt_tokens)}"
         f"（缓存命中 {_k(total.cache_read)}，写入 {_k(total.cache_write)}）"

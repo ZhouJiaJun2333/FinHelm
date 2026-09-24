@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .core.agent import Agent, ApprovalHook, FinishTurnHook
-from .core.context import FullContext
+from .core.context import ToolResultClearingContext
 from .core.events import Event, noop_sink
 from .db.connection import Database
 from .db.introspection import SchemaInspector
@@ -75,12 +75,24 @@ def build_application(
     # --- 模型层 ---
     llm = llm or build_provider(settings)
 
+    # --- 上下文 ---
+    # 触发线取「配置值」和「窗口 - 余量」里小的那个：配置写 10 万，
+    # 但换成一个 32k 窗口的模型时，不能等到 10 万才动手。
+    trigger = settings.context_clear_trigger_tokens
+    if llm.context_window:
+        trigger = min(trigger, llm.context_window - settings.context_reserve_tokens)
+    context = ToolResultClearingContext(
+        trigger_tokens=trigger,
+        keep_recent=settings.context_keep_tool_results,
+        clear_at_least=settings.context_clear_at_least,
+    )
+
     # --- Agent ---
     agent = Agent(
         llm=llm,
         tools=tools,
         system_prompt=SYSTEM_PROMPT,
-        context=FullContext(),
+        context=context,
         max_steps=settings.max_steps,
         approval_hook=approval_hook,
         finish_turn_hook=finish_turn_hook,

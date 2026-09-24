@@ -112,7 +112,10 @@ class Agent:
         self.llm = llm
         self.tools = tools
         self.system_prompt = system_prompt
-        self.context = context or FullContext()
+        # ⚠️ 必须写 is None，不能写 `context or FullContext()`：
+        #    FullContext 定义了 __len__，空的上下文在布尔判断里是 False，
+        #    传进来的上下文会被悄悄换掉 —— 配好的压缩策略永远不生效，也不报错。
+        self.context = context if context is not None else FullContext()
         self.max_steps = max_steps
         self.approval_hook = approval_hook
         self.finish_turn_hook = finish_turn_hook
@@ -165,10 +168,23 @@ class Agent:
         self.context.add(Message.user(user_input))
 
         for step in range(1, self.max_steps + 1):
+            system = self._render_system_prompt()
+            tools = self.tools.schemas()
+
+            # 发请求之前给上下文一次整理的机会（超阈值就清理旧工具结果）。
+            # 放在循环里、而不是只在一轮开头：一轮里可能连调十几次工具，
+            # 上下文在一轮**之内**就可能涨过阈值。
+            overhead = estimate_overhead(system, tools)
+            edit = self.context.maintain(
+                lambda msgs: estimate_context(msgs, overhead=overhead).tokens
+            )
+            if edit is not None:
+                self.on_event(edit)
+
             response = self.llm.chat(
                 messages=self.context.render(),
-                tools=self.tools.schemas(),
-                system=self._render_system_prompt(),
+                tools=tools,
+                system=system,
             )
             # 在分诊之前记账：被截断的回复同样收费。
             self.session_usage += response.usage

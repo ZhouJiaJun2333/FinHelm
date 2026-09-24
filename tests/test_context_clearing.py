@@ -1,0 +1,276 @@
+"""第 2 步：清理较早的工具结果。
+
+守五件事：
+1. 什么时候清（阈值、保留最近几条、排除名单、省得不够就不清）
+2. 清的是视图不是原件，而且 tool_call / tool_result 仍然配对
+3. 锚点：清理之前量的作废，清理之后量的有效
+4. 缓存友好：除了清理那一步，每次请求都是上一次请求的纯追加
+5. 事务：一轮失败回滚时，清理状态跟着回滚
+"""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import BaseModel
+
+from data_agent.core.agent import Agent
+from data_agent.core.context import ToolResultClearingContext
+from data_agent.core.errors import OutputTruncated
+from data_agent.core.events import ContextCleared, Event, collect_sink
+from data_agent.core.messages import LLMResponse, Message, ToolCall, Usage
+from data_agent.core.tokens import estimate_context, estimate_message
+from data_agent.llm.anthropic_provider import AnthropicProvider
+from data_agent.llm.base import LLMProvider
+from data_agent.tools.base import Tool
+from data_agent.tools.registry import ToolRegistry
+
+# 一张像样的 SQL 结果表：约 1.4k token
+BIG_RESULT = "| 华东 | 8100531.47 | 3017 |\n" * 60
+
+
+def measure(msgs: list[Message]) -> int:
+    return estimate_context(msgs).tokens
+
+
+def add_tool_round(ctx, call_id: str, name: str = "run_sql", result: str = BIG_RESULT,
+                   usage: Usage | None = None) -> None:
+    ctx.add(Message(role="assistant", content="查一下",
+                    tool_calls=[ToolCall(call_id, name, {"sql": f"SELECT {call_id}"})],
+                    usage=usage))
+    ctx.add(Message.tool_result(call_id, result))
+
+
+def make_ctx(n_calls: int, **kw) -> ToolResultClearingContext:
+    kw.setdefault("trigger_tokens", 3_000)
+    kw.setdefault("keep_recent", 2)
+    kw.setdefault("clear_at_least", 500)
+    ctx = ToolResultClearingContext(**kw)
+    ctx.add(Message.user("各区域销售额"))
+    for i in range(n_calls):
+        add_tool_round(ctx, f"c{i}")
+    return ctx
+
+
+def tool_contents(msgs: list[Message]) -> list[str]:
+    return [m.content for m in msgs if m.role == "tool"]
+
+
+# =============================================================== 什么时候清
+def test_没超阈值什么都不做():
+    ctx = make_ctx(1)
+    assert ctx.maintain(measure) is None
+    assert ctx.render() == ctx._history
+
+
+def test_超阈值时清掉较早的_保留最近keep条():
+    ctx = make_ctx(5, keep_recent=2)
+    edit = ctx.maintain(measure)
+
+    assert edit is not None and edit.cleared == 3
+    assert edit.tokens_after < edit.tokens_before
+    contents = tool_contents(ctx.render())
+    assert contents[:3] == [ToolResultClearingContext.PLACEHOLDER] * 3
+    assert contents[3:] == [BIG_RESULT, BIG_RESULT]
+
+
+def test_排除名单里的工具永远不清():
+    ctx = ToolResultClearingContext(trigger_tokens=3_000, keep_recent=0,
+                                    clear_at_least=500, exclude_tools=["describe_table"])
+    ctx.add(Message.user("q"))
+    add_tool_round(ctx, "d1", name="describe_table")
+    for i in range(3):
+        add_tool_round(ctx, f"c{i}")
+
+    ctx.maintain(measure)
+    contents = tool_contents(ctx.render())
+    assert contents[0] == BIG_RESULT
+    assert contents[1:] == [ToolResultClearingContext.PLACEHOLDER] * 3
+
+
+def test_省得不够clear_at_least就不清():
+    """清理会让缓存失效一次。省得太少，不如不动。"""
+    ctx = make_ctx(5, clear_at_least=1_000_000)
+    assert ctx.maintain(measure) is None
+    assert ToolResultClearingContext.PLACEHOLDER not in tool_contents(ctx.render())
+
+
+def test_清完远低于阈值_下一次请求不会再清():
+    """一次清一批，之后是纯追加 —— 否则每次请求都改历史，缓存永远命中不了。"""
+    ctx = make_ctx(5)
+    assert ctx.maintain(measure) is not None
+    ctx.add(Message.assistant("好的"))
+    assert ctx.maintain(measure) is None
+
+
+# ====================================================== 视图 vs 原件、配对
+def test_只改视图_原件一个字不动():
+    ctx = make_ctx(5)
+    ctx.maintain(measure)
+    assert tool_contents(ctx._history) == [BIG_RESULT] * 5
+
+
+def test_清理后tool_call和tool_result仍然配对():
+    """清的是结果内容，不是消息本身 —— 删消息会留下悬空的 tool_call，直接 400。"""
+    ctx = make_ctx(5)
+    ctx.maintain(measure)
+    converted = AnthropicProvider.convert_messages(ctx.render())
+
+    uses, results = set(), set()
+    for m in converted:
+        if isinstance(m["content"], list):
+            for b in m["content"]:
+                if b.get("type") == "tool_use":
+                    uses.add(b["id"])
+                elif b.get("type") == "tool_result":
+                    results.add(b["tool_use_id"])
+    assert uses == results == {f"c{i}" for i in range(5)}
+
+
+# ================================================================== 锚点
+def test_清理位置之后的旧锚点作废_之前的保留():
+    ctx = ToolResultClearingContext(trigger_tokens=3_000, keep_recent=1, clear_at_least=500)
+    ctx.add(Message.user("q"))
+    ctx.add(Message(role="assistant", content="先看看", usage=Usage(input=900, output=10)))
+    ctx.add(Message.user("继续"))
+    add_tool_round(ctx, "c0", usage=Usage(input=1_000, output=10))
+    add_tool_round(ctx, "c1", usage=Usage(input=2_500, output=10))
+    add_tool_round(ctx, "c2", usage=Usage(input=4_000, output=10))
+
+    ctx.maintain(measure)
+    usages = [m.usage for m in ctx.render() if m.role == "assistant"]
+
+    # 第 1 条在被清理的 c0 结果之前，量它的时候视图和现在一样 → 有效
+    # 第 2 条（发起 c0 的那条）也在 c0 结果之前 → 有效
+    # 第 3、4 条量的时候 c0 还是原文，现在变成了占位 → 作废
+    assert usages == [Usage(input=900, output=10), Usage(input=1_000, output=10), None, None]
+    assert estimate_context(ctx.render()).anchor_index == 3
+
+
+def test_清理之后才加进来的锚点有效():
+    ctx = make_ctx(5)
+    ctx.maintain(measure)
+    fresh = Usage(input=2_000, output=30)
+    ctx.add(Message(role="assistant", content="答完了", usage=fresh))
+
+    rendered = ctx.render()
+    assert rendered[-1].usage == fresh
+    assert estimate_context(rendered).usage_tokens == fresh.context_tokens
+
+
+# ============================================================ 接进 Agent
+class BigTool(Tool):
+    name = "run_sql"
+    description = "返回一张大表"
+
+    class Args(BaseModel):
+        sql: str = "SELECT 1"
+
+    def run(self, args: Args) -> str:
+        return BIG_RESULT
+
+
+class RecordingProvider(LLMProvider):
+    model = "recording"
+
+    def __init__(self, script: list[LLMResponse]) -> None:
+        self.script = script
+        self.seen: list[list[Message]] = []
+
+    def chat(self, messages, tools=None, system=None) -> LLMResponse:
+        self.seen.append(list(messages))
+        return self.script[min(len(self.seen) - 1, len(self.script) - 1)]
+
+
+def calls(n: int) -> list[LLMResponse]:
+    return [
+        LLMResponse(text="", stop_reason="tool_use",
+                    tool_calls=[ToolCall(f"c{i}", "run_sql", {"sql": f"SELECT {i}"})])
+        for i in range(n)
+    ]
+
+
+def make_agent(script, **ctx_kw) -> tuple[Agent, RecordingProvider, list[Event]]:
+    ctx_kw.setdefault("trigger_tokens", 3_000)
+    ctx_kw.setdefault("keep_recent", 1)
+    ctx_kw.setdefault("clear_at_least", 500)
+    events: list[Event] = []
+    llm = RecordingProvider(script)
+    agent = Agent(
+        llm=llm,
+        tools=ToolRegistry([BigTool()]),
+        system_prompt="测试",
+        context=ToolResultClearingContext(**ctx_kw),
+        on_event=collect_sink(events),
+        max_steps=20,
+    )
+    return agent, llm, events
+
+
+def test_传进去的空上下文不会被悄悄换掉():
+    """回归：曾经写成 `context or FullContext()`。FullContext 有 __len__，
+    空的上下文是 False，配好的清理策略被换成了全量保留 —— 不报错，就是不生效。
+    """
+    ctx = ToolResultClearingContext()
+    agent = Agent(llm=RecordingProvider([]), tools=ToolRegistry([]),
+                  system_prompt="", context=ctx)
+    assert agent.context is ctx
+
+
+def test_agent在请求前清理_模型看到的是占位():
+    agent, llm, events = make_agent(calls(4) + [LLMResponse(text="完", stop_reason="end_turn")])
+    agent.run("各区域销售额")
+
+    assert any(isinstance(e, ContextCleared) for e in events)
+    assert ToolResultClearingContext.PLACEHOLDER in tool_contents(llm.seen[-1])
+
+
+def test_除了清理那一步_每次请求都是上一次请求的纯追加():
+    """这是「缓存友好」的可测定义：前缀不变，缓存才能命中。
+
+    如果每次请求都改历史（比如「永远只留最近 3 条」的滑动窗口），
+    这个测试里违规次数会等于请求次数。
+    """
+    agent, llm, events = make_agent(calls(8) + [LLMResponse(text="完", stop_reason="end_turn")])
+    agent.run("各区域销售额")
+
+    def shape(msgs):
+        # 只比较真正发给 API 的内容。usage 不会发出去，不算。
+        return [(m.role, m.content, m.tool_call_id, tuple(c.id for c in m.tool_calls))
+                for m in msgs]
+
+    rewrites = [
+        i for i, (prev, cur) in enumerate(zip(llm.seen, llm.seen[1:]))
+        if shape(cur)[: len(prev)] != shape(prev)
+    ]
+    clearings = sum(1 for e in events if isinstance(e, ContextCleared))
+    assert clearings >= 2, "测试没测到东西：至少应该触发两次清理"
+    # 每一次改历史都是一次有记录的清理，没有别的地方偷偷改
+    assert len(rewrites) == clearings
+    # 清完之后至少要有一次纯追加的请求，缓存才有机会命中。
+    # 滑动窗口式的「每次清一条」会在这里挂掉：它连续每一步都在改历史。
+    assert all(b - a > 1 for a, b in zip(rewrites, rewrites[1:])), rewrites
+
+
+def test_一轮失败回滚时清理状态也回滚():
+    agent, llm, _ = make_agent(
+        calls(4) + [LLMResponse(text="写到一半", stop_reason="max_tokens")]
+    )
+    with pytest.raises(OutputTruncated):
+        agent.run("问题")
+
+    assert agent.context.render() == []
+    assert agent.context.cleared_count == 0
+
+
+def test_清理后历史在anthropic格式下仍然合法():
+    agent, _, _ = make_agent(calls(6) + [LLMResponse(text="完", stop_reason="end_turn")])
+    agent.run("问题一")
+    agent.run("问题二")
+
+    converted = AnthropicProvider.convert_messages(agent.context.render())
+    roles = [m["role"] for m in converted]
+    assert not any(a == b for a, b in zip(roles, roles[1:])), roles
+    for m in converted:
+        if isinstance(m["content"], list):
+            for b in m["content"]:
+                assert b.get("type") != "tool_result" or b["content"], "tool_result 不能是空的"
