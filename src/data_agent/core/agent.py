@@ -226,8 +226,9 @@ class Agent:
                 # 本轮没有工具结果，历史以 assistant 结尾。必须补一条 user 消息：
                 # 以 assistant 结尾发请求，Anthropic 会当成 prefill（让模型接着
                 # 这段往下写），Opus 4.6 之后的模型不支持 prefill，直接 400。
+                # 标成 synthetic：它是 user 角色，但不是真人的新问题，不能算新回合的开头。
                 nudge = decision.nudge or "请继续完成上面的任务。"
-                self.context.add(Message.user(nudge))
+                self.context.add(Message.user(nudge).with_meta(synthetic=True))
                 self.on_event(TurnContinued(step=step, nudge=nudge))
 
         # 步数耗尽 —— 循环是被强行打断的，模型没机会说收尾那句话。
@@ -251,7 +252,7 @@ class Agent:
             f"已达到最大步数 {self.max_steps} 仍未得出结论。"
             "可以把问题拆小一点，或者调大 max_steps。"
         )
-        self.context.add(Message.assistant(fallback))
+        self.context.add(Message.assistant(fallback).with_meta(synthetic=True))
         return fallback
 
     # ------------------------------------------------------------------

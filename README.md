@@ -100,7 +100,7 @@ pytest
 ├── examples/
 │   └── event_demo.py           事件/回调机制的最小演示
 ├── docs/                       可运行的「为什么这么写」说明（见上面的表）
-└── tests/                      127 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
+└── tests/                      130 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
     ├── test_agent_loop.py                    主循环行为
     ├── test_stop_reason_and_finish_turn.py   完成判定 + 结束钩子
     ├── test_provider_conversion.py           两家 provider 的格式转换
@@ -178,6 +178,8 @@ Anthropic 的 thinking block、DeepSeek 的 `reasoning_content` 都是这一类�
 `assistant` 的 `tool_calls` 和后面 `role="tool"` 的结果**必须成对**。
 从中间截断，API 直接 400。要裁就以「一个完整回合」为单位——
 `core/context/turns.py::KeepRecentTurns` 演示了做法，`tests/` 里有对应的测试。
+注意「回合」从**真人提问**开始：Agent 自己补的 nudge 也是 `role="user"`，
+但它标了 `meta.synthetic`，不算新回合，否则切口会落在一轮中间、把原来的问题切掉。
 
 ### 7. ⚠️ 判断「完成了」不能只看有没有工具调用
 

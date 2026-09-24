@@ -4,7 +4,7 @@
                      ContextEdit：一道工序的接口，自己不持有状态
                      Marker：工序做出的决定，作为标记记进历史
     tool_results.py  ClearOldToolResults：超阈值时把较早的工具结果换成带线索的占位
-    turns.py         KeepRecentTurns：按回合裁剪
+    turns.py         KeepRecentTurns：按回合裁剪；turn_starts：回合从哪开始（跳过 nudge）
 
 用法：
     Context()                                     全量保留
@@ -14,9 +14,9 @@
 
 from .base import BaseContext, Context, ContextEdit, Entry, Marker, Measure
 from .tool_results import ClearOldToolResults, ToolResultsCleared
-from .turns import KeepRecentTurns
+from .turns import KeepRecentTurns, turn_starts
 
 __all__ = [
     "BaseContext", "Context", "ContextEdit", "Entry", "Marker", "Measure",
-    "ClearOldToolResults", "ToolResultsCleared", "KeepRecentTurns",
+    "ClearOldToolResults", "ToolResultsCleared", "KeepRecentTurns", "turn_starts",
 ]

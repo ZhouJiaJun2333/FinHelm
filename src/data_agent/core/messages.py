@@ -90,6 +90,12 @@ class MessageMeta:
     # 结果被清理时，它留在占位文字里当线索（可恢复的压缩）。
     summary: str = ""
 
+    # Agent 自己补的消息：finish_turn 的 nudge、步数耗尽时的兜底回答。
+    # 它们不是真人说的话，也不是模型真实的输出。发给模型时和普通消息没区别，
+    # 只影响本地怎么认它 —— 比如 nudge 虽然是 role="user"，却不算新回合的开头。
+    # （Claude Code 给这类消息标 isMeta，是同一回事。）
+    synthetic: bool = False
+
 
 @dataclass(frozen=True, slots=True)
 class Message:

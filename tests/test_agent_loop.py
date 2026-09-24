@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from data_agent.core.context import Context, KeepRecentTurns
+from data_agent.core.context import Context
 from data_agent.core.events import LLMResponded, ToolFinished
 from data_agent.core.messages import LLMResponse, Message, ToolCall
 from data_agent.tools.base import Tool
@@ -141,27 +141,6 @@ def test_每轮都会把完整工具表发给模型(registry):
 
 
 # ------------------------------------------------------------------ 上下文
-def test_按回合裁剪不会拆散工具调用():
-    """裁剪的单位必须是「回合」，不能是「消息」，否则 tool_call 和 tool_result 会被拆开。"""
-    ctx = Context([KeepRecentTurns(max_turns=1)])
-    # 第 1 轮
-    ctx.add(Message.user("问题1"))
-    ctx.add(Message(role="assistant", tool_calls=[ToolCall("a", "echo", {})]))
-    ctx.add(Message.tool_result("a", "结果1"))
-    ctx.add(Message.assistant("答案1"))
-    # 第 2 轮
-    ctx.add(Message.user("问题2"))
-    ctx.add(Message(role="assistant", tool_calls=[ToolCall("b", "echo", {})]))
-    ctx.add(Message.tool_result("b", "结果2"))
-
-    rendered = ctx.render()
-    assert rendered[0].content == "问题2"        # 第 1 轮整体被裁掉
-    # 保留下来的这轮里，tool_call 和它的结果都还在
-    call_ids = {c.id for m in rendered for c in m.tool_calls}
-    result_ids = {m.tool_call_id for m in rendered if m.role == "tool"}
-    assert call_ids == result_ids
-
-
 def test_全量上下文不裁剪():
     ctx = Context()
     for i in range(10):
