@@ -10,9 +10,9 @@
     --rebuild 目录            不跑模型，用存下的 trials/sessions.jsonl 重新出报告
                               （报告那一步崩了，或者改了报告格式想重出一遍）
 
-比较几种配置（三个进程可以同时跑）：
+比较几种配置（几个进程可以同时跑）：
     python -m evals.run --cases shop_multi --trials 2 --label 现状
-    python -m evals.run --cases shop_multi --trials 2 --label 只清大结果         --set context_clear_min_result_tokens=1000 --set context_clear_low_water_ratio=0.75
+    python -m evals.run --cases shop_multi --trials 2 --label 不清理 --set context_clear_trigger_tokens=1000000000
 
 多轮题库（python -m evals.run --cases shop_multi --trials 2）：一个 trial = 整段会话跑一遍，
 --only 填会话 id。

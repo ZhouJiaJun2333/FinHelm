@@ -302,9 +302,9 @@ def test_记下哪几次调用紧跟在整理之后():
 def test_命令行临时配置_数字布尔按JSON解析_字段名要存在():
     from evals.run import _parse_sets
 
-    got = _parse_sets(["context_clear_min_result_tokens=1000", "CONTEXT_CLEAR_LOW_WATER_RATIO=0.75",
+    got = _parse_sets(["context_clear_trigger_tokens=1000", "CONTEXT_COMPACT_MAX_TOKENS=16000",
                        "openai_native_thinking=false", "openai_model=deepseek-flash"])
-    assert got == {"context_clear_min_result_tokens": 1000, "context_clear_low_water_ratio": 0.75,
+    assert got == {"context_clear_trigger_tokens": 1000, "context_compact_max_tokens": 16000,
                    "openai_native_thinking": False, "openai_model": "deepseek-flash"}
     with pytest.raises(SystemExit):
         _parse_sets(["context_clear_trigger=1"])          # 少了 _tokens，字段名不对

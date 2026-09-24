@@ -62,10 +62,6 @@ class Settings(BaseSettings):
     context_clear_trigger_tokens: int = 100_000
     context_keep_tool_results: int = 3
     context_clear_at_least: int = 10_000
-    # 两个少断缓存的开关，默认关（原因见 core/context/tool_results.py 的「缓存」一节）：
-    # 比这小的工具结果不清；清完还高于「清理门槛 × 这个比例」就这次不清，交给压缩
-    context_clear_min_result_tokens: int = 0
-    context_clear_low_water_ratio: float = 0.0
     # 摘要压缩：清理之后请求估算还超过这个数，就把较早的回合换成模型写的摘要。
     # 15 万是 Anthropic API 服务端压缩的默认值。窗口 1M 不代表要用满 ——
     # 我们的旧回合（查完的 SQL 结果）价值低，DeepSeek Flash 长上下文容易走神，

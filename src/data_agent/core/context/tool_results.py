@@ -28,10 +28,6 @@ class ClearOldToolResults(ContextEdit):
         clear_at_least  一次至少要省下这么多，否则不清 —— 见下面「缓存」
         exclude_tools   这些工具的结果永远不清
 
-    另有两个我们自己加的开关（默认关），都是为了少断缓存，见下面「缓存」最后一段：
-        min_result_tokens  比这小的结果不清
-        low_water_ratio    清完还高于 trigger × 它，这次就不清了
-
     为什么先清工具结果：它是上下文里最大的一块（SQL 结果表格），而且
     **能重新拿到** —— 调用参数（那条 SQL）还留在 assistant 消息里，占位里
     还留着线索。用户的原话、模型的结论清掉就找不回来了，那是摘要的事。
@@ -49,15 +45,11 @@ class ClearOldToolResults(ContextEdit):
     clear_at_least 就干脆不动。清完以后远低于阈值，之后的请求都是纯追加，
     缓存又能命中，直到下一次涨过阈值。
 
-    多轮评测（2026-09-25 基线）发现这套设想有两处落空：
-      · 第一次清理几乎全断：最早的结果往往是几百字的小汇总（表清单、各区域销售额），
-        它们也被清了 —— 每条只省几十 token，缓存却从最开头断掉；这些数还正是后面
-        回忆要用的。→ min_result_tokens：小结果不清，断点挪到第一条大结果
-      · 清完还贴着门槛：清不掉的部分（模型自己的回答、最近几条结果）越攒越多，
-        清完仍在门槛附近，隔一两次调用又清，每次断一次缓存、只省一点点。
-        → low_water_ratio：清完降不到低水位，说明清理已经跟不上了，这次不清，
-        让上下文接着涨、交给压缩。Claude Code 和 pi 在缓存还热的时候都不改历史
-        （pi 根本不单独清理；Claude Code 只在缓存过期后本地清，热的时候用服务端 cache_edits）
+    试过、没用的改法（2026-09-25 多轮评测）：「小结果不清」「清完降不到低水位就不清」
+    让清理后的缓存断得少了，但上下文涨得更大、压缩更频繁，未命中的 token 打平；
+    不清理则总输入多 17%，按缓存价算反而更贵。清理的收益在于之后每次请求都少带一截，
+    断一次缓存是值得的。（Claude Code 热缓存时不在本地改历史，靠的是 Anthropic 服务端的
+    cache_edits；pi 干脆不单独清理。我们两样都没有，维持现状。）
     """
 
     # 占位的开头。测试、日志靠它认出「这是被清理过的结果」。
@@ -69,15 +61,11 @@ class ClearOldToolResults(ContextEdit):
         keep_recent: int = 3,
         clear_at_least: int = 10_000,
         exclude_tools: Iterable[str] = (),
-        min_result_tokens: int = 0,
-        low_water_ratio: float = 0.0,
     ) -> None:
         self.trigger_tokens = trigger_tokens
         self.keep_recent = keep_recent
         self.clear_at_least = clear_at_least
         self.exclude_tools = frozenset(exclude_tools)
-        self.min_result_tokens = min_result_tokens
-        self.low_water_ratio = low_water_ratio     # 0 = 不看低水位
 
     @classmethod
     def placeholder(cls, m: Message) -> str:
@@ -111,8 +99,7 @@ class ClearOldToolResults(ContextEdit):
         self, entries: list[Entry], measure_view: Callable[[], int], *, force: bool = False,
         prompt: Prompt | None = None,
     ) -> Marker | None:
-        size = measure_view()
-        if not force and size <= self.trigger_tokens:
+        if not force and measure_view() <= self.trigger_tokens:
             return None
 
         targets = self._clearable(entries)
@@ -121,9 +108,6 @@ class ClearOldToolResults(ContextEdit):
         freed = sum(estimate_message(m) - estimate_text(self.placeholder(m)) for m in targets)
         if not force and freed < self.clear_at_least:
             # 省得太少，不值得为此让缓存失效一次。强制整理时（已经超长了）能省一点是一点。
-            return None
-        if not force and self.low_water_ratio and size - freed > self.trigger_tokens * self.low_water_ratio:
-            # 清完还降不到低水位：清理跟不上了，清了也很快又过门槛、又断一次缓存
             return None
         return ToolResultsCleared(frozenset(m.tool_call_id for m in targets))
 
@@ -139,7 +123,6 @@ class ClearOldToolResults(ContextEdit):
             if m.tool_call_id not in cleared
             and tool_names.get(m.tool_call_id) not in self.exclude_tools
             and self._saves_space(m)
-            and estimate_message(m) >= self.min_result_tokens
         ]
 
     def _saves_space(self, m: Message) -> bool:
