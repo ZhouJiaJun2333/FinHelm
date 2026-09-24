@@ -1,25 +1,38 @@
-"""Context：存历史，按顺序套用一组编辑工序，得到真正发给模型的视图。
+"""Context：历史是一条只追加的日志，发给模型的视图从日志推算出来。
 
-    内部历史（只追加，原件不动）
+    历史（只追加）：消息 + 标记
+        user、assistant、tool、tool、[标记：清理了 c1,c2]、user、…
         │
-        ├─ edit 1  例如：只保留最近 N 轮
-        ├─ edit 2  例如：把较早的工具结果换成占位
-        ├─ ...     以后：摘要压缩、去重、图片降级……
+        ├─ 工序 1  例如：只保留最近 N 轮
+        ├─ 工序 2  例如：看到「清理」标记，就把对应的工具结果换成占位
+        ├─ ...     以后：看到「摘要」标记，就把它之前的回合换成摘要……
         ▼
-    发给模型的视图 = render()
+    去掉标记（标记不发给模型）→ 发给模型的视图 = render()
 
-为什么是「一组工序」而不是「一个子类一种策略」：
-    继承只能选一种。想要「先清工具结果，不够再做摘要」，要么多重继承，
-    要么复制代码。Anthropic 自己的接口也是这么设计的 ——
-    context_management.edits 是一个列表，按顺序生效。
-    加一种新策略 = 写一个新的 ContextEdit，Context 和 Agent 一行不用改。
+── 状态放在哪：日志里，不放在工序对象里 ─────────────────────────────
+工序做出的决定（清理了哪些、摘要写了什么）作为**标记**追加进历史；
+工序本身不持有任何状态，只是一个「看着日志算视图」的投影。这是 pi 的做法
+（它的会话是 JSONL 日志，压缩结果是一条记录，上下文由 buildSessionContext
+从日志推算）。好处：
+    · 快照 = 复制一份历史。以前每道工序都要自己实现 snapshot / restore /
+      reset，漏一个回滚就不干净；现在没有「别处的状态」可漏。
+    · 以后存盘、恢复会话、做分支，存的就是这条日志，天然完整。
+    · 摘要压缩产生的摘要文本本来就得存在某处 —— 就是一条标记。
+
+标记总是追加在它影响的消息**之后**（先有工具结果，才有清理它的决定），
+所以按回合裁剪切掉一段时，标记和它影响的消息会一起被切掉，不会错位。
+
+── 为什么是「一组工序」而不是「一个子类一种策略」 ────────────────────
+继承只能选一种。想要「先清工具结果，不够再做摘要」，要么多重继承，要么
+复制代码。Anthropic 的 context_management.edits、pi 的 transformContext
+钩子，都是「视图在发送前经过一串加工」这个思路。
 
 ── 半截状态毒化历史 ──────────────────────────────────────────────────
 一共有三个入口，后果轻重不一样：
 
     1. assistant 有 tool_calls 但没有对应的 tool 结果
        → 两家都 400，而且是永久的：之后每一轮都报同样的错，会话报废。
-       所以任何编辑工序都**不能删工具结果消息**，只能改它的内容。
+       所以任何工序都**不能删工具结果消息**，只能改它的内容。
     2. 连着两条 user 消息（提问后这轮失败了，用户又问一次）
        → 不报错，连续同角色的消息会被合并成一条。坏在语义：失败那轮的问题
          和新问题被悄悄拼在一起。不报错反而更难发现。
@@ -41,13 +54,31 @@ from __future__ import annotations
 import hashlib
 import json
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Iterable
+from dataclasses import dataclass
+from typing import Callable, Iterable
 
-from ..events import Event
+from ..events import ContextEdited, Event
 from ..messages import Message
 
 # 给一份消息列表估 token 数。由 Agent 提供 —— 只有它知道系统提示词和工具定义。
 Measure = Callable[[list[Message]], int]
+
+
+@dataclass(frozen=True, slots=True)
+class Marker:
+    """历史里的一条标记：记录某道工序做过的一个决定。不是对话消息，不发给模型。
+
+    每种工序定义自己的标记子类（比如「清理了哪些工具结果」），
+    只能追加，不能修改 —— 和消息一样是不可变的。
+    """
+
+    def describe(self) -> str:
+        """人话描述这个决定，给界面和事件用。"""
+        return type(self).__name__
+
+
+# 历史里的一条：要么是对话消息，要么是标记
+Entry = Message | Marker
 
 
 # =================================================================== 接口
@@ -59,8 +90,8 @@ class BaseContext(ABC):
     """
 
     @abstractmethod
-    def add(self, message: Message) -> None:
-        """追加一条消息。"""
+    def add(self, entry: Entry) -> None:
+        """往历史末尾追加一条消息或标记。"""
 
     @abstractmethod
     def render(self) -> list[Message]:
@@ -81,7 +112,7 @@ class BaseContext(ABC):
         return []
 
     def status(self) -> list[str]:
-        """几行人话，描述上下文现在的状态（清理了几条、裁掉了几轮…）。给界面用。"""
+        """几行人话，描述上下文现在的状态（清理了几条…）。给界面用。"""
         return []
 
     @abstractmethod
@@ -89,27 +120,28 @@ class BaseContext(ABC):
         """清空。"""
 
     @abstractmethod
-    def snapshot(self) -> Any:
+    def snapshot(self) -> object:
         """拍一张当前状态的快照，交给 restore() 用。
 
         给 Agent.run() 提供**事务语义**：一轮对话要么完整完成，要么上下文
-        回到进来之前的样子。快照必须包含**全部**状态 —— 历史，以及各个编辑
-        工序自己记的东西（清理了哪些）。漏一样，回滚就不干净。
+        回到进来之前的样子。
         """
 
     @abstractmethod
-    def restore(self, snapshot: Any) -> None:
+    def restore(self, snapshot: object) -> None:
         """回滚到 snapshot() 拍下的状态。"""
 
 
 class ContextEdit(ABC):
-    """一道加工工序：把上一道工序给的消息列表，加工成下一道要用的。
+    """一道加工工序：一个「看着历史算视图」的投影，自己**不持有状态**。
 
-    写一种新策略，只需要实现 apply()。有状态的（比如记着清理了哪些）再实现
-    maintain / snapshot / restore / reset；想在界面上露脸就实现 status。
+    写一种新策略：
+      · apply()     必须实现：加工视图
+      · maintain()  需要「做决定」的才实现：返回一个标记，Context 把它追加进历史
+      · status()    想在界面上露脸就实现：从历史里的标记数出来
 
     写 apply() 的三条规矩：
-      · 纯函数：给定工序自己的状态，同样的输入必须给出**一模一样**的输出。
+      · 纯函数：同样的输入必须给出**一模一样**的输出（状态全在输入的标记里）。
         输出一变，发出去的前缀就变，prompt 缓存就废了。
       · 不能拆散 tool_call 和 tool_result：删消息要按完整回合删，
         工具结果只能改内容、不能删消息。
@@ -117,52 +149,48 @@ class ContextEdit(ABC):
     """
 
     @abstractmethod
-    def apply(self, messages: list[Message]) -> list[Message]:
-        """加工视图。"""
+    def apply(self, entries: list[Entry]) -> list[Entry]:
+        """加工视图。输入输出都含标记 —— 标记由 Context 在最后统一去掉。"""
 
-    def maintain(self, messages: list[Message], measure_view: Callable[[], int]) -> Event | None:
-        """请求前的整理机会：决定要不要改变自己的状态（比如再清理一批）。
+    def maintain(self, entries: list[Entry], measure_view: Callable[[], int]) -> Marker | None:
+        """请求前的整理机会：要做决定就返回一个标记，不做就返回 None。
 
         Args:
-            messages:     这道工序的输入（前面各道工序加工过的）
-            measure_view: 估算**最终**视图（所有工序都套用之后）有多少 token。
-                          状态改了之后再调一次，就能知道省了多少。
+            entries:      这道工序的输入（前面各道工序加工过的）
+            measure_view: 估算当前**最终**视图（所有工序都套用之后）有多少 token
         """
         return None
 
-    def snapshot(self) -> Any:
-        return None
-
-    def restore(self, snapshot: Any) -> None:
-        pass
-
-    def reset(self) -> None:
-        """对话清空时调用。"""
-
-    def status(self) -> str | None:
+    def status(self, entries: list[Entry]) -> str | None:
         return None
 
 
 # ================================================================ 标准实现
 class Context(BaseContext):
-    """存历史 + 一组按顺序套用的编辑工序。不传工序就是全量保留。"""
+    """一条只追加的历史 + 一组按顺序套用的编辑工序。不传工序就是全量保留。"""
 
     def __init__(self, edits: Iterable[ContextEdit] = ()) -> None:
-        self._history: list[Message] = []
+        self._history: list[Entry] = []
         self.edits: list[ContextEdit] = list(edits)
 
     # ------------------------------------------------------------ 历史
-    def add(self, message: Message) -> None:
-        if message.meta.usage is not None:
+    def add(self, entry: Entry) -> None:
+        if isinstance(entry, Message) and entry.meta.usage is not None:
             # 这条回复的 usage 量的是「刚刚发出去的那份视图」，也就是现在的 render()。
             # 盖个指纹，以后视图被哪道工序改了，render() 能认出它已经不准。
-            message = message.with_meta(measured_on=_fingerprint(self.render()))
-        self._history.append(message)
+            entry = entry.with_meta(measured_on=_fingerprint(self.render()))
+        self._history.append(entry)
+
+    @property
+    def history(self) -> list[Entry]:
+        """原始历史（含标记）的副本。调试、测试、以后存盘用。"""
+        return list(self._history)
 
     def render(self) -> list[Message]:
-        return _drop_stale_anchors(self._apply(len(self.edits)))
+        view = [e for e in self._apply(len(self.edits)) if isinstance(e, Message)]
+        return _drop_stale_anchors(view)
 
-    def _apply(self, upto: int) -> list[Message]:
+    def _apply(self, upto: int) -> list[Entry]:
         """把历史依次过前 upto 道工序。"""
         view = list(self._history)
         for edit in self.edits[:upto]:
@@ -171,39 +199,43 @@ class Context(BaseContext):
 
     # ------------------------------------------------------------ 整理
     def maintain(self, measure: Measure) -> list[Event]:
+        def measure_view() -> int:
+            return measure(self.render())
+
         events: list[Event] = []
         for i, edit in enumerate(self.edits):
-            event = edit.maintain(self._apply(i), lambda: measure(self.render()))
-            if event is not None:
-                events.append(event)
+            before = measure_view()
+            marker = edit.maintain(self._apply(i), measure_view)
+            if marker is not None:
+                self.add(marker)
+                events.append(ContextEdited(marker.describe(), before, measure_view()))
         return events
 
     def status(self) -> list[str]:
-        return [s for s in (e.status() for e in self.edits) if s]
+        return [s for s in (e.status(self._history) for e in self.edits) if s]
 
     # ------------------------------------------------------- 状态 / 事务
+    # 所有状态都在历史里，快照就是复制一份历史（条目都不可变，浅拷贝就够）。
     def clear(self) -> None:
         self._history.clear()
-        for edit in self.edits:
-            edit.reset()
 
-    # 历史存整个列表的浅拷贝（消息不可变，浅拷贝就够）+ 每道工序自己的状态。
-    def snapshot(self) -> tuple[list[Message], list[Any]]:
-        return list(self._history), [e.snapshot() for e in self.edits]
+    def snapshot(self) -> list[Entry]:
+        return list(self._history)
 
-    def restore(self, snapshot: tuple[list[Message], list[Any]]) -> None:
-        history, edit_states = snapshot
-        self._history[:] = history
-        for edit, state in zip(self.edits, edit_states):
-            edit.restore(state)
+    def restore(self, snapshot: list[Entry]) -> None:
+        self._history[:] = snapshot
 
 
 # ========================================================= 锚点是否还有效
 # usage 锚点的前提是「量它的时候，它前面的内容和现在一样」。
-# 以前这个判断写在清理策略里，只认得清理这一种改法，每加一种策略都得重写一遍。
-# 现在统一在这里做：每个锚点带着「量它时前面那段视图」的指纹，render() 时
+# 统一在这里判断：每个锚点带着「量它时前面那段视图」的指纹，render() 时
 # 边走边算当前前缀的指纹，对不上就把 usage 去掉。任何工序改了前面的内容
 # （清理、裁剪、摘要……）都会被自动认出来，工序自己不用操心锚点。
+#
+# pi 没有这一层（它只看最后一条 assistant 的 usage，下一次响应自然会纠正）。
+# 我们多做这一步，是为了让「任何工序都不用管锚点」这件事成立：如果改成
+# 「看到标记就作废之前的锚点」，那每道改视图的工序都必须记得留标记，
+# 而按规则滑动的裁剪根本不产生标记 —— 等于给写工序的人埋了一条隐形规矩。
 def _drop_stale_anchors(view: list[Message]) -> list[Message]:
     running = hashlib.sha1()
     out: list[Message] = []

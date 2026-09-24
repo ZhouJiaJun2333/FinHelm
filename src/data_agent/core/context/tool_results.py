@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from ..events import ContextCleared
 from ..messages import Message
 from ..tokens import estimate_message, estimate_text
-from .base import ContextEdit
+from .base import ContextEdit, Entry, Marker
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResultsCleared(Marker):
+    """标记：这几条工具结果从此以后换成占位。"""
+
+    tool_call_ids: frozenset[str]
+
+    def describe(self) -> str:
+        return f"清理了 {len(self.tool_call_ids)} 条较早的工具结果"
 
 
 class ClearOldToolResults(ContextEdit):
@@ -23,7 +33,8 @@ class ClearOldToolResults(ContextEdit):
     还留着线索。用户的原话、模型的结论清掉就找不回来了，那是摘要的事。
 
     ── 原件不删，只改视图 ────────────────────────────────────────────
-    内部历史一个字不动，清理了哪些只记在 _cleared 里，apply() 时才换成占位。
+    历史里的工具结果一个字不动。决定清理时往历史追加一个 ToolResultsCleared
+    标记，apply() 看到标记才把对应结果换成占位。这个类自己不记任何东西。
 
     ── 缓存：为什么要攒一批才清 ──────────────────────────────────────
     prompt 缓存是前缀匹配。改了第 k 条消息，第 k 条之后的缓存全部失效，
@@ -49,7 +60,6 @@ class ClearOldToolResults(ContextEdit):
         self.keep_recent = keep_recent
         self.clear_at_least = clear_at_least
         self.exclude_tools = frozenset(exclude_tools)
-        self._cleared: set[str] = set()          # 被清理的 tool_call_id
 
     @classmethod
     def placeholder(cls, m: Message) -> str:
@@ -69,50 +79,49 @@ class ClearOldToolResults(ContextEdit):
         )
 
     # ------------------------------------------------------------ 视图
-    def apply(self, messages: list[Message]) -> list[Message]:
+    def apply(self, entries: list[Entry]) -> list[Entry]:
+        cleared = _cleared_ids(entries)
         return [
-            Message.tool_result(m.tool_call_id, self.placeholder(m))
-            if m.role == "tool" and m.tool_call_id in self._cleared else m
-            for m in messages
+            Message.tool_result(e.tool_call_id, self.placeholder(e))
+            if isinstance(e, Message) and e.role == "tool" and e.tool_call_id in cleared
+            else e
+            for e in entries
         ]
 
     # ------------------------------------------------------------ 清理
-    def maintain(self, messages: list[Message], measure_view: Callable[[], int]) -> ContextCleared | None:
-        before = measure_view()
-        if before <= self.trigger_tokens:
+    def maintain(self, entries: list[Entry], measure_view: Callable[[], int]) -> Marker | None:
+        if measure_view() <= self.trigger_tokens:
             return None
 
-        targets = self._clearable(messages)
+        targets = self._clearable(entries)
         freed = sum(estimate_message(m) - estimate_text(self.placeholder(m)) for m in targets)
         if freed < self.clear_at_least:
             # 省得太少，不值得为此让缓存失效一次
             return None
+        return ToolResultsCleared(frozenset(m.tool_call_id for m in targets))
 
-        self._cleared.update(m.tool_call_id for m in targets)
-        return ContextCleared(len(targets), before, measure_view())
-
-    def _clearable(self, messages: list[Message]) -> list[Message]:
+    def _clearable(self, entries: list[Entry]) -> list[Message]:
         """能清的工具结果：还没清过、不在排除名单里、不是最近 keep_recent 条。"""
+        messages = [e for e in entries if isinstance(e, Message)]
+        cleared = _cleared_ids(entries)
         tool_names = {c.id: c.name for m in messages for c in m.tool_calls}
         results = [m for m in messages if m.role == "tool"]
         older = results[: max(len(results) - self.keep_recent, 0)]
         return [
             m for m in older
-            if m.tool_call_id not in self._cleared
+            if m.tool_call_id not in cleared
             and tool_names.get(m.tool_call_id) not in self.exclude_tools
         ]
 
-    # ------------------------------------------------------ 状态 / 事务
-    def snapshot(self) -> frozenset[str]:
-        return frozenset(self._cleared)
+    def status(self, entries: list[Entry]) -> str | None:
+        n = len(_cleared_ids(entries))
+        return f"已清理的旧工具结果：{n} 条（原件还在，只是不再发给模型）" if n else None
 
-    def restore(self, snapshot: frozenset[str]) -> None:
-        self._cleared = set(snapshot)
 
-    def reset(self) -> None:
-        self._cleared.clear()
-
-    def status(self) -> str | None:
-        if not self._cleared:
-            return None
-        return f"已清理的旧工具结果：{len(self._cleared)} 条（原件还在，只是不再发给模型）"
+def _cleared_ids(entries: list[Entry]) -> set[str]:
+    """历史里所有清理标记记下的 tool_call_id。"""
+    ids: set[str] = set()
+    for e in entries:
+        if isinstance(e, ToolResultsCleared):
+            ids |= e.tool_call_ids
+    return ids

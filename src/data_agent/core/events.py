@@ -64,17 +64,20 @@ class StepLimitReached:
 
 
 @dataclass(slots=True)
-class ContextCleared:
-    """上下文管理器在请求前清理了一批旧工具结果。token 数都是估算值。"""
+class ContextEdited:
+    """某道上下文编辑工序在请求前做了一次决定（清理了一批工具结果、做了一次摘要…）。
 
-    cleared: int             # 这次清理了几条
+    所有工序共用这一个事件，界面不用为每种新工序加一个分支。token 数都是估算值。
+    """
+
+    description: str         # 人话，比如「清理了 5 条较早的工具结果」
     tokens_before: int
     tokens_after: int
 
 
 Event = (
     LLMResponded | ToolStarted | ToolFinished | ToolDenied
-    | TurnContinued | StepLimitReached | ContextCleared
+    | TurnContinued | StepLimitReached | ContextEdited
 )
 
 

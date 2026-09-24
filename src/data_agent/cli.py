@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from .app import Application, build_application
 from .core.errors import AgentError
 from .core.events import (
-    ContextCleared,
+    ContextEdited,
     Event,
     LLMResponded,
     StepLimitReached,
@@ -67,8 +67,8 @@ def make_console_sink(verbose: bool):
             case StepLimitReached(max_steps=n):
                 print(f"\n⚠️ 触发步数上限 {n}")
 
-            case ContextCleared(cleared=n, tokens_before=before, tokens_after=after):
-                print(f"\n🧹 清理了 {n} 条较早的工具结果：上下文 {_k(before)} → {_k(after)}（估算）")
+            case ContextEdited(description=what, tokens_before=before, tokens_after=after):
+                print(f"\n🧹 {what}：上下文 {_k(before)} → {_k(after)}（估算）")
 
     return sink
 

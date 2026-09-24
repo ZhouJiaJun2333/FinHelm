@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..messages import Message
-from .base import ContextEdit
+from .base import ContextEdit, Entry
 
 
 class KeepRecentTurns(ContextEdit):
@@ -22,8 +22,12 @@ class KeepRecentTurns(ContextEdit):
     def __init__(self, max_turns: int = 6) -> None:
         self.max_turns = max_turns
 
-    def apply(self, messages: list[Message]) -> list[Message]:
-        turn_starts = [i for i, m in enumerate(messages) if m.role == "user"]
+    def apply(self, entries: list[Entry]) -> list[Entry]:
+        # 切口一定落在一条 user 消息上。标记总是追加在它影响的消息之后，
+        # 所以被切掉的标记，它影响的消息也一定在切口之前，不会错位。
+        turn_starts = [
+            i for i, e in enumerate(entries) if isinstance(e, Message) and e.role == "user"
+        ]
         if len(turn_starts) <= self.max_turns:
-            return list(messages)
-        return list(messages[turn_starts[-self.max_turns]:])
+            return list(entries)
+        return list(entries[turn_starts[-self.max_turns]:])

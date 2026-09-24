@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from data_agent.core.agent import Agent
 from data_agent.core.context import ClearOldToolResults, Context
 from data_agent.core.errors import OutputTruncated
-from data_agent.core.events import ContextCleared
+from data_agent.core.events import ContextEdited
 from data_agent.core.messages import LLMResponse, Message, MessageMeta, ToolCall, Usage
 from data_agent.core.tokens import estimate_context, estimate_message
 from data_agent.llm.anthropic_provider import AnthropicProvider
@@ -53,8 +53,9 @@ def make_ctx(n_calls: int, **kw) -> Context:
     return ctx
 
 
-def tool_contents(msgs: list[Message]) -> list[str]:
-    return [m.content for m in msgs if m.role == "tool"]
+def tool_contents(entries) -> list[str]:
+    """工具结果的内容。传 render() 的结果或 ctx.history 都行（后者里的标记会被跳过）。"""
+    return [e.content for e in entries if isinstance(e, Message) and e.role == "tool"]
 
 
 def cleared(content: str) -> bool:
@@ -65,14 +66,14 @@ def cleared(content: str) -> bool:
 def test_没超阈值什么都不做():
     ctx = make_ctx(1)
     assert ctx.maintain(measure) == []
-    assert ctx.render() == ctx._history
+    assert ctx.render() == ctx.history
 
 
 def test_超阈值时清掉较早的_保留最近keep条():
     ctx = make_ctx(5, keep_recent=2)
     [edit] = ctx.maintain(measure)
 
-    assert edit.cleared == 3
+    assert edit.description == "清理了 3 条较早的工具结果"
     assert edit.tokens_after < edit.tokens_before
     contents = tool_contents(ctx.render())
     assert [cleared(c) for c in contents] == [True, True, True, False, False]
@@ -112,7 +113,7 @@ def test_清完远低于阈值_下一次请求不会再清():
 def test_只改视图_原件一个字不动():
     ctx = make_ctx(5)
     ctx.maintain(measure)
-    assert tool_contents(ctx._history) == [BIG_RESULT] * 5
+    assert tool_contents(ctx.history) == [BIG_RESULT] * 5
 
 
 def test_清理后tool_call和tool_result仍然配对():
@@ -264,7 +265,7 @@ def test_agent在请求前清理_模型看到的是占位():
     agent, events = make_clearing_agent(calls(4) + [LLMResponse(text="完", stop_reason="end_turn")])
     agent.run("各区域销售额")
 
-    assert any(isinstance(e, ContextCleared) for e in events)
+    assert any(isinstance(e, ContextEdited) for e in events)
     assert any(cleared(c) for c in tool_contents(agent.llm.seen[-1]))
     # 工具给的摘要一路穿过 ToolOutput → Agent → Message，最后出现在占位里
     assert "60 行 × 3 列（SELECT 0）" in tool_contents(agent.llm.seen[-1])[0]
@@ -288,7 +289,7 @@ def test_除了清理那一步_每次请求都是上一次请求的纯追加():
         i for i, (prev, cur) in enumerate(zip(agent.llm.seen, agent.llm.seen[1:]))
         if shape(cur)[: len(prev)] != shape(prev)
     ]
-    clearings = sum(1 for e in events if isinstance(e, ContextCleared))
+    clearings = sum(1 for e in events if isinstance(e, ContextEdited))
     assert clearings >= 2, "测试没测到东西：至少应该触发两次清理"
     # 每一次改历史都是一次有记录的清理，没有别的地方偷偷改
     assert len(rewrites) == clearings

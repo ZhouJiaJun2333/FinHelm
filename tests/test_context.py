@@ -6,7 +6,14 @@
 
 from __future__ import annotations
 
-from data_agent.core.context import ClearOldToolResults, Context, ContextEdit, KeepRecentTurns
+from data_agent.core.context import (
+    ClearOldToolResults,
+    Context,
+    ContextEdit,
+    KeepRecentTurns,
+    Marker,
+    ToolResultsCleared,
+)
 from data_agent.core.messages import Message, MessageMeta, ToolCall, Usage
 from data_agent.core.tokens import estimate_context
 
@@ -31,18 +38,19 @@ class Shout(ContextEdit):
     写新工序的人不用操心。
     """
 
-    def apply(self, messages):
+    def apply(self, entries):
         return [
-            Message.tool_result(m.tool_call_id, m.content.upper()) if m.role == "tool" else m
-            for m in messages
+            Message.tool_result(e.tool_call_id, e.content.upper())
+            if isinstance(e, Message) and e.role == "tool" else e
+            for e in entries
         ]
 
 
 class Copy(ContextEdit):
     """什么都不改、但每条消息都换成新对象的工序。"""
 
-    def apply(self, messages):
-        return [m.with_meta() for m in messages]
+    def apply(self, entries):
+        return [e.with_meta() if isinstance(e, Message) else e for e in entries]
 
 
 # =================================================================== 组合
@@ -59,7 +67,7 @@ def test_自定义工序直接插进来就能用():
     ctx.add(Message(role="assistant", tool_calls=[ToolCall("c1", "echo", {})]))
     ctx.add(Message.tool_result("c1", "abc"))
     assert ctx.render()[-1].content == "ABC"
-    assert ctx._history[-1].content == "abc", "原件不动"
+    assert ctx.history[-1].content == "abc", "原件不动"
 
 
 def test_工序按顺序套用_后一道看到的是前一道的输出():
@@ -74,8 +82,8 @@ def test_工序按顺序套用_后一道看到的是前一道的输出():
         ctx.add(Message.assistant(f"答案{turn}"))
 
     [event] = ctx.maintain(measure)
-    assert event.cleared == 1                  # 只清了留在窗口里的 c1
-    assert clear.snapshot() == frozenset({"c1"})
+    assert event.description == "清理了 1 条较早的工具结果"   # 只清了留在窗口里的 c1
+    assert markers(ctx) == [ToolResultsCleared(frozenset({"c1"}))]
 
 
 # ========================================================== 通用的锚点失效
@@ -124,37 +132,82 @@ def test_meta变化不影响锚点():
     ctx = Context()
     ctx.add(Message.tool_result("x", "结果", summary="线索一"))
     ctx.add(asst("答", 100))
-    ctx._history[0] = ctx._history[0].with_meta(summary="线索二")
+    ctx._history[0] = ctx._history[0].with_meta(summary="线索二")   # 直接改内部，模拟 meta 变化
     assert usages(ctx) == [Usage(input=100)]
 
 
-# ============================================================ 状态 / 事务
-def test_状态由各道工序汇总_没事可说时为空():
-    clear = ClearOldToolResults()
-    ctx = Context([KeepRecentTurns(), clear])
-    assert ctx.status() == []
-
-    clear.restore(frozenset({"a", "b"}))
-    assert ctx.status() == ["已清理的旧工具结果：2 条（原件还在，只是不再发给模型）"]
+# ====================================================== 状态记在历史里
+def markers(ctx: Context) -> list[Marker]:
+    return [e for e in ctx.history if isinstance(e, Marker)]
 
 
-def test_快照包含各道工序自己的状态():
-    clear = ClearOldToolResults()
-    ctx = Context([clear])
+def test_工序的决定作为标记记进历史_标记不发给模型():
+    big = "| 华东 | 8100531.47 |\n" * 80
+    ctx = Context([ClearOldToolResults(trigger_tokens=100, keep_recent=0, clear_at_least=1)])
+    ctx.add(Message.user("q"))
+    ctx.add(Message(role="assistant", tool_calls=[ToolCall("c1", "run_sql", {})]))
+    ctx.add(Message.tool_result("c1", big))
+    ctx.maintain(measure)
+
+    assert markers(ctx) == [ToolResultsCleared(frozenset({"c1"}))]
+    assert isinstance(ctx.history[-1], ToolResultsCleared), "标记追加在它影响的消息之后"
+    assert all(isinstance(m, Message) for m in ctx.render())
+
+
+def test_工序对象不持有状态_可以给多个会话共用():
+    """以前清理记录存在工序对象里，同一个对象给两个会话用，清理会串到另一个会话去。"""
+    shared = ClearOldToolResults()
+    a, b = Context([shared]), Context([shared])
+    a.add(ToolResultsCleared(frozenset({"c1"})))
+    assert a.status() != []
+    assert b.status() == []
+
+
+def test_快照就是一份历史_标记跟着一起回滚():
+    ctx = Context([ClearOldToolResults()])
     ctx.add(Message.user("q"))
     snap = ctx.snapshot()
 
     ctx.add(Message.user("q2"))
-    clear.restore(frozenset({"c1"}))
+    ctx.add(ToolResultsCleared(frozenset({"c1"})))
     ctx.restore(snap)
 
-    assert [m.content for m in ctx.render()] == ["q"]
-    assert clear.snapshot() == frozenset()
-
-
-def test_清空时各道工序一起重置():
-    clear = ClearOldToolResults()
-    ctx = Context([clear])
-    clear.restore(frozenset({"c1"}))
-    ctx.clear()
+    assert ctx.history == [Message.user("q")]
     assert ctx.status() == []
+
+
+def test_状态由各道工序从标记里数出来_没事可说时为空():
+    ctx = Context([KeepRecentTurns(), ClearOldToolResults()])
+    assert ctx.status() == []
+
+    ctx.add(ToolResultsCleared(frozenset({"a", "b"})))
+    ctx.add(ToolResultsCleared(frozenset({"c"})))
+    assert ctx.status() == ["已清理的旧工具结果：3 条（原件还在，只是不再发给模型）"]
+
+
+def test_清空历史就清空了一切():
+    ctx = Context([ClearOldToolResults()])
+    ctx.add(ToolResultsCleared(frozenset({"c1"})))
+    ctx.clear()
+    assert ctx.status() == [] and ctx.history == []
+
+
+def test_按回合裁剪时_标记和它影响的消息一起被切掉():
+    ctx = Context([KeepRecentTurns(max_turns=1), ClearOldToolResults()])
+    ctx.add(Message.user("问题0"))
+    ctx.add(Message(role="assistant", tool_calls=[ToolCall("c0", "run_sql", {})]))
+    ctx.add(Message.tool_result("c0", "旧结果"))
+    ctx.add(ToolResultsCleared(frozenset({"c0"})))
+    ctx.add(Message.assistant("答0"))
+    ctx.add(Message.user("问题1"))
+
+    assert [m.content for m in ctx.render()] == ["问题1"]
+
+
+def test_不改变视图的标记不会让锚点作废():
+    """锚点看的是发出去的内容，不是历史里多了什么。"""
+    ctx = Context([ClearOldToolResults()])
+    ctx.add(Message.user("q"))
+    ctx.add(asst("答", 100))
+    ctx.add(ToolResultsCleared(frozenset({"不存在的调用"})))
+    assert usages(ctx) == [Usage(input=100)]

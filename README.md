@@ -72,8 +72,8 @@ pytest
 │   │   ├── messages.py           统一消息结构 = 整个项目的「通用语」
 │   │   ├── events.py             运行事件（解耦「运行」和「展示」）
 │   │   ├── errors.py             运行时异常（截断 / 拒绝 / 未知停止原因）
-│   │   ├── context/              上下文管理：历史 + 一组按顺序套用的编辑工序
-│   │   │   ├── base.py             Context / ContextEdit 接口；锚点失效统一在这里判断
+│   │   ├── context/              上下文管理：只追加的历史（消息 + 标记）+ 一组按顺序套用的编辑工序
+│   │   │   ├── base.py             Context / ContextEdit / Marker；工序不持有状态，决定记成标记
 │   │   │   ├── tool_results.py     ClearOldToolResults：超阈值时把旧工具结果换成带线索的占位
 │   │   │   └── turns.py            KeepRecentTurns：按回合裁剪
 │   │   ├── tokens.py             上下文用量：锚点 + 增量估算（/context 命令看）
@@ -100,7 +100,7 @@ pytest
 ├── examples/
 │   └── event_demo.py           事件/回调机制的最小演示
 ├── docs/                       可运行的「为什么这么写」说明（见上面的表）
-└── tests/                      123 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
+└── tests/                      127 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
     ├── test_agent_loop.py                    主循环行为
     ├── test_stop_reason_and_finish_turn.py   完成判定 + 结束钩子
     ├── test_provider_conversion.py           两家 provider 的格式转换
