@@ -16,8 +16,8 @@
     · 摘要滚动更新：第二次压缩时，输入里带着上一份摘要，要求保留并更新它
     · 对话先序列化成一段文本再交给模型，不带工具 —— 模型不会接着对话往下聊，
       也不会去调工具，请求体里也没有 tool_use 块（Anthropic 要求有 tool_use
-      就得带工具定义）。代价是吃不到缓存；另一种发法（reuse_cache，学 Claude Code）
-      见 llm_summarizer
+      就得带工具定义）。代价是吃不到缓存 —— 所以现在默认换成了 Claude Code 的发法
+      （原样发对话、末尾追加要求，见 llm_summarizer），序列化只在兜底时用
     · 摘要是一个标记，原文还在历史里（pi 是日志里的一条 compaction 记录）
 
 ── 和 pi 不一样的地方 ──────────────────────────────────────────────
@@ -287,7 +287,7 @@ def extract_summary(text: str) -> str:
 
 def llm_summarizer(
     llm: LLMProvider, *, scratchpad: bool | None = None, max_tokens: int | None = None,
-    reuse_cache: bool = False,
+    reuse_cache: bool = True,
 ) -> Summarize:
     """用 llm 写摘要。
 
@@ -298,10 +298,10 @@ def llm_summarizer(
         reuse_cache: 两种发法，见下。
 
     ── 两种发法 ──────────────────────────────────────────────────────
-    序列化（默认，学 pi）：对话写成一段纯文本，换一个「摘要助手」的系统提示词、不带工具发。
+    序列化（学 pi）：对话写成一段纯文本，换一个「摘要助手」的系统提示词、不带工具发。
         模型只是在读一份记录，不会接着聊、不会调工具。但请求从第一个字就和平时不同，
         一个 token 都命中不了缓存 —— 压缩时上下文最大，这一次全价。
-    复用缓存（reuse_cache，学 Claude Code）：系统提示词、工具定义、消息都和上一次请求
+    复用缓存（reuse_cache，默认，学 Claude Code）：系统提示词、工具定义、消息都和上一次请求
         一模一样，只在末尾追加一条「请写摘要」。前面几万 token 全部命中。
         代价是模型还是「数据分析师」、手边有工具：可能去调工具而不写摘要。
         那样就退回序列化再写一次（两次的花费都记账）。

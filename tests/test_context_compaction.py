@@ -423,7 +423,7 @@ def test_不知道平时的请求长什么样_或者没开复用_都走序列化
     from data_agent.core.context import Prompt
 
     for summarizer, prompt in [(lambda llm: llm_summarizer(llm, reuse_cache=True), None),
-                               (lambda llm: llm_summarizer(llm), Prompt("你是分析师"))]:
+                               (lambda llm: llm_summarizer(llm, reuse_cache=False), Prompt("你是分析师"))]:
         llm = ScriptedProvider([LLMResponse(text="摘要", stop_reason="end_turn")])
         summarizer(llm)([Message.user("问题"), Message.assistant("答案")], prompt)
         [request] = llm.seen
