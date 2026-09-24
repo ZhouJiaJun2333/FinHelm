@@ -14,7 +14,7 @@
 这个文件刻意不 import 任何具体的工具、厂商、数据库。它只依赖三个抽象：
     LLMProvider（llm/base.py）
     ToolRegistry（tools/registry.py）
-    BaseContext （core/context.py）
+    BaseContext （core/context/）
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from typing import Callable, Literal
 
 from ..llm.base import LLMProvider
 from ..tools.registry import ToolRegistry
-from .context import BaseContext, FullContext
+from .context import BaseContext, Context
 from .errors import ModelRefused, OutputTruncated, UnexpectedStopReason
 from .events import (
     Event,
@@ -112,10 +112,9 @@ class Agent:
         self.llm = llm
         self.tools = tools
         self.system_prompt = system_prompt
-        # ⚠️ 必须写 is None，不能写 `context or FullContext()`：
-        #    FullContext 定义了 __len__，空的上下文在布尔判断里是 False，
-        #    传进来的上下文会被悄悄换掉 —— 配好的压缩策略永远不生效，也不报错。
-        self.context = context if context is not None else FullContext()
+        # 写 is None 而不是 `context or Context()`：「空的」和「没传」是两回事，
+        # 别让对象的真假值决定用不用它。
+        self.context = context if context is not None else Context()
         self.max_steps = max_steps
         self.approval_hook = approval_hook
         self.finish_turn_hook = finish_turn_hook
@@ -171,15 +170,14 @@ class Agent:
             system = self._render_system_prompt()
             tools = self.tools.schemas()
 
-            # 发请求之前给上下文一次整理的机会（超阈值就清理旧工具结果）。
+            # 发请求之前给上下文一次整理的机会（超阈值就清理旧工具结果之类）。
             # 放在循环里、而不是只在一轮开头：一轮里可能连调十几次工具，
             # 上下文在一轮**之内**就可能涨过阈值。
             overhead = estimate_overhead(system, tools)
-            edit = self.context.maintain(
+            for event in self.context.maintain(
                 lambda msgs: estimate_context(msgs, overhead=overhead).tokens
-            )
-            if edit is not None:
-                self.on_event(edit)
+            ):
+                self.on_event(event)
 
             response = self.llm.chat(
                 messages=self.context.render(),

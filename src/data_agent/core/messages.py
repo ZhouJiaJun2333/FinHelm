@@ -82,6 +82,10 @@ class MessageMeta:
     # 挂在消息上而不是 Agent 上：一轮失败被回滚时，它跟着消息一起消失。
     usage: Usage | None = None
 
+    # usage 是在哪份视图上量的：这条消息**之前**那段视图的指纹，由 Context.add 盖上。
+    # 之后不管哪种编辑策略改了它前面的内容，指纹就对不上，这个 usage 自动作废。
+    measured_on: str | None = None
+
     # 工具结果的一句话摘要（「42 行 × 4 列（region, gmv, …）」），由工具自己给。
     # 结果被清理时，它留在占位文字里当线索（可恢复的压缩）。
     summary: str = ""

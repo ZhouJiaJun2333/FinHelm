@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .core.agent import Agent, ApprovalHook, FinishTurnHook
-from .core.context import ToolResultClearingContext
+from .core.context import ClearOldToolResults, Context
 from .core.events import Event, noop_sink
 from .db.connection import Database
 from .db.introspection import SchemaInspector
@@ -81,11 +81,14 @@ def build_application(
     trigger = settings.context_clear_trigger_tokens
     if llm.context_window:
         trigger = min(trigger, llm.context_window - settings.context_reserve_tokens)
-    context = ToolResultClearingContext(
-        trigger_tokens=trigger,
-        keep_recent=settings.context_keep_tool_results,
-        clear_at_least=settings.context_clear_at_least,
-    )
+    # 编辑工序按顺序套用。以后加摘要压缩、去重，往这个列表里加就行。
+    context = Context([
+        ClearOldToolResults(
+            trigger_tokens=trigger,
+            keep_recent=settings.context_keep_tool_results,
+            clear_at_least=settings.context_clear_at_least,
+        ),
+    ])
 
     # --- Agent ---
     agent = Agent(

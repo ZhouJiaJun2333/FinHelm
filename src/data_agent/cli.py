@@ -103,9 +103,8 @@ def _print_context(app: Application) -> None:
     else:
         print(f"  ├ 精确 {_k(est.usage_tokens):>7}  ← 第 {est.anchor_index + 1} 条消息的 usage")
         print(f"  └ 估算 {_k(est.trailing_tokens):>7}  ← 之后新加的消息")
-    cleared = getattr(app.agent.context, "cleared_count", 0)
-    if cleared:
-        print(f"已清理的旧工具结果：{cleared} 条（原件还在，只是不再发给模型）")
+    for line in app.agent.context.status():
+        print(line)
     print(
         f"本次会话累计：输入 {_k(total.prompt_tokens)}"
         f"（缓存命中 {_k(total.cache_read)}，写入 {_k(total.cache_write)}）"

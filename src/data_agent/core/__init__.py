@@ -16,12 +16,12 @@
     llm/__init__.py 用的是同一个套路。
 """
 
-from .context import BaseContext, FullContext, TurnWindowContext
+from .context import BaseContext, ClearOldToolResults, Context, ContextEdit, KeepRecentTurns
 from .messages import LLMResponse, Message, ToolCall, Usage
 
 __all__ = [
     "Agent",
-    "BaseContext", "FullContext", "TurnWindowContext",
+    "BaseContext", "Context", "ContextEdit", "ClearOldToolResults", "KeepRecentTurns",
     "Message", "ToolCall", "LLMResponse", "Usage",
 ]
 

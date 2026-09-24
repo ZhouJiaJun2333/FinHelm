@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from data_agent.core.context import FullContext, TurnWindowContext
+from data_agent.core.context import Context, KeepRecentTurns
 from data_agent.core.events import LLMResponded, ToolFinished
 from data_agent.core.messages import LLMResponse, Message, ToolCall
 from data_agent.tools.base import Tool
@@ -143,7 +143,7 @@ def test_每轮都会把完整工具表发给模型(registry):
 # ------------------------------------------------------------------ 上下文
 def test_按回合裁剪不会拆散工具调用():
     """裁剪的单位必须是「回合」，不能是「消息」，否则 tool_call 和 tool_result 会被拆开。"""
-    ctx = TurnWindowContext(max_turns=1)
+    ctx = Context([KeepRecentTurns(max_turns=1)])
     # 第 1 轮
     ctx.add(Message.user("问题1"))
     ctx.add(Message(role="assistant", tool_calls=[ToolCall("a", "echo", {})]))
@@ -163,7 +163,7 @@ def test_按回合裁剪不会拆散工具调用():
 
 
 def test_全量上下文不裁剪():
-    ctx = FullContext()
+    ctx = Context()
     for i in range(10):
         ctx.add(Message.user(f"m{i}"))
     assert len(ctx.render()) == 10

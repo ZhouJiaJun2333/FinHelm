@@ -14,7 +14,7 @@ import pytest
 from pydantic import BaseModel
 
 from data_agent.core.agent import Agent
-from data_agent.core.context import ToolResultClearingContext
+from data_agent.core.context import ClearOldToolResults, Context
 from data_agent.core.errors import OutputTruncated
 from data_agent.core.events import ContextCleared
 from data_agent.core.messages import LLMResponse, Message, MessageMeta, ToolCall, Usage
@@ -42,11 +42,11 @@ def add_tool_round(ctx, call_id: str, name: str = "run_sql", result: str = BIG_R
     ctx.add(Message.tool_result(call_id, result))
 
 
-def make_ctx(n_calls: int, **kw) -> ToolResultClearingContext:
+def make_ctx(n_calls: int, **kw) -> Context:
     kw.setdefault("trigger_tokens", 3_000)
     kw.setdefault("keep_recent", 2)
     kw.setdefault("clear_at_least", 500)
-    ctx = ToolResultClearingContext(**kw)
+    ctx = Context([ClearOldToolResults(**kw)])
     ctx.add(Message.user("各区域销售额"))
     for i in range(n_calls):
         add_tool_round(ctx, f"c{i}")
@@ -58,21 +58,21 @@ def tool_contents(msgs: list[Message]) -> list[str]:
 
 
 def cleared(content: str) -> bool:
-    return content.startswith(ToolResultClearingContext.CLEARED_PREFIX)
+    return content.startswith(ClearOldToolResults.CLEARED_PREFIX)
 
 
 # =============================================================== 什么时候清
 def test_没超阈值什么都不做():
     ctx = make_ctx(1)
-    assert ctx.maintain(measure) is None
+    assert ctx.maintain(measure) == []
     assert ctx.render() == ctx._history
 
 
 def test_超阈值时清掉较早的_保留最近keep条():
     ctx = make_ctx(5, keep_recent=2)
-    edit = ctx.maintain(measure)
+    [edit] = ctx.maintain(measure)
 
-    assert edit is not None and edit.cleared == 3
+    assert edit.cleared == 3
     assert edit.tokens_after < edit.tokens_before
     contents = tool_contents(ctx.render())
     assert [cleared(c) for c in contents] == [True, True, True, False, False]
@@ -80,8 +80,8 @@ def test_超阈值时清掉较早的_保留最近keep条():
 
 
 def test_排除名单里的工具永远不清():
-    ctx = ToolResultClearingContext(trigger_tokens=3_000, keep_recent=0,
-                                    clear_at_least=500, exclude_tools=["describe_table"])
+    ctx = Context([ClearOldToolResults(trigger_tokens=3_000, keep_recent=0,
+                                       clear_at_least=500, exclude_tools=["describe_table"])])
     ctx.add(Message.user("q"))
     add_tool_round(ctx, "d1", name="describe_table")
     for i in range(3):
@@ -96,16 +96,16 @@ def test_排除名单里的工具永远不清():
 def test_省得不够clear_at_least就不清():
     """清理会让缓存失效一次。省得太少，不如不动。"""
     ctx = make_ctx(5, clear_at_least=1_000_000)
-    assert ctx.maintain(measure) is None
+    assert ctx.maintain(measure) == []
     assert not any(cleared(c) for c in tool_contents(ctx.render()))
 
 
 def test_清完远低于阈值_下一次请求不会再清():
     """一次清一批，之后是纯追加 —— 否则每次请求都改历史，缓存永远命中不了。"""
     ctx = make_ctx(5)
-    assert ctx.maintain(measure) is not None
+    assert ctx.maintain(measure) != []
     ctx.add(Message.assistant("好的"))
-    assert ctx.maintain(measure) is None
+    assert ctx.maintain(measure) == []
 
 
 # ====================================================== 视图 vs 原件、配对
@@ -187,12 +187,12 @@ def test_输出过长被截断时摘要还在():
 def test_同一条消息每次生成的占位完全一样():
     """占位一变，前缀就变，缓存就废。"""
     msg = Message.tool_result("x", BIG_RESULT, summary="60 行")
-    assert ToolResultClearingContext.placeholder(msg) == ToolResultClearingContext.placeholder(msg)
+    assert ClearOldToolResults.placeholder(msg) == ClearOldToolResults.placeholder(msg)
 
 
 # ================================================================== 锚点
 def test_清理位置之后的旧锚点作废_之前的保留():
-    ctx = ToolResultClearingContext(trigger_tokens=3_000, keep_recent=1, clear_at_least=500)
+    ctx = Context([ClearOldToolResults(trigger_tokens=3_000, keep_recent=1, clear_at_least=500)])
     ctx.add(Message.user("q"))
     ctx.add(Message(role="assistant", content="先看看", meta=MessageMeta(usage=Usage(input=900, output=10))))
     ctx.add(Message.user("继续"))
@@ -247,14 +247,14 @@ def make_clearing_agent(script, **ctx_kw):
     ctx_kw.setdefault("keep_recent", 1)
     ctx_kw.setdefault("clear_at_least", 500)
     return make_agent(script, tools=[BigTool()],
-                      context=ToolResultClearingContext(**ctx_kw), max_steps=20)
+                      context=Context([ClearOldToolResults(**ctx_kw)]), max_steps=20)
 
 
 def test_传进去的空上下文不会被悄悄换掉():
-    """回归：曾经写成 `context or FullContext()`。FullContext 有 __len__，
-    空的上下文是 False，配好的清理策略被换成了全量保留 —— 不报错，就是不生效。
+    """回归：Agent 曾经写成 `context or 默认上下文()`。当时的上下文类定义了
+    __len__，空的上下文是 False，配好的清理策略被换成了全量保留 —— 不报错，就是不生效。
     """
-    ctx = ToolResultClearingContext()
+    ctx = Context()
     agent = Agent(llm=ScriptedProvider(), tools=ToolRegistry([]),
                   system_prompt="", context=ctx)
     assert agent.context is ctx
@@ -305,7 +305,7 @@ def test_一轮失败回滚时清理状态也回滚():
         agent.run("问题")
 
     assert agent.context.render() == []
-    assert agent.context.cleared_count == 0
+    assert agent.context.status() == []
 
 
 def test_清理后历史在anthropic格式下仍然合法():
