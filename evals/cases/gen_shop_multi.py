@@ -101,7 +101,9 @@ B = {
         {"question": "2024 年各渠道的销售额是多少？",
          "gold_sql": f"SELECT o.channel, SUM({AMT}) {FROM} WHERE {DONE} AND {Y24} GROUP BY o.channel",
          "tags": ["分组"]},
-        {"question": "各渠道的退货率是多少？（退货订单数占全部订单数的比例）",
+        # 写明「全部年份」：上一轮问的是 2024 年，不写的话 Agent 延续 2024 也说得通
+        # （2026-09-25 发现：第 19 轮时对时错，就是两种理解各占一半）
+        {"question": "各渠道的退货率是多少？看全部年份，退货订单数占全部订单数的比例。",
          "gold_sql": [RETURN_RATE_ALL,
                       "SELECT channel, COUNT(*) FILTER (WHERE status = 'returned'), COUNT(*) FROM shop.orders GROUP BY channel"],
          "answer_sql": RETURN_RATE_ALL, "tags": ["比例"],
@@ -133,7 +135,9 @@ C = {
         *fill("25年7月订单", "西南华南客户", "25年取消订单", "24年6月明细", "24年12月线上订单",
               "华北客户", "政府客户",
               # 基线（df78559）里 2 次有 1 次没到 4.5 万、压根没压缩。多塞 3 条保证压缩
-              "全部商品", "25年5月分销订单", "24年3月线下订单"),
+              "全部商品", "25年5月分销订单", "24年3月线下订单",
+              # 输出上限调到 32768 之后（aae61d1），第 5 步完成那次 2 次里有 1 次没到 4.5 万
+              "25年退货订单", "25年8月线上订单"),
         {"question": "2025 年线上渠道的销售额是多少？", "match": "contains",
          "gold_sql": f"SELECT SUM({LIST}) {FROM} WHERE {DONE} AND {Y25} AND o.channel = '线上'",
          "tags": ["用户约定"], "note": "按第一轮的约定不扣折扣"},

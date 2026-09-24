@@ -35,13 +35,13 @@ from typing import Any, Literal, Sequence
 #             answer_sql 的数就算对，靠记忆答、重新查一遍都行
 MatchMode = Literal["set", "ordered", "top", "contains", "empty", "answer"]
 
-# 数值比较的容差。结果比对时：Agent 在 SQL 里 ROUND(x, 2) 很常见，舍入最多差 0.005。
-# 不能再宽：比例是 0.x 量级的数，容差 0.01 会把 0.34 和 0.3318 当成一样。
-ABS_TOL = 0.0051
+# 数值比较的容差：**按数字写出来的精度算**，不用一个固定的绝对误差。
+#   ROUND(x, 2) 得到 0.33，舍入误差最多 0.005，那就容 0.005；写成 0.0561 就只容 0.00005；
+#   回答里写「810 万」容 0.5 万，写「5.61%」容 0.005%。
+# 以前是固定 0.005：对 0.3 量级的比例刚好，对 0.05 量级的退货率等于容了 10% 的误差 ——
+# 按 2024 年算的 5.61% 被当成全部年份的 5.57% 判对（2026-09-25 多轮评测里发现）。
+# REL_TOL 只兜浮点计算的末位噪声（同一个数，SUM/COUNT 和 AVG 算出来末几位可能不同）。
 REL_TOL = 1e-6
-# 回答核对时更宽：「810.05 万」「33.2%」都算说对了
-ANSWER_ABS_TOL = 0.005
-ANSWER_REL_TOL = 1e-3
 # 比例的两种写法：0.3318 和 33.18（乘了 100）都算对
 SCALES = (1.0, 100.0)
 # 标准结果超过这么多行就不核对回答了 —— 没人会在回答里把 50 行全念一遍
@@ -49,20 +49,42 @@ ANSWER_CHECK_MAX_ROWS = 20
 
 
 # ============================================================== 值的归一化
+@dataclass(frozen=True, slots=True)
+class Num:
+    """一个数，连同它写出来的精度带来的舍入误差（半个末位）。"""
+
+    value: float
+    tol: float = 0.0
+
+    @classmethod
+    def of(cls, v: int | float | Decimal | str) -> "Num":
+        """int 是精确的（COUNT）；Decimal 看小数位数（ROUND(x, 2) → Decimal('0.33')）；
+        float 看它最短的写法 —— 0.33 显示成 0.33，全精度算出来的数显示十几位。"""
+        if isinstance(v, int):
+            return cls(float(v))
+        d = Decimal(repr(v)) if isinstance(v, float) else Decimal(v)
+        exp = d.as_tuple().exponent
+        return cls(float(d), 0.5 * 10.0 ** exp if isinstance(exp, int) else 0.0)
+
+    def scaled(self, factor: float) -> "Num":
+        return Num(self.value * factor, self.tol * abs(factor))
+
+
 def normalize(v: Any) -> Any:
-    """数据库返回的值 → 能比较的值。数字统一成 float，日期统一成字符串。"""
+    """数据库返回的值 → 能比较的值。数字变成 Num（带精度），日期统一成字符串。"""
     if v is None or isinstance(v, bool):
         return v
     if isinstance(v, (int, float, Decimal)):
-        return float(v)
+        return Num.of(v)
     if isinstance(v, (dt.date, dt.datetime)):
         return v.isoformat()
     return str(v).strip()
 
 
-def _close(a: Any, b: Any, *, abs_tol: float = ABS_TOL, rel_tol: float = REL_TOL) -> bool:
-    if isinstance(a, float) and isinstance(b, float):
-        return abs(a - b) <= max(abs_tol, rel_tol * abs(b))
+def _close(a: Any, b: Any) -> bool:
+    """两个数的差不超过双方的舍入误差之和，就算同一个数。"""
+    if isinstance(a, Num) and isinstance(b, Num):
+        return abs(a.value - b.value) <= a.tol + b.tol + REL_TOL * abs(b.value)
     return a == b
 
 
@@ -157,7 +179,7 @@ def compare_results(
 
 
 def _scale(v: Any, scale: float) -> Any:
-    return v / scale if isinstance(v, float) and scale != 1.0 else v
+    return v.scaled(1 / scale) if isinstance(v, Num) and scale != 1.0 else v
 
 
 def _row_count_ok(n_gold: int, n_pred: int, mode: MatchMode) -> bool:
@@ -181,7 +203,7 @@ def _looks_empty(rows: list[tuple]) -> bool:
     """空结果、或者只有一行而且全是 NULL / 0（SUM 在没有数据时返回 NULL，COUNT 返回 0）。"""
     if not rows:
         return True
-    return len(rows) == 1 and all(v is None or v == 0.0 for v in rows[0])
+    return len(rows) == 1 and all(v is None or (isinstance(v, Num) and v.value == 0) for v in rows[0])
 
 
 # ============================================================== 回答核对
@@ -195,22 +217,21 @@ class AnswerCheck:
 _NUMBER = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)\s*(%|万|亿)?")
 
 
-def answer_numbers(text: str) -> list[float]:
-    """回答里出现的所有数字。「810.05 万」同时记成 8100500 和 810.05，「33.18%」记成 33.18 和 0.3318。"""
-    values: list[float] = []
+_UNITS = {"%": 0.01, "万": 1e4, "亿": 1e8}
+
+
+def answer_numbers(text: str) -> list[Num]:
+    """回答里出现的所有数字，带着写出来的精度。
+
+    「810.05 万」同时记成 810.05（容 0.005）和 8100500（容 50）；
+    「33.18%」记成 33.18 和 0.3318（容 0.00005）。
+    """
+    values: list[Num] = []
     for m in _NUMBER.finditer(text):
-        try:
-            n = float(m.group(1).replace(",", ""))
-        except ValueError:
-            continue
-        unit = m.group(2)
+        n = Num.of(m.group(1).replace(",", ""))
         values.append(n)
-        if unit == "%":
-            values.append(n / 100)
-        elif unit == "万":
-            values.append(n * 1e4)
-        elif unit == "亿":
-            values.append(n * 1e8)
+        if m.group(2):
+            values.append(n.scaled(_UNITS[m.group(2)]))
     return values
 
 
@@ -221,16 +242,13 @@ def check_answer(gold: Sequence[Sequence[Any]], answer: str) -> AnswerCheck:
     """
     if len(gold) > ANSWER_CHECK_MAX_ROWS:
         return AnswerCheck(None)
-    targets = [v for r in gold for v in (normalize(x) for x in r) if isinstance(v, float)]
+    targets = [v for r in gold for v in (normalize(x) for x in r) if isinstance(v, Num)]
     if not targets:
         return AnswerCheck(None)
     said = answer_numbers(answer)
-    missing = [t for t in targets if not any(_said(t, s) for s in said)]
+    missing = [t.value for t in targets if not any(_said(t, s) for s in said)]
     return AnswerCheck(not missing, missing, len(targets))
 
 
-def _said(target: float, value: float) -> bool:
-    return any(
-        _close(value, target * scale, abs_tol=ANSWER_ABS_TOL, rel_tol=ANSWER_REL_TOL)
-        for scale in SCALES
-    )
+def _said(target: Num, said: Num) -> bool:
+    return any(_close(said, target.scaled(scale)) for scale in SCALES)

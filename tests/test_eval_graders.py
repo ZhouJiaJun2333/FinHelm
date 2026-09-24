@@ -48,6 +48,23 @@ def test_容差只容得下ROUND到两位():
     assert not compare_results(gold, [(0.34,)]).lenient, "差 0.008 的比例是真的不一样"
 
 
+def test_容差按写出来的精度算_小比例不能差一截():
+    """固定容差 0.005 对 0.05 量级的退货率等于容了 10% —— 2024 年的 5.61% 被当成全年的 5.57%。"""
+    gold = [("线上", Decimal("0.05573248407643312102"))]
+    assert compare_results(gold, [("线上", Decimal("0.06"))]).lenient, "ROUND(x, 2) 的舍入照样算对"
+    assert compare_results(gold, [("线上", Decimal("5.57"))]).lenient, "百分数写到两位小数"
+    assert not compare_results(gold, [("线上", Decimal("0.0561"))]).lenient
+    assert not compare_results(gold, [("线上", Decimal("5.61"))]).lenient
+    assert not compare_results(gold, [("线上", 0.05608555399719495)]).lenient, "全精度的 float 没有舍入余地"
+
+
+def test_回答核对_小比例也按写出来的精度():
+    gold = [(Decimal("0.05573248407643312102"),)]
+    assert check_answer(gold, "线上退货率 5.57%").ok
+    assert check_answer(gold, "约 5.6%").ok
+    assert not check_answer(gold, "线上退货率 5.61%").ok
+
+
 def test_比例乘了100也算对():
     gold = [("线上", Decimal("0.0557")), ("线下", Decimal("0.0598"))]
     assert compare_results(gold, [("线上", 5.57), ("线下", 5.98)]).lenient
@@ -103,7 +120,7 @@ def test_带NULL的行最后配_不会抢走别的行():
 def test_回答里的数字_各种写法都认():
     said = answer_numbers("销售额 8,100,531.47 元（约 810.05 万），占比 33.18%，共 1.2 亿")
     for v in (8100531.47, 8100500.0, 0.3318, 1.2e8):
-        assert any(abs(v - s) < 1e-6 * max(1, v) for s in said), v
+        assert any(abs(v - s.value) < 1e-6 * max(1, v) for s in said), v
 
 
 def test_回答核对_四舍五入到万也算说对了():
