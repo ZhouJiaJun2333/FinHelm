@@ -3,6 +3,8 @@
 为什么每次都新建：上一题的对话留在上下文里，下一题可能直接抄答案。
 为什么能不开界面：Agent 只往外抛事件（core/events.py），CLI 拿去打印，
                   这里拿去存档 —— Agent 的代码一行不用改。
+
+多轮会话（run_session）反过来：一段会话**共用**一个 Agent，每一轮单独记一个 Trial、单独判分。
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from data_agent.core.messages import Message, Usage
 from data_agent.db.connection import Database
 from data_agent.settings import Settings
 
-from .cases import Case
+from .cases import Case, Session
 from .graders import AnswerCheck, ResultMatch, check_answer, compare_results
 
 # 判分时重跑 SQL 最多取多少行。标准答案不会有这么多行；Agent 的查询超过这个数，肯定不对。
@@ -62,6 +64,8 @@ class Trial:
     steps: int = 0                        # 调了几次模型
     usage: Usage = field(default_factory=Usage)
     calls: list[Usage] = field(default_factory=list)   # 每次调模型的用量，按顺序（不含写摘要）
+    after_edit: list[int] = field(default_factory=list)  # calls 里哪几次紧跟在清理/压缩之后
+    after_compact: list[int] = field(default_factory=list)  # 其中哪几次之前做过压缩（after_edit 的子集）
     elapsed_s: float = 0.0
     step_limit: bool = False
     context_edits: int = 0
@@ -69,6 +73,7 @@ class Trial:
     answer_check: AnswerCheck | None = None
     grade_error: str = ""                 # 重跑 Agent 的 SQL 时出错
     transcript: list[dict[str, Any]] = field(default_factory=list)
+    graded: bool = True                   # 多轮会话里的填充轮不判分
 
     # ------------------------------------------------------------ 结论
     @property
@@ -84,6 +89,8 @@ class Trial:
     @property
     def failure(self) -> str:
         """失败归类。报告里按它统计，比一个总分更能告诉你下一步该改哪里。"""
+        if not self.graded:
+            return ""
         if self.error:
             return "运行出错"
         if self.step_limit:
@@ -120,16 +127,118 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database,
         t.error = f"{type(exc).__name__}: {exc}"
         t.transcript.append({"error": traceback.format_exc(limit=5)})
     t.elapsed_s = round(time.perf_counter() - started, 1)
-
-    t.sql_calls = extract_sql_calls(events)
-    t.calls = [e.usage for e in events if isinstance(e, LLMResponded)]
-    t.steps = len(t.calls)
-    t.step_limit = any(isinstance(e, StepLimitReached) for e in events)
-    t.context_edits = sum(isinstance(e, ContextEdited) for e in events)
-    succeeded = [c for c in t.sql_calls if c.ok]
-    t.final_sql = succeeded[-1].sql if succeeded else ""
+    digest(t, events)
     grade(t, case, db, gold)
     return t
+
+
+def digest(t: Trial, events: list[Event]) -> None:
+    """从一轮的事件流里取出判分和统计要用的东西，写回 t。"""
+    t.sql_calls = extract_sql_calls(events)
+    edited = compacted = False
+    for e in events:
+        if isinstance(e, ContextEdited):
+            t.context_edits += 1
+            edited = True
+            compacted |= e.kind == "HistoryCompacted"
+        elif isinstance(e, LLMResponded):
+            if edited:
+                t.after_edit.append(len(t.calls))
+            if compacted:
+                t.after_compact.append(len(t.calls))
+            edited = compacted = False
+            t.calls.append(e.usage)
+    t.steps = len(t.calls)
+    t.step_limit = any(isinstance(e, StepLimitReached) for e in events)
+    succeeded = [c for c in t.sql_calls if c.ok]
+    t.final_sql = succeeded[-1].sql if succeeded else ""
+
+
+# ================================================================ 多轮会话
+@dataclass(slots=True)
+class SessionTrial:
+    """一段会话跑一次。每一轮是一个 Trial（判分和单题一样），会话级的东西记在这里。"""
+
+    session_id: str
+    trial: int
+    turns: list[Trial] = field(default_factory=list)
+    edits: list[dict[str, Any]] = field(default_factory=list)   # 每次清理/压缩：哪一轮、哪种、前后多大
+    error: str = ""                       # 连 Agent 都没建起来
+    elapsed_s: float = 0.0
+    transcript: list[dict[str, Any]] = field(default_factory=list)
+
+    # 给 report.cache_stats 用：整段会话连起来看，「首次调用」是整段会话的第一次
+    @property
+    def usage(self) -> Usage:
+        return sum((t.usage for t in self.turns), Usage())
+
+    @property
+    def calls(self) -> list[Usage]:
+        return [u for t in self.turns for u in t.calls]
+
+    @property
+    def after_edit(self) -> list[int]:
+        return self._offsets("after_edit")
+
+    @property
+    def after_compact(self) -> list[int]:
+        return self._offsets("after_compact")
+
+    def _offsets(self, attr: str) -> list[int]:
+        """每一轮里的下标换算成整段会话里的下标。"""
+        out, offset = [], 0
+        for t in self.turns:
+            out += [offset + i for i in getattr(t, attr)]
+            offset += len(t.calls)
+        return out
+
+    def edit_count(self, kind: str) -> int:
+        return sum(e["kind"] == kind for e in self.edits)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["turns"] = [t.to_dict() for t in self.turns]
+        return d
+
+
+def run_session(session: Session, trial: int, settings: Settings, db: Database,
+                golds: dict[str, Gold]) -> SessionTrial:
+    """同一个 Agent 按顺序回答每一轮。某一轮出错（Agent.run 是事务，历史会回滚）就记下来接着问。"""
+    st = SessionTrial(session.id, trial)
+    events: list[Event] = []
+    started = time.perf_counter()
+    try:
+        app = build_application(settings.model_copy(update=session.settings),
+                                on_event=collect_sink(events))
+    except Exception as exc:  # noqa: BLE001
+        st.error = f"{type(exc).__name__}: {exc}"
+        return st
+
+    for n, case in enumerate(session.turns, 1):
+        t = Trial(case.id, trial, graded=case.graded)
+        start, before, t0 = len(events), app.agent.session_usage, time.perf_counter()
+        try:
+            t.answer = app.agent.run(case.question)
+        except Exception as exc:  # noqa: BLE001
+            t.error = f"{type(exc).__name__}: {exc}"
+        t.elapsed_s = round(time.perf_counter() - t0, 1)
+        t.usage = _minus(app.agent.session_usage, before)
+        turn_events = events[start:]
+        digest(t, turn_events)
+        st.edits += [{"turn": n, "kind": e.kind, "before": e.tokens_before, "after": e.tokens_after}
+                     for e in turn_events if isinstance(e, ContextEdited)]
+        if case.graded:
+            grade(t, case, db, golds[case.id])
+        st.turns.append(t)
+
+    st.elapsed_s = round(time.perf_counter() - started, 1)
+    st.transcript = _transcript(app.agent.context.history)
+    return st
+
+
+def _minus(a: Usage, b: Usage) -> Usage:
+    return Usage(a.input - b.input, a.output - b.output,
+                 a.cache_read - b.cache_read, a.cache_write - b.cache_write)
 
 
 def extract_sql_calls(events: list[Event]) -> list[SqlCall]:
@@ -152,6 +261,11 @@ def extract_sql_calls(events: list[Event]) -> list[SqlCall]:
 
 def grade(t: Trial, case: Case, db, gold: Gold) -> None:
     """给一次 trial 判分，结果写回 t。db 只需要有 query(sql, max_rows=) 方法。"""
+    if case.match == "answer":
+        t.answer_check = check_answer(gold.answer or [], t.answer)
+        ok = t.answer_check.ok is True
+        t.result = ResultMatch(ok, ok, "" if ok else "回答里没说到标准答案的数")
+        return
     if case.match == "empty":
         # 该查不到东西的题按回答判：说了「没有」就算对。Agent 常常先查数据覆盖哪几年
         # 来证明没有（冒烟测试里就是这样），这比硬跑一条返回空的 SQL 更好。

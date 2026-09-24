@@ -248,3 +248,52 @@ def test_缓存命中率按token加权_首次和后续分开算():
     assert s["首次调用命中率"] == 900 / 2000
     assert s["后续调用命中率"] == 1900 / 2000
     assert cache_stats([one_step])["后续调用命中率"] is None   # 没有后续调用，不是 0%
+
+
+# ================================================================ 多轮会话
+def test_多轮题库能读_轮次id和填充轮():
+    cs = load_cases("shop_multi")
+    assert cs.sessions and not cs.cases
+    first = cs.sessions[0]
+    assert first.turns[0].id == f"{first.id}/1"
+    assert first.settings["context_clear_trigger_tokens"] > 0
+    graded = cs.graded_cases
+    assert graded and all(not c.filler for c in graded)
+    assert any(c.match == "answer" for c in graded)
+
+
+def test_只看回答的题_说到数就对_不需要SQL():
+    case = Case("m/8", "第一个问题里华东是多少？", (), match="answer", answer_sql="SELECT 1")
+    gold = Gold([], [(Decimal("10273505.48803"),)])
+    ok = Trial("m/8", 1, answer="华东 2024 年是 1027.35 万元。")
+    grade(ok, case, None, gold)
+    assert ok.answer_ok and ok.failure == ""
+    bad = Trial("m/8", 1, answer="大约 900 万。")
+    grade(bad, case, None, gold)
+    assert not bad.answer_ok and bad.failure == "结果不对"
+
+
+def test_填充轮不算失败():
+    assert Trial("m/3", 1, graded=False).failure == ""
+
+
+def test_记下哪几次调用紧跟在整理之后():
+    from data_agent.core.events import ContextEdited
+    from data_agent.core.messages import Usage
+    from evals.runner import SessionTrial, digest
+
+    t1, t2 = Trial("m/1", 1), Trial("m/2", 1)
+    digest(t1, [LLMResponded(1, ""), ContextEdited("清理", 10, 5), LLMResponded(2, "")])
+    digest(t2, [ContextEdited("压缩", 10, 5, kind="HistoryCompacted"), LLMResponded(1, "")])
+    assert t1.after_edit == [1] and t1.context_edits == 1
+    assert t2.after_edit == [0]
+    st = SessionTrial("m", 1, turns=[t1, t2])
+    assert st.after_edit == [1, 2]            # 第二轮的第 0 次 = 整段会话的第 2 次
+
+    from evals.report import cache_stats
+    t1.calls = [Usage(input=1000), Usage(input=600, cache_read=400)]
+    t2.calls = [Usage(input=900, cache_read=100)]
+    s = cache_stats([st])
+    assert t2.after_compact == [0] and st.after_compact == [2]
+    assert s["清理后调用次数"] == 1 and s["清理后调用命中率"] == 400 / 1000
+    assert s["压缩后调用次数"] == 1 and s["压缩后调用命中率"] == 100 / 1000

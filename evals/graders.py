@@ -31,7 +31,9 @@ from typing import Any, Literal, Sequence
 #             标准答案只有一个数的题用它：Agent 顺手按状态列了三行对比，只要其中有这个数就行
 #   empty     应该查不到东西（问 2030 年的销售额）。运行器按回答判：说了「没有」就算对 ——
 #             Agent 常常是先查一下数据覆盖哪几年来证明没有，这比返回一个空结果更好
-MatchMode = Literal["set", "ordered", "top", "contains", "empty"]
+#   answer    只看回答（多轮会话里的回忆题：「第一个问题里华东是多少？」）。回答里说到
+#             answer_sql 的数就算对，靠记忆答、重新查一遍都行
+MatchMode = Literal["set", "ordered", "top", "contains", "empty", "answer"]
 
 # 数值比较的容差。结果比对时：Agent 在 SQL 里 ROUND(x, 2) 很常见，舍入最多差 0.005。
 # 不能再宽：比例是 0.x 量级的数，容差 0.01 会把 0.34 和 0.3318 当成一样。

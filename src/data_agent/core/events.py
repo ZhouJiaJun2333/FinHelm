@@ -76,6 +76,9 @@ class ContextEdited:
     # 这次整理本身调用模型花的 token（写摘要）。清理之类不调模型的是全 0。
     # Agent 会把它记进 session_usage —— 钱花了就得记账。
     usage: Usage = field(default_factory=Usage)
+    # 做决定的是哪种标记（ToolResultsCleared / HistoryCompacted …）。界面不用管，
+    # 评测靠它分开统计清理和压缩 —— 别去解析 description 那句人话
+    kind: str = ""
 
 
 @dataclass(slots=True)

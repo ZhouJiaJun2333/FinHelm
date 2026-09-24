@@ -13,6 +13,9 @@ pass^k = 连跑 k 次全对的比例（τ-bench 的指标）：时对时错的 A
     首次调用   只有系统提示词 + 工具定义可能命中，靠的是「别的 trial 刚发过同样的开头」，
                跟并发、跑题顺序有关，不是我们的上下文策略管得了的
     后续调用   命中的是本题自己的历史前缀 —— 第 5 步要优化的就是这一段
+    清理后调用 后续调用里紧跟在清理之后的那几次：历史中间被改了，缓存断在第一处改动
+    压缩后调用 紧跟在压缩之后：开头就换成了摘要，除了系统提示词基本全断
+               这两项只有多轮会话里才会有
 """
 
 from __future__ import annotations
@@ -22,8 +25,8 @@ from typing import Any
 
 from data_agent.core.messages import Usage
 
-from .cases import Case
-from .runner import Trial
+from .cases import Case, CaseSet
+from .runner import SessionTrial, Trial
 
 
 def hit_rate(usages: list[Usage]) -> float | None:
@@ -32,14 +35,22 @@ def hit_rate(usages: list[Usage]) -> float | None:
     return sum(u.cache_read for u in usages) / total if total else None
 
 
-def cache_stats(trials: list[Trial]) -> dict[str, Any]:
+def cache_stats(trials: list[Trial] | list[SessionTrial]) -> dict[str, Any]:
+    """trials 可以是单题的 Trial，也可以是整段会话（SessionTrial 有同名的 calls / usage / after_edit）。"""
     first = [t.calls[0] for t in trials if t.calls]
     later = [u for t in trials for u in t.calls[1:]]
+    compacted = [(t, set(t.after_compact)) for t in trials]
+    cleared = [t.calls[i] for t, c in compacted for i in t.after_edit if i > 0 and i not in c]
+    after_compact = [t.calls[i] for t, c in compacted for i in c if i > 0]
     n = len(trials) or 1
     return {
         "命中率": hit_rate([t.usage for t in trials]),
         "首次调用命中率": hit_rate(first),
         "后续调用命中率": hit_rate(later),
+        "清理后调用命中率": hit_rate(cleared),
+        "清理后调用次数": len(cleared),
+        "压缩后调用命中率": hit_rate(after_compact),
+        "压缩后调用次数": len(after_compact),
         "平均命中token": round(sum(t.usage.cache_read for t in trials) / n),
         "平均写入token": round(sum(t.usage.cache_write for t in trials) / n),
     }
@@ -96,6 +107,36 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
     }
 
 
+def summarize_sessions(case_set: CaseSet, sessions: list[SessionTrial]) -> dict[str, Any]:
+    """多轮题库：每一轮当一道题，套用 summarize；缓存和整理次数按整段会话算。"""
+    turns = [t for st in sessions for t in st.turns if t.graded]
+    s = summarize(case_set.graded_cases, turns)
+    s["缓存"] = cache_stats(sessions)
+    recall_ids = {c.id for c in case_set.graded_cases if c.match == "answer"}
+    recalls = [t for t in turns if t.case_id in recall_ids]
+    n = len(sessions) or 1
+    s["会话"] = {
+        "会话数": len(sessions),
+        "平均清理次数": round(sum(st.edit_count("ToolResultsCleared") for st in sessions) / n, 2),
+        "平均压缩次数": round(sum(st.edit_count("HistoryCompacted") for st in sessions) / n, 2),
+        "回忆轮": len(recalls),
+        "回忆轮答对": sum(t.answer_ok for t in recalls),
+        "回忆轮重查": sum(bool(t.sql_calls) for t in recalls),
+        "平均会话输入token": round(sum(st.usage.prompt_tokens for st in sessions) / n),
+        "平均会话耗时s": round(sum(st.elapsed_s for st in sessions) / n, 1),
+        "逐段": {
+            st_id: [{"trial": st.trial, "整理": [f"第{e['turn']}轮{_KIND.get(e['kind'], e['kind'])}"
+                                                  f" {e['before']:,}→{e['after']:,}" for e in st.edits]}
+                    for st in sessions if st.session_id == st_id]
+            for st_id in dict.fromkeys(st.session_id for st in sessions)
+        },
+    }
+    return s
+
+
+_KIND = {"ToolResultsCleared": "清理", "HistoryCompacted": "压缩"}
+
+
 def compare(prev: dict[str, Any], cur: dict[str, Any]) -> list[str]:
     """逐题对比两次运行：哪些题变好了、哪些变坏了。找回归问题最直接的办法。"""
     lines = []
@@ -132,10 +173,26 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         f"| 缓存命中率（全部 / 首次调用 / 后续调用） | {pct(cache['命中率'])} / "
         f"{pct(cache['首次调用命中率'])} / {pct(cache['后续调用命中率'])} |",
         f"| 平均缓存 token（命中 / 写入） | {cache['平均命中token']:,} / {cache['平均写入token']:,} |",
+        *[f"| {k}后调用命中率（{cache[k + '后调用次数']} 次） | {pct(cache[k + '后调用命中率'])} |"
+          for k in ("清理", "压缩") if cache.get(k + "后调用次数")],
         f"| 平均耗时 | {s['平均耗时s']}s |",
         f"| 步数耗尽 / 运行出错 | {s['步数耗尽']} / {s['运行出错']} |",
         "",
     ]
+    if "会话" in s:
+        ss = s["会话"]
+        out += [
+            "## 会话", "",
+            f"- {ss['会话数']} 段会话，平均每段 {ss['平均会话输入token']:,} 输入 token、{ss['平均会话耗时s']}s",
+            f"- 平均每段清理 {ss['平均清理次数']} 次、压缩 {ss['平均压缩次数']} 次",
+            f"- 回忆轮 {ss['回忆轮']} 次：答对 {ss['回忆轮答对']}，其中重新查了 {ss['回忆轮重查']} 次",
+            "",
+        ]
+        for sid, runs in ss["逐段"].items():
+            for r in runs:
+                out.append(f"- {sid} #{r['trial']}：{'，'.join(r['整理']) or '没有整理'}")
+        out.append("")
+
     if s["失败分类"]:
         out += ["## 失败分类", ""]
         out += [f"- {k}：{v} 次" for k, v in sorted(s["失败分类"].items(), key=lambda kv: -kv[1])]

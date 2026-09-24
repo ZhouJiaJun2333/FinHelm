@@ -220,7 +220,7 @@ class Context(BaseContext):
             if marker is not None:
                 self.add(marker)
                 events.append(ContextEdited(marker.describe(), before, measure_view(),
-                                            usage=marker.cost()))
+                                            usage=marker.cost(), kind=type(marker).__name__))
         return events
 
     def status(self) -> list[str]:
