@@ -14,8 +14,9 @@ from typing import Any
 
 import anthropic
 
+from ..core.errors import ContextOverflow
 from ..core.messages import LLMResponse, Message, ToolCall, Usage
-from .base import LLMProvider
+from .base import LLMProvider, is_context_overflow
 
 
 class AnthropicProvider(LLMProvider):
@@ -89,10 +90,11 @@ class AnthropicProvider(LLMProvider):
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
         system: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             "messages": self.convert_messages(messages),
         }
         if system:
@@ -100,7 +102,12 @@ class AnthropicProvider(LLMProvider):
         if tools:
             kwargs["tools"] = self.convert_tools(tools)
 
-        resp = self.client.messages.create(**kwargs)
+        try:
+            resp = self.client.messages.create(**kwargs)
+        except anthropic.BadRequestError as exc:
+            if is_context_overflow(str(exc)):
+                raise ContextOverflow(f"请求超出了 {self.model} 的上下文窗口：{exc}") from exc
+            raise
 
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []

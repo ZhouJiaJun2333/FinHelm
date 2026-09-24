@@ -23,10 +23,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
+from ..core.errors import ContextOverflow
 from ..core.messages import LLMResponse, Message, ToolCall, Usage
-from .base import LLMProvider
+from .base import LLMProvider, is_context_overflow
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -37,11 +38,14 @@ class OpenAICompatibleProvider(LLMProvider):
         base_url: str | None = None,
         max_tokens: int = 8192,
         context_window: int | None = None,
+        native_thinking: bool = False,
     ) -> None:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.max_tokens = max_tokens
         self.context_window = context_window
+        # 兼容接口背后是什么模型都有可能，会不会思考只能靠配置告诉它
+        self.native_thinking = native_thinking
 
     # ------------------------------------------------ 中立格式 -> 厂商格式
     @staticmethod
@@ -109,16 +113,22 @@ class OpenAICompatibleProvider(LLMProvider):
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
         system: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             "messages": self.convert_messages(messages, system),
         }
         if tools:
             kwargs["tools"] = self.convert_tools(tools)
 
-        resp = self.client.chat.completions.create(**kwargs)
+        try:
+            resp = self.client.chat.completions.create(**kwargs)
+        except BadRequestError as exc:
+            if is_context_overflow(str(exc)):
+                raise ContextOverflow(f"请求超出了 {self.model} 的上下文窗口：{exc}") from exc
+            raise
         choice = resp.choices[0]
         message = choice.message
 

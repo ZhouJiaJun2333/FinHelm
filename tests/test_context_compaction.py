@@ -16,7 +16,7 @@ from data_agent.core.context import (
     Summary,
     llm_summarizer,
 )
-from data_agent.core.context.compaction import TOOL_RESULT_CLIP, serialize
+from data_agent.core.context.compaction import TOOL_RESULT_CLIP, extract_summary, serialize
 from data_agent.core.errors import CompactionFailed
 from data_agent.core.events import ContextEdited
 from data_agent.core.messages import LLMResponse, Message, MessageMeta, ToolCall, Usage
@@ -324,3 +324,46 @@ def test_finish_turn继续时_压缩不会把当前这轮的问题切掉():
     last_request = [m.content for m in agent.llm.seen[-1]]
     assert last_request[0].endswith("问题2")
     assert last_request[1:] == ["答", "补上"]
+
+
+# ============================================================ 写摘要：4b 的调整
+def test_nudge在记录里标成Agent的提示_不算用户的原话():
+    text = serialize([
+        Message.user("华东卖了多少"),
+        Message.assistant("810 万"),
+        Message.user("还缺占比，补上").with_meta(synthetic=True),
+    ])
+    assert "[用户]\n华东卖了多少" in text
+    assert "[Agent 自动追加的提示]\n还缺占比，补上" in text
+
+
+def test_写摘要可以单独指定输出上限():
+    llm = ScriptedProvider([LLMResponse(text="摘要", stop_reason="end_turn")])
+    llm_summarizer(llm, max_tokens=16_000)([Message.user("q")])
+    assert llm.max_tokens_seen == [16_000]
+
+
+def test_会思考的模型直接写_不会思考的先打草稿():
+    thinker = ScriptedProvider([LLMResponse(text="摘要", stop_reason="end_turn")])
+    thinker.native_thinking = True
+    llm_summarizer(thinker)([Message.user("q")])
+    assert "<analysis>" not in thinker.seen[0][0].content
+
+    plain = ScriptedProvider([LLMResponse(
+        text="<analysis>第 1 条用户消息问了华东……</analysis>\n<summary>\n## 用户的目标\n看华东\n</summary>",
+        stop_reason="end_turn",
+    )])
+    summary = llm_summarizer(plain)([Message.user("q")])
+    assert "<analysis>" in plain.seen[0][0].content
+    assert summary.text == "## 用户的目标\n看华东", "草稿扔掉，只留 <summary> 里的"
+
+
+@pytest.mark.parametrize("reply, expected", [
+    ("<summary>正文</summary>", "正文"),
+    ("<analysis>草稿</analysis><summary>正文", "正文"),            # 忘了结束标签
+    ("<analysis>草稿</analysis>\n正文", "正文"),                    # 没用 summary 标签
+    ("直接写的正文", "直接写的正文"),                               # 根本没用标签
+    ("<analysis>写着写着就没了", ""),                               # 只有草稿 → 空 → 会报错
+])
+def test_从回复里取摘要_格式不规范也尽量取到(reply, expected):
+    assert extract_summary(reply) == expected

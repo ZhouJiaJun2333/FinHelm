@@ -89,14 +89,18 @@ class ClearOldToolResults(ContextEdit):
         ]
 
     # ------------------------------------------------------------ 清理
-    def maintain(self, entries: list[Entry], measure_view: Callable[[], int]) -> Marker | None:
-        if measure_view() <= self.trigger_tokens:
+    def maintain(
+        self, entries: list[Entry], measure_view: Callable[[], int], *, force: bool = False,
+    ) -> Marker | None:
+        if not force and measure_view() <= self.trigger_tokens:
             return None
 
         targets = self._clearable(entries)
+        if not targets:
+            return None
         freed = sum(estimate_message(m) - estimate_text(self.placeholder(m)) for m in targets)
-        if freed < self.clear_at_least:
-            # 省得太少，不值得为此让缓存失效一次
+        if not force and freed < self.clear_at_least:
+            # 省得太少，不值得为此让缓存失效一次。强制整理时（已经超长了）能省一点是一点。
             return None
         return ToolResultsCleared(frozenset(m.tool_call_id for m in targets))
 

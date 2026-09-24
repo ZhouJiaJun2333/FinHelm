@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # 默认值是 DeepSeek 官方给的 1M。换别家要按官方文档改 ——
     # 不确定就往小了填：填小了只是早点压缩，填大了会撞上限直接报错。
     openai_context_window: int = 1_000_000
+    # 这个模型会不会自己先思考。deepseek-flash 会（响应里有 reasoning_tokens，2026-09-24 实测）。
+    # 换成不会思考的模型要改成 false：写摘要时会改为让它先在 <analysis> 里打草稿。
+    openai_native_thinking: bool = True
 
     # ---------------- 数据库 ----------------
     # 默认连 docker/docker-compose.yml 起的那个，用只读账号
@@ -66,6 +69,10 @@ class Settings(BaseSettings):
     context_compact_trigger_tokens: int = 150_000
     # 压缩时保留多少最近的原文（按回合取整，至少保留当前这一轮）。照抄 pi 的默认值。
     context_compact_keep_recent_tokens: int = 20_000
+    # 写摘要那一次调用的输出上限。思考模型的思考 token 也算在输出里：
+    # 实测 deepseek-flash 写一份两三千字的摘要，输出 5000~7000 token，平时的 8192 太紧。
+    # 不能再高：Anthropic SDK 不开流式时，max_tokens 超过约 21333 直接报错。
+    context_compact_max_tokens: int = 16_000
     # 给模型输出留的余量。窗口小的模型，触发线会被压到「窗口 - 这个数」以下。
     # 安全余量放在这里，而不是加在估算系数上 —— 估算只管尽量准。
     context_reserve_tokens: int = 16_384
@@ -94,6 +101,7 @@ def build_provider(settings: Settings) -> LLMProvider:
             base_url=settings.openai_base_url,
             max_tokens=settings.max_tokens,
             context_window=settings.openai_context_window,
+            native_thinking=settings.openai_native_thinking,
         )
 
     raise ValueError(f"未知的 provider：{settings.provider}")

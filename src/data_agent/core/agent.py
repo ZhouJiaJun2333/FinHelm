@@ -25,9 +25,10 @@ from typing import Callable, Literal
 
 from ..llm.base import LLMProvider
 from ..tools.registry import ToolRegistry
-from .context import BaseContext, Context
-from .errors import ModelRefused, OutputTruncated, UnexpectedStopReason
+from .context import BaseContext, Context, Measure
+from .errors import ContextOverflow, ModelRefused, OutputTruncated, UnexpectedStopReason
 from .events import (
+    ContextOverflowed,
     Event,
     LLMResponded,
     StepLimitReached,
@@ -173,18 +174,10 @@ class Agent:
             # 发请求之前给上下文一次整理的机会（超阈值就清理旧工具结果之类）。
             # 放在循环里、而不是只在一轮开头：一轮里可能连调十几次工具，
             # 上下文在一轮**之内**就可能涨过阈值。
-            overhead = estimate_overhead(system, tools)
-            for event in self.context.maintain(
-                lambda msgs: estimate_context(msgs, overhead=overhead).tokens
-            ):
-                self.session_usage += event.usage      # 写摘要也是一次收费的调用
-                self.on_event(event)
+            measure = self._measure(system, tools)
+            self._maintain(measure)
 
-            response = self.llm.chat(
-                messages=self.context.render(),
-                tools=tools,
-                system=system,
-            )
+            response = self._chat(step, system, tools, measure)
             # 在分诊之前记账：被截断的回复同样收费。
             self.session_usage += response.usage
             self.on_event(LLMResponded(
@@ -255,6 +248,36 @@ class Agent:
         )
         self.context.add(Message.assistant(fallback).with_meta(synthetic=True))
         return fallback
+
+    # ------------------------------------------------------------------
+    def _chat(self, step: int, system: str, tools: list, measure: Measure) -> LLMResponse:
+        """请求模型。API 报上下文超长时，强制整理一次再试 —— 只试一次。
+
+        我们的估算说没超、API 说超了：估算偏小，或者配置的窗口比实际大。
+        这时阈值已经不可信，所以不看阈值，能清的清、能压的压（pi 的 overflow 触发
+        是同一个思路）。整理不出东西（比如只有当前这一轮），或者整理完还超，
+        那就是真的装不下了，异常照常抛出去，这一轮按事务回滚。
+        """
+        try:
+            return self.llm.chat(messages=self.context.render(), tools=tools, system=system)
+        except ContextOverflow:
+            self.on_event(ContextOverflowed(step))
+            if not self._maintain(measure, force=True):
+                raise
+            return self.llm.chat(messages=self.context.render(), tools=tools, system=system)
+
+    def _maintain(self, measure: Measure, *, force: bool = False) -> list[Event]:
+        """让上下文整理一次，事件转发给界面。返回做了什么（空 = 什么都没做）。"""
+        events = self.context.maintain(measure, force=force)
+        for event in events:
+            self.session_usage += event.usage      # 写摘要也是一次收费的调用
+            self.on_event(event)
+        return events
+
+    def _measure(self, system: str, tools: list) -> Measure:
+        """给上下文用的尺子：一份消息列表发出去（带上系统提示词和工具定义）大概多大。"""
+        overhead = estimate_overhead(system, tools)
+        return lambda msgs: estimate_context(msgs, overhead=overhead).tokens
 
     # ------------------------------------------------------------------
     def _check_stop_reason(self, response: LLMResponse) -> None:
@@ -344,6 +367,20 @@ class Agent:
         """
         overhead = estimate_overhead(self._render_system_prompt(), self.tools.schemas())
         return estimate_context(self.context.render(), overhead=overhead)
+
+    def compact(self) -> list[Event]:
+        """手动整理上下文（/compact）：不看阈值，能清的清、能压的压。
+
+        和 run() 一样是事务：写摘要失败时，历史回到调用之前的样子。
+        返回做了什么；空列表 = 没什么可整理的（比如只有一轮对话）。
+        """
+        snapshot = self.context.snapshot()
+        try:
+            measure = self._measure(self._render_system_prompt(), self.tools.schemas())
+            return self._maintain(measure, force=True)
+        except BaseException:
+            self.context.restore(snapshot)
+            raise
 
     def reset(self) -> None:
         self.context.clear()

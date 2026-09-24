@@ -105,10 +105,14 @@ class BaseContext(ABC):
         不一样（裁剪、清理、摘要都发生在这里）。
         """
 
-    def maintain(self, measure: Measure) -> list[Event]:
+    def maintain(self, measure: Measure, *, force: bool = False) -> list[Event]:
         """每次请求模型**之前**调用，给上下文一个整理自己的机会。
 
         返回这次做了什么（事件），交给界面展示。默认什么都不做。
+
+        force=True：不管阈值，能整理的都整理。两种情况会用到：
+            · API 报上下文超长 —— 估算说没超，说明估算不可信，别再看阈值
+            · 用户手动 /compact
 
         为什么是「请求前」而不是「追加消息时」：要不要整理取决于**整个请求**
         有多大（含系统提示词、工具定义），只有马上要发的时候才算得准。
@@ -156,12 +160,15 @@ class ContextEdit(ABC):
     def apply(self, entries: list[Entry]) -> list[Entry]:
         """加工视图。输入输出都含标记 —— 标记由 Context 在最后统一去掉。"""
 
-    def maintain(self, entries: list[Entry], measure_view: Callable[[], int]) -> Marker | None:
+    def maintain(
+        self, entries: list[Entry], measure_view: Callable[[], int], *, force: bool = False,
+    ) -> Marker | None:
         """请求前的整理机会：要做决定就返回一个标记，不做就返回 None。
 
         Args:
             entries:      这道工序的输入（前面各道工序加工过的）
             measure_view: 估算当前**最终**视图（所有工序都套用之后）有多少 token
+            force:        不看阈值，有能做的就做（见 BaseContext.maintain）
         """
         return None
 
@@ -202,14 +209,14 @@ class Context(BaseContext):
         return view
 
     # ------------------------------------------------------------ 整理
-    def maintain(self, measure: Measure) -> list[Event]:
+    def maintain(self, measure: Measure, *, force: bool = False) -> list[Event]:
         def measure_view() -> int:
             return measure(self.render())
 
         events: list[Event] = []
         for i, edit in enumerate(self.edits):
             before = measure_view()
-            marker = edit.maintain(self._apply(i), measure_view)
+            marker = edit.maintain(self._apply(i), measure_view, force=force)
             if marker is not None:
                 self.add(marker)
                 events.append(ContextEdited(marker.describe(), before, measure_view(),

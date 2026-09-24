@@ -14,6 +14,7 @@ from .app import Application, build_application
 from .core.errors import AgentError
 from .core.events import (
     ContextEdited,
+    ContextOverflowed,
     Event,
     LLMResponded,
     StepLimitReached,
@@ -30,8 +31,8 @@ BANNER = """
 │  SQL 数据分析 Agent                               │
 │                                                  │
 │  /tables  看库里有哪些表      /tools  看有哪些工具 │
-│  /context 看上下文用量        /reset  清空对话   │
-│  /exit    退出                                   │
+│  /context 看上下文用量        /compact 压缩上下文 │
+│  /reset   清空对话            /exit   退出       │
 └──────────────────────────────────────────────────┘"""
 
 
@@ -67,8 +68,13 @@ def make_console_sink(verbose: bool):
             case StepLimitReached(max_steps=n):
                 print(f"\n⚠️ 触发步数上限 {n}")
 
-            case ContextEdited(description=what, tokens_before=before, tokens_after=after):
-                print(f"\n🧹 {what}：上下文 {_k(before)} → {_k(after)}（估算）")
+            case ContextOverflowed():
+                print("\n⚠️ 请求超出了模型的上下文窗口，强制整理后重试")
+
+            case ContextEdited(description=what, tokens_before=before, tokens_after=after,
+                               usage=usage):
+                cost = f"，写摘要花了 {_k(usage.prompt_tokens + usage.output)} token" if usage.output else ""
+                print(f"\n🧹 {what}：上下文 {_k(before)} → {_k(after)}（估算）{cost}")
 
     return sink
 
@@ -140,6 +146,14 @@ def handle_command(cmd: str, app: Application) -> bool:
 
         case "/context":
             _print_context(app)
+
+        case "/compact":
+            # 整理的过程（🧹 那几行）由事件打印，这里只处理「什么都没做」和失败
+            try:
+                if not app.agent.compact():
+                    print("没有可整理的内容（压缩至少要保留当前这一轮，对话还太短）。")
+            except AgentError as exc:
+                print(f"⚠️ {exc}（上下文没有改动）")
 
         case _:
             return False

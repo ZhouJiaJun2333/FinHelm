@@ -10,8 +10,15 @@ from __future__ import annotations
 
 import json
 
+import anthropic
+import httpx2
+import openai
+import pytest
+
+from data_agent.core.errors import ContextOverflow
 from data_agent.core.messages import Message, ToolCall, Usage
 from data_agent.llm.anthropic_provider import AnthropicProvider
+from data_agent.llm.base import is_context_overflow
 from data_agent.llm.openai_provider import OpenAICompatibleProvider
 
 TOOLS = [{
@@ -220,10 +227,75 @@ def test_消息不可变_要改只能生成新对象():
     """上下文管理改消息时如果原地改，快照里的同一个对象也会跟着变，回滚就失效了。"""
     import dataclasses
 
-    import pytest
-
     msg = Message.user("原文")
     with pytest.raises(dataclasses.FrozenInstanceError):
         msg.content = "改了"
     changed = msg.with_meta(summary="x")
     assert changed is not msg and msg.meta.summary == ""
+
+
+# ============================================ 上下文超长：各家报错统一翻译
+@pytest.mark.parametrize("message", [
+    "prompt is too long: 210000 tokens > 200000 maximum",                          # Anthropic
+    "input length and `max_tokens` exceed context limit: 190000 + 16000 > 200000",  # Anthropic
+    "Error code: 400 - {'error': {'code': 'context_length_exceeded'}}",              # OpenAI
+    "This model's maximum context length is 131072 tokens. However, you requested 140000 tokens",
+])
+def test_认得各家的上下文超长报错(message):
+    assert is_context_overflow(message)
+
+
+@pytest.mark.parametrize("message", [
+    "Invalid max_tokens value, the valid range of max_tokens is [1, 393216]",
+    "messages: roles must alternate between user and assistant",
+    "tool_use ids were found without tool_result blocks",
+])
+def test_别的400不当成超长(message):
+    """认错了会白白压缩一次，然后原来的错照样出现。"""
+    assert not is_context_overflow(message)
+
+
+def _bad_request(cls, message: str):
+    response = httpx2.Response(400, request=httpx2.Request("POST", "https://example.invalid"))
+    return cls(message, response=response, body=None)
+
+
+def test_两家provider都把超长翻译成ContextOverflow_别的400原样抛(monkeypatch):
+    claude = AnthropicProvider(api_key="test")
+    deepseek = OpenAICompatibleProvider(api_key="test", model="m")
+    cases = [
+        (claude, "messages", anthropic.BadRequestError),
+        (deepseek, "chat.completions", openai.BadRequestError),
+    ]
+    for provider, path, error in cases:
+        endpoint = provider.client
+        for part in path.split("."):
+            endpoint = getattr(endpoint, part)
+
+        def raise_(message, *_, **__):
+            raise _bad_request(error, message)
+
+        monkeypatch.setattr(endpoint, "create", lambda **kw: raise_("prompt is too long: 9 > 8"))
+        with pytest.raises(ContextOverflow):
+            provider.chat([Message.user("q")])
+
+        monkeypatch.setattr(endpoint, "create", lambda **kw: raise_("roles must alternate"))
+        with pytest.raises(error):
+            provider.chat([Message.user("q")])
+
+
+def test_单次调用可以指定输出上限(monkeypatch):
+    provider = OpenAICompatibleProvider(api_key="test", model="m", max_tokens=8192)
+    sent = {}
+
+    def fake_create(**kw):
+        sent.update(kw)
+        raise _bad_request(openai.BadRequestError, "stop here")
+
+    monkeypatch.setattr(provider.client.chat.completions, "create", fake_create)
+    with pytest.raises(openai.BadRequestError):
+        provider.chat([Message.user("q")], max_tokens=16_000)
+    assert sent["max_tokens"] == 16_000
+    with pytest.raises(openai.BadRequestError):
+        provider.chat([Message.user("q")])
+    assert sent["max_tokens"] == 8192

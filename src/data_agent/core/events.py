@@ -78,9 +78,16 @@ class ContextEdited:
     usage: Usage = field(default_factory=Usage)
 
 
+@dataclass(slots=True)
+class ContextOverflowed:
+    """API 说请求超出了上下文窗口。接下来会强制整理一次再重试（之后跟着 ContextEdited）。"""
+
+    step: int
+
+
 Event = (
     LLMResponded | ToolStarted | ToolFinished | ToolDenied
-    | TurnContinued | StepLimitReached | ContextEdited
+    | TurnContinued | StepLimitReached | ContextEdited | ContextOverflowed
 )
 
 

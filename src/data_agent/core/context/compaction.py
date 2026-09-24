@@ -33,15 +33,21 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, replace
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
-from ...llm.base import LLMProvider
 from ..errors import CompactionFailed
 from ..messages import Message, Usage
 from ..tokens import estimate_message
 from .base import ContextEdit, Entry, Marker
 from .turns import turn_starts
+
+if TYPE_CHECKING:
+    # 只用来标类型。运行时导入会循环：llm.base → core.messages → core/__init__
+    # → context → 这里 → llm.base（还没加载完）。见 core/__init__.py 的说明。
+    from ...llm.base import LLMProvider
+
 
 @dataclass(frozen=True, slots=True)
 class Summary:
@@ -115,15 +121,20 @@ class CompactHistory(ContextEdit):
         return [merged, *entries[cut + 1:]]
 
     # ------------------------------------------------------------ 压缩
-    def maintain(self, entries: list[Entry], measure_view: Callable[[], int]) -> Marker | None:
-        if measure_view() <= self.trigger_tokens:
+    def maintain(
+        self, entries: list[Entry], measure_view: Callable[[], int], *, force: bool = False,
+    ) -> Marker | None:
+        if not force and measure_view() <= self.trigger_tokens:
             return None
 
         # 在「已经套过自己」的视图上找切口：上一份摘要在开头，会被一起交给模型，
         # 新摘要自然就是在旧摘要基础上更新的（滚动摘要）。
         view = self.apply(entries)
         starts = turn_starts(view)
-        kept = self._turns_to_keep(view, starts)
+        # 强制时只留当前这一轮：
+        #   · 手动 /compact —— 用户明确要压；按 2 万 token 留原文的话，短对话什么都压不掉
+        #   · API 报超长   —— 只重试一次，这一次要压到最狠，重试才有把握装得下
+        kept = 1 if force else self._turns_to_keep(view, starts)
         if len(starts) <= kept:
             return None                     # 只有当前这一轮，没有可压的
         cut = starts[-kept]
@@ -173,7 +184,12 @@ SUMMARY_PROMPT = """下面是一个数据分析助手和用户的对话记录。
 按下面的小节写，某一节没有内容就写「无」：
 
 ## 用户的目标
-用户想分析什么，问过哪些问题（按顺序，保留原意）。
+一两句话：用户想分析什么。
+
+## 用户的原话
+按顺序列出用户的每一条消息，原样或接近原样保留；很长的消息保留关键部分。
+用户的原话是整段对话里最不能丢的 —— 模型的转述会悄悄漏掉「不含退款」这类限定。
+之前摘要里已有的原话也照样保留。（「Agent 自动追加的提示」不是用户说的，不要列。）
 
 ## 口径与偏好
 用户指定或确认过的统计口径、时间范围、单位、格式要求。
@@ -197,7 +213,17 @@ SUMMARY_PROMPT = """下面是一个数据分析助手和用户的对话记录。
   （比如 `status = 'completed'`、日期范围）—— 需要时可以照着重写。
 - 如果对话开头已经有一份「之前的摘要」，把其中仍然有效的信息保留下来，和新的进展合并成一份，
   不要把旧摘要原样附在后面。
-- 直接输出摘要，不要开场白。"""
+{output_format}"""
+
+# 模型自己会思考：直接写
+DIRECT_OUTPUT = "- 直接输出摘要，不要开场白。"
+
+# 模型不会自己思考：先打草稿再写（Claude Code 的 <analysis> 做法）。
+# 写摘要最怕漏，先按顺序逐条过一遍，第 3 轮随口一句的限定才不会被略过。
+# 草稿是明文，排查「摘要漏了什么」时可以看；最终只保留 <summary> 里的内容。
+SCRATCHPAD_OUTPUT = """- 先在 <analysis> 标签里按时间顺序逐条过一遍对话：每条用户消息说了什么、定了什么口径、
+  查到了什么数字、报过什么错。确认没有遗漏后，再在 <summary> 标签里输出摘要。
+  <analysis> 只是草稿，不会被保留。"""
 
 # 序列化时每条工具结果最多保留多少字符。完整的表格对写摘要没什么用，
 # 结论一般在助手的回复里；留个开头足够看出查到了什么。
@@ -209,7 +235,9 @@ def serialize(messages: list[Message]) -> str:
     parts: list[str] = []
     for m in messages:
         if m.role == "user":
-            parts.append(f"[用户]\n{m.content}")
+            # nudge 也是 user 角色，但不是用户说的 —— 标出来，别被当成「用户的原话」
+            speaker = "Agent 自动追加的提示" if m.meta.synthetic else "用户"
+            parts.append(f"[{speaker}]\n{m.content}")
         elif m.role == "assistant":
             if m.content:
                 parts.append(f"[助手]\n{m.content}")
@@ -227,23 +255,48 @@ def _clip(text: str) -> str:
     return f"{text[:TOOL_RESULT_CLIP]}\n…（后面省略 {len(text) - TOOL_RESULT_CLIP} 字符）"
 
 
-def llm_summarizer(llm: LLMProvider) -> Summarize:
+def extract_summary(text: str) -> str:
+    """从回复里取出摘要正文：有 <summary> 就取里面的，没有就去掉草稿后取剩下的。
+
+    模型不一定听话 —— 可能忘了写结束标签，也可能根本没用标签。
+    宁可多留一点，也不要因为格式不对就把整份摘要扔掉。
+    """
+    summary = re.search(r"<summary>(.*?)(?:</summary>|$)", text, re.DOTALL)
+    if summary:
+        return summary.group(1).strip()
+    return re.sub(r"<analysis>.*?(?:</analysis>|$)", "", text, flags=re.DOTALL).strip()
+
+
+def llm_summarizer(
+    llm: LLMProvider, *, scratchpad: bool | None = None, max_tokens: int | None = None,
+) -> Summarize:
     """用 llm 写摘要。
+
+    Args:
+        scratchpad: 要不要让模型先在 <analysis> 里打草稿。默认看模型自己会不会
+                    思考（llm.native_thinking）：会思考的再打草稿等于想两遍，白花输出 token。
+        max_tokens: 这一次的输出上限。思考 token 也算输出，平时的上限可能不够。
 
     写摘要的请求和 Agent 平时的请求前缀不同（系统提示词不同、对话被序列化了），
     吃不到 prompt 缓存。Claude Code 的做法是原样发同一份对话、末尾追加一句
     「请写摘要」来复用缓存 —— 等第 5 步开缓存时再考虑。
     """
+    if scratchpad is None:
+        scratchpad = not llm.native_thinking
+    output_format = SCRATCHPAD_OUTPUT if scratchpad else DIRECT_OUTPUT
 
-    def summarize(messages: list[Message]) -> str:
-        prompt = SUMMARY_PROMPT.format(conversation=serialize(messages))
-        response = llm.chat(messages=[Message.user(prompt)], system=SUMMARY_SYSTEM)
+    def summarize(messages: list[Message]) -> Summary:
+        prompt = SUMMARY_PROMPT.format(
+            conversation=serialize(messages), output_format=output_format,
+        )
+        response = llm.chat(messages=[Message.user(prompt)], system=SUMMARY_SYSTEM,
+                            max_tokens=max_tokens)
         if response.truncated:
             raise CompactionFailed(
                 f"写摘要时输出被截断（已生成 {response.usage.output} 个 token）。"
-                "可以调大 .env 里的 MAX_TOKENS。"
+                "可以调大 .env 里的 CONTEXT_COMPACT_MAX_TOKENS。"
             )
-        text = response.text.strip()
+        text = extract_summary(response.text)
         if not text:
             raise CompactionFailed("写摘要的请求返回了空内容。")
         return Summary(text, response.usage)

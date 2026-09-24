@@ -26,23 +26,29 @@ from data_agent.tools.registry import ToolRegistry
 
 class ScriptedProvider(LLMProvider):
     """照剧本走的假模型：第 n 次被调用就返回剧本第 n 条，剧本用完就一直返回最后一条。
+    剧本里也可以放异常，那一次调用就抛出它（模拟 API 报错）。
 
     同时把每次收到的消息拍照存进 seen —— 测试「模型到底看到了什么」全靠它。
     """
 
     model = "scripted"
 
-    def __init__(self, script: Iterable[LLMResponse] = (),
+    def __init__(self, script: Iterable[LLMResponse | Exception] = (),
                  context_window: int | None = None) -> None:
         self.script = list(script)
         self.context_window = context_window
         self.calls = 0                          # 可以手动清零，让剧本从头再来
         self.seen: list[list[Message]] = []
+        self.max_tokens_seen: list[int | None] = []
 
-    def chat(self, messages, tools=None, system=None) -> LLMResponse:
+    def chat(self, messages, tools=None, system=None, max_tokens=None) -> LLMResponse:
         self.calls += 1
         self.seen.append(list(messages))
-        return self.script[min(self.calls - 1, len(self.script) - 1)]
+        self.max_tokens_seen.append(max_tokens)
+        step = self.script[min(self.calls - 1, len(self.script) - 1)]
+        if isinstance(step, Exception):
+            raise step                          # 剧本里放异常 = 这一次调用失败
+        return step
 
 
 class EchoTool(Tool):
@@ -58,7 +64,7 @@ class EchoTool(Tool):
 
 
 def make_agent(
-    script: Iterable[LLMResponse] = (),
+    script: Iterable[LLMResponse | Exception] = (),
     *,
     tools: Iterable[Tool] | None = None,
     **agent_kw,
