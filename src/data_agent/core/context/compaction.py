@@ -16,7 +16,8 @@
     · 摘要滚动更新：第二次压缩时，输入里带着上一份摘要，要求保留并更新它
     · 对话先序列化成一段文本再交给模型，不带工具 —— 模型不会接着对话往下聊，
       也不会去调工具，请求体里也没有 tool_use 块（Anthropic 要求有 tool_use
-      就得带工具定义）
+      就得带工具定义）。代价是吃不到缓存；另一种发法（reuse_cache，学 Claude Code）
+      见 llm_summarizer
     · 摘要是一个标记，原文还在历史里（pi 是日志里的一条 compaction 记录）
 
 ── 和 pi 不一样的地方 ──────────────────────────────────────────────
@@ -35,12 +36,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Protocol
 
 from ..errors import CompactionFailed
-from ..messages import Message, Usage
+from ..messages import LLMResponse, Message, Usage
 from ..tokens import estimate_message
-from .base import ContextEdit, Entry, Marker
+from .base import ContextEdit, Entry, Marker, Prompt
 from .turns import turn_starts
 
 if TYPE_CHECKING:
@@ -55,9 +56,15 @@ class Summary:
     usage: Usage = field(default_factory=Usage)     # 写这份摘要花了多少
 
 
-# 把一段对话写成摘要。输入是要压掉的那些消息（可能以上一份摘要开头）。
-# 作为参数注入：context 包不用关心是哪个模型写的，测试里传个假函数就行。
-Summarize = Callable[[list[Message]], Summary]
+class Summarize(Protocol):
+    """把一段对话写成摘要。作为参数注入：context 包不用关心是哪个模型写的，测试里传个假函数就行。
+
+    messages  要压掉的那些消息（可能以上一份摘要开头）—— 正好是上一次请求的**开头一段**
+    prompt    上一次请求的系统提示词和工具定义。带上它们、原样发 messages，写摘要的请求
+              就和上一次请求共用前缀，能命中缓存（见 llm_summarizer 的 reuse_cache）
+    """
+
+    def __call__(self, messages: list[Message], prompt: Prompt | None = None) -> Summary: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +130,7 @@ class CompactHistory(ContextEdit):
     # ------------------------------------------------------------ 压缩
     def maintain(
         self, entries: list[Entry], measure_view: Callable[[], int], *, force: bool = False,
+        prompt: Prompt | None = None,
     ) -> Marker | None:
         if not force and measure_view() <= self.trigger_tokens:
             return None
@@ -140,7 +148,7 @@ class CompactHistory(ContextEdit):
         cut = starts[-kept]
 
         old = [e for e in view[:cut] if isinstance(e, Message)]
-        summary = self.summarize(old)
+        summary = self.summarize(old, prompt)
         return HistoryCompacted(summary=summary.text, kept_turns=kept,
                                 compacted_turns=len(starts) - kept, usage=summary.usage)
 
@@ -181,7 +189,17 @@ SUMMARY_PROMPT = """下面是一个数据分析助手和用户的对话记录。
 {conversation}
 </conversation>
 
-按下面的小节写，某一节没有内容就写「无」：
+{instructions}"""
+
+# 复用缓存的写法：对话原样留在前面（和上一次请求同一个前缀），末尾追加这一条。
+# 模型这时还是「数据分析师」、手边还有工具，所以开头先把话说死：这不是新问题，别调工具。
+CACHED_SUMMARY_PROMPT = """[这不是新的分析问题。上下文快满了，请先停下手上的工作，把上面到这里为止的整段对话写成一份摘要，
+之后的对话只能看到这份摘要，看不到原文。不要调用任何工具，不要继续回答之前的问题。
+对话里「请继续完成上面的任务」这类催促是 Agent 自动追加的，不是用户说的。]
+
+{instructions}"""
+
+SUMMARY_INSTRUCTIONS = """按下面的小节写，某一节没有内容就写「无」：
 
 ## 用户的目标
 一两句话：用户想分析什么。
@@ -269,28 +287,51 @@ def extract_summary(text: str) -> str:
 
 def llm_summarizer(
     llm: LLMProvider, *, scratchpad: bool | None = None, max_tokens: int | None = None,
+    reuse_cache: bool = False,
 ) -> Summarize:
     """用 llm 写摘要。
 
     Args:
-        scratchpad: 要不要让模型先在 <analysis> 里打草稿。默认看模型自己会不会
-                    思考（llm.native_thinking）：会思考的再打草稿等于想两遍，白花输出 token。
-        max_tokens: 这一次的输出上限。思考 token 也算输出，平时的上限可能不够。
+        scratchpad:  要不要让模型先在 <analysis> 里打草稿。默认看模型自己会不会
+                     思考（llm.native_thinking）：会思考的再打草稿等于想两遍，白花输出 token。
+        max_tokens:  这一次的输出上限。思考 token 也算输出，平时的上限可能不够。
+        reuse_cache: 两种发法，见下。
 
-    写摘要的请求和 Agent 平时的请求前缀不同（系统提示词不同、对话被序列化了），
-    吃不到 prompt 缓存。Claude Code 的做法是原样发同一份对话、末尾追加一句
-    「请写摘要」来复用缓存 —— 等第 5 步开缓存时再考虑。
+    ── 两种发法 ──────────────────────────────────────────────────────
+    序列化（默认，学 pi）：对话写成一段纯文本，换一个「摘要助手」的系统提示词、不带工具发。
+        模型只是在读一份记录，不会接着聊、不会调工具。但请求从第一个字就和平时不同，
+        一个 token 都命中不了缓存 —— 压缩时上下文最大，这一次全价。
+    复用缓存（reuse_cache，学 Claude Code）：系统提示词、工具定义、消息都和上一次请求
+        一模一样，只在末尾追加一条「请写摘要」。前面几万 token 全部命中。
+        代价是模型还是「数据分析师」、手边有工具：可能去调工具而不写摘要。
+        那样就退回序列化再写一次（两次的花费都记账）。
+    没传 prompt（不知道平时的请求长什么样）时只能序列化。
     """
     if scratchpad is None:
         scratchpad = not llm.native_thinking
-    output_format = SCRATCHPAD_OUTPUT if scratchpad else DIRECT_OUTPUT
+    instructions = SUMMARY_INSTRUCTIONS.format(
+        output_format=SCRATCHPAD_OUTPUT if scratchpad else DIRECT_OUTPUT)
 
-    def summarize(messages: list[Message]) -> Summary:
-        prompt = SUMMARY_PROMPT.format(
-            conversation=serialize(messages), output_format=output_format,
-        )
-        response = llm.chat(messages=[Message.user(prompt)], system=SUMMARY_SYSTEM,
-                            max_tokens=max_tokens)
+    def serialized(messages: list[Message]) -> LLMResponse:
+        text = SUMMARY_PROMPT.format(conversation=serialize(messages), instructions=instructions)
+        return llm.chat(messages=[Message.user(text)], system=SUMMARY_SYSTEM, max_tokens=max_tokens)
+
+    def cached(messages: list[Message], prompt: Prompt) -> LLMResponse:
+        ask = Message.user(CACHED_SUMMARY_PROMPT.format(instructions=instructions))
+        return llm.chat(messages=[*messages, ask], tools=list(prompt.tools) or None,
+                        system=prompt.system, max_tokens=max_tokens)
+
+    def summarize(messages: list[Message], prompt: Prompt | None = None) -> Summary:
+        usage = Usage()
+        if reuse_cache and prompt is not None:
+            response = cached(messages, prompt)
+            usage += response.usage
+            if response.tool_calls and not extract_summary(response.text):
+                response = serialized(messages)      # 模型去调工具了：换个发法再写
+                usage += response.usage
+        else:
+            response = serialized(messages)
+            usage += response.usage
         if response.truncated:
             raise CompactionFailed(
                 f"写摘要时输出被截断（已生成 {response.usage.output} 个 token）。"
@@ -299,6 +340,6 @@ def llm_summarizer(
         text = extract_summary(response.text)
         if not text:
             raise CompactionFailed("写摘要的请求返回了空内容。")
-        return Summary(text, response.usage)
+        return Summary(text, usage)
 
     return summarize

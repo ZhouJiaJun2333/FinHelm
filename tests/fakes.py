@@ -40,11 +40,15 @@ class ScriptedProvider(LLMProvider):
         self.calls = 0                          # 可以手动清零，让剧本从头再来
         self.seen: list[list[Message]] = []
         self.max_tokens_seen: list[int | None] = []
+        self.system_seen: list[str | None] = []     # 每次请求的系统提示词和工具定义：
+        self.tools_seen: list[list | None] = []     # 测「写摘要和平时的请求共用前缀」要用
 
     def chat(self, messages, tools=None, system=None, max_tokens=None) -> LLMResponse:
         self.calls += 1
         self.seen.append(list(messages))
         self.max_tokens_seen.append(max_tokens)
+        self.system_seen.append(system)
+        self.tools_seen.append(tools)
         step = self.script[min(self.calls - 1, len(self.script) - 1)]
         if isinstance(step, Exception):
             raise step                          # 剧本里放异常 = 这一次调用失败

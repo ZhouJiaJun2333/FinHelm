@@ -15,6 +15,8 @@ pass^k = 连跑 k 次全对的比例（τ-bench 的指标）：时对时错的 A
     后续调用   命中的是本题自己的历史前缀 —— 第 5 步要优化的就是这一段
     清理后调用 后续调用里紧跟在清理之后的那几次：历史中间被改了，缓存断在第一处改动
     压缩后调用 紧跟在压缩之后：开头就换成了摘要，除了系统提示词基本全断
+    写摘要     压缩时写摘要的那次调用。序列化成文本发（默认）一个 token 都命中不了；
+               context_compact_reuse_cache 打开后原样发对话，应该几乎全中
                这两项只有多轮会话里才会有
 """
 
@@ -51,6 +53,8 @@ def cache_stats(trials: list[Trial] | list[SessionTrial]) -> dict[str, Any]:
         "清理后调用次数": len(cleared),
         "压缩后调用命中率": hit_rate(after_compact),
         "压缩后调用次数": len(after_compact),
+        "写摘要命中率": hit_rate([u for t in trials for u in t.summary_calls]),
+        "写摘要次数": sum(len(t.summary_calls) for t in trials),
         "平均命中token": round(sum(t.usage.cache_read for t in trials) / n),
         "平均写入token": round(sum(t.usage.cache_write for t in trials) / n),
     }
@@ -181,6 +185,8 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         f"| 平均缓存 token（命中 / 写入） | {cache['平均命中token']:,} / {cache['平均写入token']:,} |",
         *[f"| {k}后调用命中率（{cache[k + '后调用次数']} 次） | {pct(cache[k + '后调用命中率'])} |"
           for k in ("清理", "压缩") if cache.get(k + "后调用次数")],
+        *([f"| 写摘要命中率（{cache['写摘要次数']} 次） | {pct(cache['写摘要命中率'])} |"]
+          if cache.get("写摘要次数") else []),
         f"| 平均耗时 | {s['平均耗时s']}s |",
         f"| 步数耗尽 / 运行出错 | {s['步数耗尽']} / {s['运行出错']} |",
         "",

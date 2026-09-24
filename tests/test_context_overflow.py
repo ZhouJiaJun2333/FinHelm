@@ -21,7 +21,7 @@ OVERFLOW = ContextOverflow("prompt is too long")
 
 
 def summarizer(calls: list) -> Summarize:
-    def summarize(messages):
+    def summarize(messages, prompt=None):
         calls.append(messages)
         return Summary("摘要")
     return summarize
@@ -101,7 +101,7 @@ def test_对话太短时手动压缩什么都不做():
 
 
 def test_手动压缩失败时上下文不变():
-    def broken(messages):
+    def broken(messages, prompt=None):
         raise CompactionFailed("写摘要的请求返回了空内容。")
 
     agent, _ = make_agent([OK], context=Context([

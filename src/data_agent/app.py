@@ -94,7 +94,8 @@ def build_application(
             low_water_ratio=settings.context_clear_low_water_ratio,
         ),
         CompactHistory(
-            summarize=llm_summarizer(llm, max_tokens=settings.context_compact_max_tokens),
+            summarize=llm_summarizer(llm, max_tokens=settings.context_compact_max_tokens,
+                                     reuse_cache=settings.context_compact_reuse_cache),
             trigger_tokens=cap(settings.context_compact_trigger_tokens),
             keep_recent_tokens=settings.context_compact_keep_recent_tokens,
         ),

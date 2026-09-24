@@ -25,7 +25,7 @@ from typing import Callable, Literal
 
 from ..llm.base import LLMProvider
 from ..tools.registry import ToolRegistry
-from .context import BaseContext, Context, Measure
+from .context import BaseContext, Context, Measure, Prompt
 from .errors import ContextOverflow, ModelRefused, OutputTruncated, UnexpectedStopReason
 from .events import (
     ContextOverflowed,
@@ -174,10 +174,9 @@ class Agent:
             # 发请求之前给上下文一次整理的机会（超阈值就清理旧工具结果之类）。
             # 放在循环里、而不是只在一轮开头：一轮里可能连调十几次工具，
             # 上下文在一轮**之内**就可能涨过阈值。
-            measure = self._measure(system, tools)
-            self._maintain(measure)
+            self._maintain(system, tools)
 
-            response = self._chat(step, system, tools, measure)
+            response = self._chat(step, system, tools)
             # 在分诊之前记账：被截断的回复同样收费。
             self.session_usage += response.usage
             self.on_event(LLMResponded(
@@ -250,7 +249,7 @@ class Agent:
         return fallback
 
     # ------------------------------------------------------------------
-    def _chat(self, step: int, system: str, tools: list, measure: Measure) -> LLMResponse:
+    def _chat(self, step: int, system: str, tools: list) -> LLMResponse:
         """请求模型。API 报上下文超长时，强制整理一次再试 —— 只试一次。
 
         我们的估算说没超、API 说超了：估算偏小，或者配置的窗口比实际大。
@@ -262,13 +261,18 @@ class Agent:
             return self.llm.chat(messages=self.context.render(), tools=tools, system=system)
         except ContextOverflow:
             self.on_event(ContextOverflowed(step))
-            if not self._maintain(measure, force=True):
+            if not self._maintain(system, tools, force=True):
                 raise
             return self.llm.chat(messages=self.context.render(), tools=tools, system=system)
 
-    def _maintain(self, measure: Measure, *, force: bool = False) -> list[Event]:
-        """让上下文整理一次，事件转发给界面。返回做了什么（空 = 什么都没做）。"""
-        events = self.context.maintain(measure, force=force)
+    def _maintain(self, system: str, tools: list, *, force: bool = False) -> list[Event]:
+        """让上下文整理一次，事件转发给界面。返回做了什么（空 = 什么都没做）。
+
+        system / tools 是马上要发的这次请求用的：量大小要算上它们；写摘要时原样带上，
+        才能和平时的请求共用前缀、命中缓存。
+        """
+        events = self.context.maintain(self._measure(system, tools), force=force,
+                                       prompt=Prompt(system, tuple(tools)))
         for event in events:
             self.session_usage += event.usage      # 写摘要也是一次收费的调用
             self.on_event(event)
@@ -376,8 +380,7 @@ class Agent:
         """
         snapshot = self.context.snapshot()
         try:
-            measure = self._measure(self._render_system_prompt(), self.tools.schemas())
-            return self._maintain(measure, force=True)
+            return self._maintain(self._render_system_prompt(), self.tools.schemas(), force=True)
         except BaseException:
             self.context.restore(snapshot)
             raise

@@ -65,6 +65,18 @@ Measure = Callable[[list[Message]], int]
 
 
 @dataclass(frozen=True, slots=True)
+class Prompt:
+    """一次请求里消息以外的部分：系统提示词和工具定义。
+
+    整理时 Agent 把它交给工序。写摘要要用：摘要请求带上和平时**一模一样**的系统提示词、
+    工具定义和消息前缀，才能命中 prompt 缓存（前缀匹配，从第一个不同的字开始全部重算）。
+    """
+
+    system: str | None = None
+    tools: tuple[dict, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Marker:
     """历史里的一条标记：记录某道工序做过的一个决定。不是对话消息，不发给模型。
 
@@ -105,8 +117,11 @@ class BaseContext(ABC):
         不一样（裁剪、清理、摘要都发生在这里）。
         """
 
-    def maintain(self, measure: Measure, *, force: bool = False) -> list[Event]:
+    def maintain(self, measure: Measure, *, force: bool = False,
+                 prompt: Prompt | None = None) -> list[Event]:
         """每次请求模型**之前**调用，给上下文一个整理自己的机会。
+
+        prompt：这次请求的系统提示词和工具定义，要调模型的工序（写摘要）用它复用缓存。
 
         返回这次做了什么（事件），交给界面展示。默认什么都不做。
 
@@ -162,6 +177,7 @@ class ContextEdit(ABC):
 
     def maintain(
         self, entries: list[Entry], measure_view: Callable[[], int], *, force: bool = False,
+        prompt: Prompt | None = None,
     ) -> Marker | None:
         """请求前的整理机会：要做决定就返回一个标记，不做就返回 None。
 
@@ -169,6 +185,7 @@ class ContextEdit(ABC):
             entries:      这道工序的输入（前面各道工序加工过的）
             measure_view: 估算当前**最终**视图（所有工序都套用之后）有多少 token
             force:        不看阈值，有能做的就做（见 BaseContext.maintain）
+            prompt:       这次请求的系统提示词和工具定义（见 Prompt）
         """
         return None
 
@@ -209,14 +226,15 @@ class Context(BaseContext):
         return view
 
     # ------------------------------------------------------------ 整理
-    def maintain(self, measure: Measure, *, force: bool = False) -> list[Event]:
+    def maintain(self, measure: Measure, *, force: bool = False,
+                 prompt: Prompt | None = None) -> list[Event]:
         def measure_view() -> int:
             return measure(self.render())
 
         events: list[Event] = []
         for i, edit in enumerate(self.edits):
             before = measure_view()
-            marker = edit.maintain(self._apply(i), measure_view, force=force)
+            marker = edit.maintain(self._apply(i), measure_view, force=force, prompt=prompt)
             if marker is not None:
                 self.add(marker)
                 events.append(ContextEdited(marker.describe(), before, measure_view(),

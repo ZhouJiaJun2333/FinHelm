@@ -7,7 +7,7 @@ from typing import Callable, Iterable
 
 from ..messages import Message
 from ..tokens import estimate_message, estimate_text
-from .base import ContextEdit, Entry, Marker
+from .base import ContextEdit, Entry, Marker, Prompt
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +109,7 @@ class ClearOldToolResults(ContextEdit):
     # ------------------------------------------------------------ 清理
     def maintain(
         self, entries: list[Entry], measure_view: Callable[[], int], *, force: bool = False,
+        prompt: Prompt | None = None,
     ) -> Marker | None:
         size = measure_view()
         if not force and size <= self.trigger_tokens:

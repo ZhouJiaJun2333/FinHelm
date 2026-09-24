@@ -66,6 +66,7 @@ class Trial:
     calls: list[Usage] = field(default_factory=list)   # 每次调模型的用量，按顺序（不含写摘要）
     after_edit: list[int] = field(default_factory=list)  # calls 里哪几次紧跟在清理/压缩之后
     after_compact: list[int] = field(default_factory=list)  # 其中哪几次之前做过压缩（after_edit 的子集）
+    summary_calls: list[Usage] = field(default_factory=list)  # 写摘要那几次调用（不在 calls 里）
     elapsed_s: float = 0.0
     step_limit: bool = False
     context_edits: int = 0
@@ -115,6 +116,7 @@ class Trial:
         d["sql_calls"] = [SqlCall(**c) for c in d.get("sql_calls", [])]
         d["usage"] = Usage(**d["usage"])
         d["calls"] = [Usage(**u) for u in d.get("calls", [])]
+        d["summary_calls"] = [Usage(**u) for u in d.get("summary_calls", [])]
         if d.get("result"):
             d["result"] = ResultMatch(**d["result"])
         if d.get("answer_check"):
@@ -154,6 +156,8 @@ def digest(t: Trial, events: list[Event]) -> None:
             t.context_edits += 1
             edited = True
             compacted |= e.kind == "HistoryCompacted"
+            if e.usage.prompt_tokens:
+                t.summary_calls.append(e.usage)
         elif isinstance(e, LLMResponded):
             if edited:
                 t.after_edit.append(len(t.calls))
@@ -188,6 +192,10 @@ class SessionTrial:
     @property
     def calls(self) -> list[Usage]:
         return [u for t in self.turns for u in t.calls]
+
+    @property
+    def summary_calls(self) -> list[Usage]:
+        return [u for t in self.turns for u in t.summary_calls]
 
     @property
     def after_edit(self) -> list[int]:
