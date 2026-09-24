@@ -23,5 +23,5 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]   # "." 让测试能 import evals（判分器要有单元测试）
 testpaths = ["tests"]

@@ -101,7 +101,12 @@ pytest
 ├── examples/
 │   └── event_demo.py           事件/回调机制的最小演示
 ├── docs/                       可运行的「为什么这么写」说明（见上面的表）
-└── tests/                      211 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
+├── evals/                      评测：真模型跑标准题、自动判分（见下面「评测」一节）
+│   ├── cases/shop.jsonl          20 道题，答案存标准 SQL
+│   ├── runner.py / graders.py    跑一道题 / 判分（判分器有单元测试）
+│   ├── report.py / run.py        报告 / 命令行入口
+│   └── runs/                     每次运行的记录（不进 git）
+└── tests/                      246 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
     ├── test_agent_loop.py                    主循环行为
     ├── test_stop_reason_and_finish_turn.py   完成判定 + 结束钩子
     ├── test_provider_conversion.py           两家 provider 的格式转换
@@ -268,6 +273,9 @@ docker exec dataagent-postgres psql -U agent_ro -d analytics -c "DELETE FROM ord
 | `orders` | 5000 | 订单头，`status` 有 completed/cancelled/returned |
 | `order_items` | ~12500 | 明细，实付 = `quantity × unit_price × (1 - discount)` |
 
+⚠️ 已知问题：`products.product_name` 不唯一 —— 40 个商品只有 8 个名字（每个名字 5 个商品），
+是造数据时命名规则写错了。按商品名分组会把 5 个商品合在一起。出评测题时发现的，还没修。
+
 几个可以拿来练手的问题：
 
 - `2025 年哪个大区销售额最高？给我前三名和占比`
@@ -275,6 +283,44 @@ docker exec dataagent-postgres psql -U agent_ro -d analytics -c "DELETE FROM ord
 - `线上和线下渠道的客单价差多少`
 - `退货率最高的是哪个品类`
 - `有多少客户只下过一单`
+
+---
+
+## 评测
+
+单元测试回答「代码有没有按设计运行」（假模型、几秒跑完）；评测回答「Agent 能不能把活干好」
+（真模型、要花钱，改提示词 / 换模型 / 改策略时手动跑）。
+
+```bash
+python -m evals.run                          # 20 道题 × 3 次
+python -m evals.run --model qwen3.6-flash    # 换个模型比一比
+python -m evals.run --only shop-003 --trials 1
+```
+
+**怎么判**（`evals/graders.py`，每条规则都有单元测试）：
+
+| 判分项 | 规则 |
+|---|---|
+| 结果对 | Agent 跑过的 SQL 里，有一条查出了标准答案（重跑它，和标准 SQL 的结果比）。不管顺序、列名；多几列、比例乘了 100、NULL 显示成「未填写」都算对 |
+| 严格 | 而且列数也一样（接近 BIRD 的判法） |
+| **回答对** | 结果对，而且标准答案里的数字在最终回答里都说到了（「810.05 万」「33.2%」这类写法都认） |
+
+和 BIRD 官方判法的区别：BIRD 只看**最后一条** SQL、要求结果完全一样。冒烟测试里 3 道 Agent 答对的题
+按那种判法会全错 —— 它先查出答案，最后又查一条明细给你对比口径。跑 BIRD 时两种分数都报。
+
+**看什么**：pass@1（跑一次答对的概率）、pass^k（连跑 k 次都对的题占比，看稳不稳）、
+平均步数 / token / 耗时、按标签分类的准确率、失败分类，以及和上一次运行的逐题对比。
+每次运行记下 git 版本、模型、提示词和题库的指纹 —— 分数离开这些就说不清是什么条件下跑出来的。
+
+**基线**（2026-09-24，deepseek-v4.1-flash，20 题 × 3 次）：回答对 **100%**，pass^3 100%，
+严格只有 35%（Agent 几乎总会顺手多给几列，比如订单数），平均 3.3 步、13.6 秒、输入约 6.4k token。
+60 次里有 21 次是靠**不是最后一条**的 SQL 对上的 —— 按 BIRD 只看最后一条的判法，这些都会被判错。
+
+⚠️ 100% 说明这 20 道题对这个模型**太简单了**：它只能防退步，量不出改进。下一步要加难题
+（BIRD 的 financial 库、多轮对话 + 压缩后追问、更刁钻的口径）。
+
+已知局限：回答核对只查「该说的数说没说」，不查「有没有多说错的」—— 比如问「超过 16 个」
+却把正好 16 个的也列进去，结果核对可能照样通过。目前靠抽查运行记录兜底。
 
 ---
 
