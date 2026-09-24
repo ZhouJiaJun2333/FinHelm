@@ -61,6 +61,7 @@ class Trial:
     matched_sql: str = ""                 # 查出了标准答案的那条；空 = 没有一条对上
     steps: int = 0                        # 调了几次模型
     usage: Usage = field(default_factory=Usage)
+    calls: list[Usage] = field(default_factory=list)   # 每次调模型的用量，按顺序（不含写摘要）
     elapsed_s: float = 0.0
     step_limit: bool = False
     context_edits: int = 0
@@ -121,7 +122,8 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database,
     t.elapsed_s = round(time.perf_counter() - started, 1)
 
     t.sql_calls = extract_sql_calls(events)
-    t.steps = sum(isinstance(e, LLMResponded) for e in events)
+    t.calls = [e.usage for e in events if isinstance(e, LLMResponded)]
+    t.steps = len(t.calls)
     t.step_limit = any(isinstance(e, StepLimitReached) for e in events)
     t.context_edits = sum(isinstance(e, ContextEdited) for e in events)
     succeeded = [c for c in t.sql_calls if c.ok]

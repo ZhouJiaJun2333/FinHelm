@@ -7,6 +7,12 @@
 
 pass@1 = 跑一次答对的概率（所有 trial 的平均）
 pass^k = 连跑 k 次全对的比例（τ-bench 的指标）：时对时错的 Agent 比稳定答不上来的更坑人
+
+缓存命中率按 token 加权（Σ命中 / Σ输入），不是每题命中率的平均 —— 钱是按 token 算的。
+分成两段看，因为它们靠的是不同的东西：
+    首次调用   只有系统提示词 + 工具定义可能命中，靠的是「别的 trial 刚发过同样的开头」，
+               跟并发、跑题顺序有关，不是我们的上下文策略管得了的
+    后续调用   命中的是本题自己的历史前缀 —— 第 5 步要优化的就是这一段
 """
 
 from __future__ import annotations
@@ -14,8 +20,29 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any
 
+from data_agent.core.messages import Usage
+
 from .cases import Case
 from .runner import Trial
+
+
+def hit_rate(usages: list[Usage]) -> float | None:
+    """Σ命中 / Σ输入。没有输入（比如一题只调了一次，没有后续调用）返回 None。"""
+    total = sum(u.prompt_tokens for u in usages)
+    return sum(u.cache_read for u in usages) / total if total else None
+
+
+def cache_stats(trials: list[Trial]) -> dict[str, Any]:
+    first = [t.calls[0] for t in trials if t.calls]
+    later = [u for t in trials for u in t.calls[1:]]
+    n = len(trials) or 1
+    return {
+        "命中率": hit_rate([t.usage for t in trials]),
+        "首次调用命中率": hit_rate(first),
+        "后续调用命中率": hit_rate(later),
+        "平均命中token": round(sum(t.usage.cache_read for t in trials) / n),
+        "平均写入token": round(sum(t.usage.cache_write for t in trials) / n),
+    }
 
 
 def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
@@ -41,6 +68,7 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
             "结果对": sum(t.result_ok for t in ts),
             "回答对": sum(t.answer_ok for t in ts),
             "全对": bool(ts) and all(t.answer_ok for t in ts),
+            "缓存命中率": hit_rate([t.usage for t in ts]),
             "失败": dict(Counter(t.failure for t in ts if t.failure)),
         }
 
@@ -58,6 +86,7 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
         "平均步数": round(sum(t.steps for t in trials) / n, 2),
         "平均输入token": round(sum(t.usage.prompt_tokens for t in trials) / n),
         "平均输出token": round(sum(t.usage.output for t in trials) / n),
+        "缓存": cache_stats(trials),
         "平均耗时s": round(sum(t.elapsed_s for t in trials) / n, 1),
         "步数耗尽": sum(t.step_limit for t in trials),
         "运行出错": sum(bool(t.error) for t in trials),
@@ -83,8 +112,9 @@ def compare(prev: dict[str, Any], cur: dict[str, Any]) -> list[str]:
 
 def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = None,
            trials: list[Trial] | None = None) -> str:
-    pct = lambda x: f"{x:.0%}"  # noqa: E731
+    pct = lambda x: "—" if x is None else f"{x:.0%}"  # noqa: E731
     p1 = s["pass@1"]
+    cache = s["缓存"]
     out = [
         f"# 评测报告：{meta['cases']}（{meta['model']}）",
         "",
@@ -99,6 +129,9 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         f"| pass^{meta['trials']}（每次都回答对的题） | {pct(s['pass^k'])} |",
         f"| 平均步数 | {s['平均步数']} |",
         f"| 平均 token（输入 / 输出） | {s['平均输入token']:,} / {s['平均输出token']:,} |",
+        f"| 缓存命中率（全部 / 首次调用 / 后续调用） | {pct(cache['命中率'])} / "
+        f"{pct(cache['首次调用命中率'])} / {pct(cache['后续调用命中率'])} |",
+        f"| 平均缓存 token（命中 / 写入） | {cache['平均命中token']:,} / {cache['平均写入token']:,} |",
         f"| 平均耗时 | {s['平均耗时s']}s |",
         f"| 步数耗尽 / 运行出错 | {s['步数耗尽']} / {s['运行出错']} |",
         "",
@@ -112,10 +145,10 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
     for tag, r in sorted(s["按标签"].items(), key=lambda kv: kv[1]["回答对"]):
         out.append(f"| {tag} | {r['trials']} | {pct(r['结果对'])} | {pct(r['回答对'])} |")
 
-    out += ["", "## 逐题", "", "| 题 | 问题 | 回答对 | 失败 |", "|:--|:--|--:|:--|"]
+    out += ["", "## 逐题", "", "| 题 | 问题 | 回答对 | 缓存命中 | 失败 |", "|:--|:--|--:|--:|:--|"]
     for cid, c in s["逐题"].items():
         fails = "，".join(f"{k}×{v}" for k, v in c["失败"].items())
-        out.append(f"| {cid} | {c['question']} | {c['回答对']}/{c['trials']} | {fails} |")
+        out.append(f"| {cid} | {c['question']} | {c['回答对']}/{c['trials']} | {pct(c['缓存命中率'])} | {fails} |")
 
     if diff is not None:
         out += ["", f"## 和上一次比（{meta.get('compared_with', '')}）", ""]

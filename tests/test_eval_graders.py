@@ -231,3 +231,20 @@ def test_查出分量在回答里自己算_取数算对_但回答里必须有最
     wrong = trial_with([("SELECT by channel", True)], "线上 1217.86 万，线下 821.54 万，多了 400 万")
     grade(wrong, case, db, gold)
     assert wrong.result_ok and not wrong.answer_ok, "分量查对了、减错了：取数对，结论错"
+
+
+# ================================================================ 缓存统计
+def test_缓存命中率按token加权_首次和后续分开算():
+    from data_agent.core.messages import Usage
+    from evals.report import cache_stats
+
+    one_step = Trial("a", 1, calls=[Usage(input=100, cache_read=900)])
+    two_steps = Trial("b", 1, calls=[Usage(input=1000), Usage(input=100, cache_read=1900)])
+    for t in (one_step, two_steps):
+        t.usage = sum(t.calls, Usage())
+
+    s = cache_stats([one_step, two_steps])
+    assert s["命中率"] == 2800 / 4000                 # 不是 (0.9 + 0.475) / 2
+    assert s["首次调用命中率"] == 900 / 2000
+    assert s["后续调用命中率"] == 1900 / 2000
+    assert cache_stats([one_step])["后续调用命中率"] is None   # 没有后续调用，不是 0%
