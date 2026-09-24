@@ -41,7 +41,7 @@ from typing import Any, Callable, Iterable
 
 from .events import ContextCleared
 from .messages import Message
-from .tokens import estimate_message
+from .tokens import estimate_message, estimate_text
 
 # 给一份消息列表估 token 数。由 Agent 提供 —— 只有它知道系统提示词和工具定义。
 Measure = Callable[[list[Message]], int]
@@ -156,10 +156,26 @@ class ToolResultClearingContext(FullContext):
     _cleared 里记的「清理时历史有多长」就是用来区分这两种的。
     """
 
-    PLACEHOLDER = (
-        "[这条工具结果已被清理，以节省上下文。调用参数还在上面的工具调用里；"
-        "如果还需要这些数据，重新调用一次即可。]"
-    )
+    # 占位的开头。测试、日志靠它认出「这是被清理过的结果」。
+    CLEARED_PREFIX = "[这条工具结果已被清理，以节省上下文。"
+
+    @classmethod
+    def placeholder(cls, m: Message) -> str:
+        """被清理的结果换成什么。
+
+        不只是说「清掉了」，还要留下**线索**：原来是几行几列、哪些列
+        （工具自己给的 summary）。模型看到「1 行：total=4242」就不必重查；
+        看到「42 行 × 4 列（region, gmv, …）」能判断跟当前问题有没有关系。
+        工具没给摘要时，至少告诉它原来有多大。
+
+        同一条消息每次生成的占位必须一模一样，否则每次请求前缀都变，缓存全废。
+        所以这里只依赖消息本身，不掺时间、计数之类会变的东西。
+        """
+        clue = m.summary or f"约 {len(m.content)} 字符"
+        return (
+            f"{cls.CLEARED_PREFIX}原结果：{clue}。"
+            "调用参数还在上面的工具调用里；如果还需要完整数据，重新调用一次即可。]"
+        )
 
     def __init__(
         self,
@@ -186,7 +202,7 @@ class ToolResultClearingContext(FullContext):
         for i, m in enumerate(self._history):
             if m.role == "tool" and m.tool_call_id in self._cleared:
                 stale_before = max(stale_before, self._cleared[m.tool_call_id])
-                m = Message.tool_result(m.tool_call_id, self.PLACEHOLDER)
+                m = Message.tool_result(m.tool_call_id, self.placeholder(m))
             elif m.usage is not None and i < stale_before:
                 # 生成新对象，不改原消息 —— 原消息还在历史和快照里
                 m = replace(m, usage=None)
@@ -200,8 +216,7 @@ class ToolResultClearingContext(FullContext):
             return None
 
         targets = self._clearable()
-        placeholder_cost = estimate_message(Message.tool_result("", self.PLACEHOLDER))
-        freed = sum(estimate_message(m) - placeholder_cost for m in targets)
+        freed = sum(estimate_message(m) - estimate_text(self.placeholder(m)) for m in targets)
         if freed < self.clear_at_least:
             # 省得太少，不值得为此让缓存失效一次
             return None

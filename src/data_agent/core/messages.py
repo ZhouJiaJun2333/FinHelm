@@ -88,6 +88,12 @@ class Message:
     #    之后的 assistant 消息必须换成 usage=None 的新对象，否则锚点就是错的。
     usage: "Usage | None" = None
 
+    # 工具结果的一句话摘要（「42 行 × 4 列（region, gmv, …）」），由工具自己给。
+    # 平时**不发给模型**；结果被清理时，它留在占位文字里当线索 ——
+    # 模型看到线索就能判断要不要重新调用，不用一律重跑。
+    # 这就是「可恢复的压缩」：内容可以丢，找回它的线索要留下。
+    summary: str = ""
+
     @staticmethod
     def user(text: str) -> "Message":
         return Message(role="user", content=text)
@@ -97,8 +103,9 @@ class Message:
         return Message(role="assistant", content=text)
 
     @staticmethod
-    def tool_result(tool_call_id: str, content: str) -> "Message":
-        return Message(role="tool", content=content, tool_call_id=tool_call_id)
+    def tool_result(tool_call_id: str, content: str, summary: str = "") -> "Message":
+        return Message(role="tool", content=content, tool_call_id=tool_call_id,
+                       summary=summary)
 
 
 @dataclass(slots=True)

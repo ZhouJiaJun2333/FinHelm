@@ -28,6 +28,9 @@ MAX_OUTPUT_CHARS = 6000  # 单个工具结果的上限，防止一条结果吃�
 class ToolOutput:
     ok: bool
     content: str
+    # 一句话摘要。结果以后被上下文清理掉时，它留在占位里当线索（见 Message.summary）。
+    # 工具不给也行，上下文会退回到「约 N 字符」。
+    summary: str = ""
 
     def capped(self, limit: int = MAX_OUTPUT_CHARS) -> "ToolOutput":
         if len(self.content) <= limit:
@@ -36,6 +39,7 @@ class ToolOutput:
         return ToolOutput(
             self.ok,
             self.content[:limit] + f"\n…（输出过长，已截断 {omitted} 字符，请缩小查询范围）",
+            self.summary,
         )
 
 
@@ -64,8 +68,12 @@ class Tool(ABC):
         }
 
     @abstractmethod
-    def run(self, args: Any) -> str:
-        """真正干活。args 是已经校验过的 Args 实例。"""
+    def run(self, args: Any) -> "str | ToolOutput":
+        """真正干活。args 是已经校验过的 Args 实例。
+
+        一般返回字符串就行。想顺带给一句摘要（结果被清理后留作线索），
+        就返回 ToolOutput(True, 内容, summary=摘要)。
+        """
 
     def execute(self, raw_args: dict[str, Any]) -> ToolOutput:
         """统一入口：校验参数 -> 执行 -> 兜住异常。"""
@@ -75,6 +83,9 @@ class Tool(ABC):
             # 把校验错误原样告诉模型，它通常下一轮就能改对
             return ToolOutput(False, f"参数不合法：{exc}").capped()
         try:
-            return ToolOutput(True, str(self.run(args))).capped()
+            out = self.run(args)
+            if not isinstance(out, ToolOutput):
+                out = ToolOutput(True, str(out))
+            return out.capped()
         except Exception as exc:  # noqa: BLE001 —— 故意兜住所有异常喂回模型
             return ToolOutput(False, f"{type(exc).__name__}: {exc}").capped()

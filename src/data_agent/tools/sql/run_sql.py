@@ -18,7 +18,7 @@ import re
 from pydantic import BaseModel, Field
 
 from ...db.connection import Database, QueryResult
-from ..base import Tool
+from ..base import Tool, ToolOutput
 
 # 语句必须以这些开头
 ALLOWED_STARTS = ("select", "with")
@@ -52,10 +52,10 @@ class RunSqlTool(Tool):
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def run(self, args: Args) -> str:
+    def run(self, args: Args) -> ToolOutput:
         sql = _validate(args.sql)
         result = self.db.query(sql, max_rows=args.max_rows)
-        return _format(result, args.max_rows)
+        return ToolOutput(True, _format(result, args.max_rows), _summarize(result))
 
 
 # ---------------------------------------------------------------- 校验
@@ -86,6 +86,27 @@ def _validate(raw: str) -> str:
 
 
 # ---------------------------------------------------------------- 格式化
+def _summarize(result: QueryResult) -> str:
+    """结果被清理后留下的线索：几行几列、叫什么。
+
+    只有一行几列的小结果（典型的 COUNT / SUM 聚合）直接把值写进来 ——
+    这种结果重查一次也要一个来回，而线索本身就几乎等于原件。
+    """
+    if not result.columns:
+        return "语句执行成功，没有结果集"
+    cols = result.columns
+    shown = ", ".join(cols[:8]) + (" 等" if len(cols) > 8 else "")
+    if result.row_count == 1 and len(cols) <= 4:
+        values = ", ".join(
+            f"{c}={'NULL' if v is None else v}" for c, v in zip(cols, result.rows[0])
+        )
+        return f"1 行：{values}"
+    text = f"{result.row_count} 行 × {len(cols)} 列（{shown}）"
+    if result.truncated:
+        text += "，当时已被截断"
+    return text
+
+
 def _format(result: QueryResult, max_rows: int) -> str:
     if not result.columns:
         return "语句执行成功，但没有返回结果集。"

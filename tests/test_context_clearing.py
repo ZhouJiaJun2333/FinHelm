@@ -21,7 +21,8 @@ from data_agent.core.messages import LLMResponse, Message, ToolCall, Usage
 from data_agent.core.tokens import estimate_context, estimate_message
 from data_agent.llm.anthropic_provider import AnthropicProvider
 from data_agent.llm.base import LLMProvider
-from data_agent.tools.base import Tool
+from data_agent.llm.openai_provider import OpenAICompatibleProvider
+from data_agent.tools.base import Tool, ToolOutput
 from data_agent.tools.registry import ToolRegistry
 
 # 一张像样的 SQL 结果表：约 1.4k token
@@ -55,6 +56,10 @@ def tool_contents(msgs: list[Message]) -> list[str]:
     return [m.content for m in msgs if m.role == "tool"]
 
 
+def cleared(content: str) -> bool:
+    return content.startswith(ToolResultClearingContext.CLEARED_PREFIX)
+
+
 # =============================================================== 什么时候清
 def test_没超阈值什么都不做():
     ctx = make_ctx(1)
@@ -69,7 +74,7 @@ def test_超阈值时清掉较早的_保留最近keep条():
     assert edit is not None and edit.cleared == 3
     assert edit.tokens_after < edit.tokens_before
     contents = tool_contents(ctx.render())
-    assert contents[:3] == [ToolResultClearingContext.PLACEHOLDER] * 3
+    assert [cleared(c) for c in contents] == [True, True, True, False, False]
     assert contents[3:] == [BIG_RESULT, BIG_RESULT]
 
 
@@ -84,14 +89,14 @@ def test_排除名单里的工具永远不清():
     ctx.maintain(measure)
     contents = tool_contents(ctx.render())
     assert contents[0] == BIG_RESULT
-    assert contents[1:] == [ToolResultClearingContext.PLACEHOLDER] * 3
+    assert [cleared(c) for c in contents] == [False, True, True, True]
 
 
 def test_省得不够clear_at_least就不清():
     """清理会让缓存失效一次。省得太少，不如不动。"""
     ctx = make_ctx(5, clear_at_least=1_000_000)
     assert ctx.maintain(measure) is None
-    assert ToolResultClearingContext.PLACEHOLDER not in tool_contents(ctx.render())
+    assert not any(cleared(c) for c in tool_contents(ctx.render()))
 
 
 def test_清完远低于阈值_下一次请求不会再清():
@@ -124,6 +129,64 @@ def test_清理后tool_call和tool_result仍然配对():
                 elif b.get("type") == "tool_result":
                     results.add(b["tool_use_id"])
     assert uses == results == {f"c{i}" for i in range(5)}
+
+
+# ========================================================= 占位里的线索
+def test_占位里留着工具给的摘要():
+    """可恢复的压缩：内容可以丢，找回它的线索要留下。"""
+    ctx = make_ctx(0, keep_recent=0)
+    ctx.add(Message(role="assistant", tool_calls=[ToolCall("s1", "run_sql", {"sql": "..."})]))
+    ctx.add(Message.tool_result("s1", BIG_RESULT, summary="60 行 × 3 列（region, gmv, orders）"))
+    for i in range(3):
+        add_tool_round(ctx, f"c{i}")
+
+    ctx.maintain(measure)
+    placeholder = tool_contents(ctx.render())[0]
+    assert cleared(placeholder)
+    assert "60 行 × 3 列（region, gmv, orders）" in placeholder
+
+
+def test_工具没给摘要时_至少说明原来有多大():
+    ctx = make_ctx(4, keep_recent=0)
+    ctx.maintain(measure)
+    assert f"约 {len(BIG_RESULT)} 字符" in tool_contents(ctx.render())[0]
+
+
+def test_摘要本身不发给模型():
+    """summary 只在本地用。没被清理的时候，模型看到的是原文，不是原文加摘要。"""
+    msg = Message.tool_result("x", "原文", summary="线索")
+    for converted in (
+        AnthropicProvider.convert_messages([msg]),
+        OpenAICompatibleProvider.convert_messages([msg], system=None),
+    ):
+        assert "线索" not in str(converted)
+
+
+def test_run_sql的摘要_大结果给形状_小结果直接给值():
+    from data_agent.db.connection import QueryResult
+    from data_agent.tools.sql.run_sql import _summarize
+
+    table = QueryResult(["region", "gmv", "orders", "avg_discount"],
+                        [("华东", 1, 2, 0.1)] * 42, truncated=False, elapsed_ms=5)
+    assert _summarize(table) == "42 行 × 4 列（region, gmv, orders, avg_discount）"
+
+    # 一行的聚合结果，线索本身就几乎等于原件，模型不用再查
+    agg = QueryResult(["total", "null_region"], [(200, None)], truncated=False, elapsed_ms=1)
+    assert _summarize(agg) == "1 行：total=200, null_region=NULL"
+
+    truncated = QueryResult(["id"], [(1,), (2,)], truncated=True, elapsed_ms=1)
+    assert _summarize(truncated).endswith("当时已被截断")
+
+
+def test_输出过长被截断时摘要还在():
+    out = ToolOutput(True, "x" * 10_000, summary="线索").capped(100)
+    assert out.summary == "线索"
+
+
+def test_同一条消息每次生成的占位完全一样():
+    """占位一变，前缀就变，缓存就废。"""
+    msg = Message.tool_result("x", BIG_RESULT, summary="60 行")
+    assert ToolResultClearingContext.placeholder(msg) == ToolResultClearingContext.placeholder(msg)
 
 
 # ================================================================== 锚点
@@ -165,8 +228,8 @@ class BigTool(Tool):
     class Args(BaseModel):
         sql: str = "SELECT 1"
 
-    def run(self, args: Args) -> str:
-        return BIG_RESULT
+    def run(self, args: Args) -> ToolOutput:
+        return ToolOutput(True, BIG_RESULT, summary=f"60 行 × 3 列（{args.sql}）")
 
 
 class RecordingProvider(LLMProvider):
@@ -221,7 +284,9 @@ def test_agent在请求前清理_模型看到的是占位():
     agent.run("各区域销售额")
 
     assert any(isinstance(e, ContextCleared) for e in events)
-    assert ToolResultClearingContext.PLACEHOLDER in tool_contents(llm.seen[-1])
+    assert any(cleared(c) for c in tool_contents(llm.seen[-1]))
+    # 工具给的摘要一路穿过 ToolOutput → Agent → Message，最后出现在占位里
+    assert "60 行 × 3 列（SELECT 0）" in tool_contents(llm.seen[-1])[0]
 
 
 def test_除了清理那一步_每次请求都是上一次请求的纯追加():

@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from ...db.connection import Database
 from ...db.introspection import SchemaInspector
-from ..base import Tool
+from ..base import Tool, ToolOutput
 
 
 class DescribeTableTool(Tool):
@@ -37,7 +37,7 @@ class DescribeTableTool(Tool):
         self.inspector = inspector
         self.default_schema = default_schema
 
-    def run(self, args: Args) -> str:
+    def run(self, args: Args) -> ToolOutput:
         schema, table = self._split(args.table)
 
         columns = self.inspector.columns_of(schema, table)
@@ -64,7 +64,11 @@ class DescribeTableTool(Tool):
             )
             lines.append(_as_markdown(result.columns, result.rows))
 
-        return "\n".join(lines)
+        # 线索里放全部列名：清理之后模型照样能写 SQL，多半不用再查一遍结构
+        summary = f"{schema}.{table} 的表结构，{len(columns)} 列：" + ", ".join(
+            c.name for c in columns
+        )
+        return ToolOutput(True, "\n".join(lines), summary)
 
     def _split(self, raw: str) -> tuple[str, str]:
         raw = raw.strip().strip('"')

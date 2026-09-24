@@ -9,7 +9,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from ...db.introspection import SchemaInspector
-from ..base import Tool
+from ..base import Tool, ToolOutput
 
 
 class ListTablesTool(Tool):
@@ -25,7 +25,7 @@ class ListTablesTool(Tool):
     def __init__(self, inspector: SchemaInspector) -> None:
         self.inspector = inspector
 
-    def run(self, args: Args) -> str:
+    def run(self, args: Args) -> "str | ToolOutput":
         tables = self.inspector.list_tables()
         if not tables:
             return "数据库里没有找到任何表。"
@@ -38,4 +38,5 @@ class ListTablesTool(Tool):
         lines.append("")
         lines.append("注：行数是 PG 的统计估算值，不是精确值；要精确数字请用 run_sql 查 count(*)。")
         lines.append("需要列名和类型，用 describe_table。")
-        return "\n".join(lines)
+        summary = f"共 {len(tables)} 张表：" + ", ".join(t.qualified_name for t in tables)
+        return ToolOutput(True, "\n".join(lines), summary)

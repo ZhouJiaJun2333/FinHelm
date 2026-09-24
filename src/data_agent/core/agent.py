@@ -322,7 +322,7 @@ class Agent:
         result = self.tools.invoke(call.name, call.arguments)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-        self.context.add(Message.tool_result(call.id, result.content))
+        self.context.add(Message.tool_result(call.id, result.content, result.summary))
         self.on_event(ToolFinished(
             name=call.name, ok=result.ok, content=result.content, elapsed_ms=elapsed_ms,
         ))
