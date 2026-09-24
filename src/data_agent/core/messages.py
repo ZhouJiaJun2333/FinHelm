@@ -136,6 +136,10 @@ class Message:
                        meta=MessageMeta(summary=summary))
 
 
+# 「话说到一半被 max_tokens 砍断」的 stop_reason。Anthropic 叫 max_tokens，OpenAI 系叫 length。
+TRUNCATED_STOP_REASONS = frozenset({"max_tokens", "length"})
+
+
 @dataclass(slots=True)
 class LLMResponse:
     """一次模型调用的结果（已归一化）。"""
@@ -145,6 +149,11 @@ class LLMResponse:
     raw_content: Any = None
     usage: Usage = field(default_factory=Usage)
     stop_reason: str | None = None
+
+    @property
+    def truncated(self) -> bool:
+        """被截断了：没有工具调用也不代表说完了。Agent 主循环和写摘要都要查它。"""
+        return (self.stop_reason or "").lower() in TRUNCATED_STOP_REASONS
 
     def to_message(self) -> Message:
         return Message(

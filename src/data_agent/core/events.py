@@ -73,6 +73,9 @@ class ContextEdited:
     description: str         # 人话，比如「清理了 5 条较早的工具结果」
     tokens_before: int
     tokens_after: int
+    # 这次整理本身调用模型花的 token（写摘要）。清理之类不调模型的是全 0。
+    # Agent 会把它记进 session_usage —— 钱花了就得记账。
+    usage: Usage = field(default_factory=Usage)
 
 
 Event = (

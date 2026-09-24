@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .core.agent import Agent, ApprovalHook, FinishTurnHook
-from .core.context import ClearOldToolResults, Context
+from .core.context import ClearOldToolResults, CompactHistory, Context, llm_summarizer
 from .core.events import Event, noop_sink
 from .db.connection import Database
 from .db.introspection import SchemaInspector
@@ -78,15 +78,23 @@ def build_application(
     # --- 上下文 ---
     # 触发线取「配置值」和「窗口 - 余量」里小的那个：配置写 10 万，
     # 但换成一个 32k 窗口的模型时，不能等到 10 万才动手。
-    trigger = settings.context_clear_trigger_tokens
-    if llm.context_window:
-        trigger = min(trigger, llm.context_window - settings.context_reserve_tokens)
-    # 编辑工序按顺序套用。以后加摘要压缩、去重，往这个列表里加就行。
+    def cap(trigger: int) -> int:
+        if llm.context_window:
+            return min(trigger, llm.context_window - settings.context_reserve_tokens)
+        return trigger
+
+    # 编辑工序按顺序套用：先清理（几乎无损），清理完还超标再压缩（有损）。
+    # 以后加去重之类，往这个列表里加就行。
     context = Context([
         ClearOldToolResults(
-            trigger_tokens=trigger,
+            trigger_tokens=cap(settings.context_clear_trigger_tokens),
             keep_recent=settings.context_keep_tool_results,
             clear_at_least=settings.context_clear_at_least,
+        ),
+        CompactHistory(
+            summarize=llm_summarizer(llm),
+            trigger_tokens=cap(settings.context_compact_trigger_tokens),
+            keep_recent_tokens=settings.context_compact_keep_recent_tokens,
         ),
     ])
 

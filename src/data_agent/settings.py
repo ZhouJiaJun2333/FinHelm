@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     context_clear_trigger_tokens: int = 100_000
     context_keep_tool_results: int = 3
     context_clear_at_least: int = 10_000
+    # 摘要压缩：清理之后请求估算还超过这个数，就把较早的回合换成模型写的摘要。
+    # 15 万是 Anthropic API 服务端压缩的默认值。窗口 1M 不代表要用满 ——
+    # 我们的旧回合（查完的 SQL 结果）价值低，DeepSeek Flash 长上下文容易走神，
+    # 早点压更划算。换成更强的模型可以调高。
+    context_compact_trigger_tokens: int = 150_000
+    # 压缩时保留多少最近的原文（按回合取整，至少保留当前这一轮）。照抄 pi 的默认值。
+    context_compact_keep_recent_tokens: int = 20_000
     # 给模型输出留的余量。窗口小的模型，触发线会被压到「窗口 - 这个数」以下。
     # 安全余量放在这里，而不是加在估算系数上 —— 估算只管尽量准。
     context_reserve_tokens: int = 16_384

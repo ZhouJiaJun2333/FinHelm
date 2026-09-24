@@ -58,7 +58,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 from ..events import ContextEdited, Event
-from ..messages import Message
+from ..messages import Message, Usage
 
 # 给一份消息列表估 token 数。由 Agent 提供 —— 只有它知道系统提示词和工具定义。
 Measure = Callable[[list[Message]], int]
@@ -75,6 +75,10 @@ class Marker:
     def describe(self) -> str:
         """人话描述这个决定，给界面和事件用。"""
         return type(self).__name__
+
+    def cost(self) -> Usage:
+        """做这个决定调用模型花了多少（写摘要要花钱，清理不用）。"""
+        return Usage()
 
 
 # 历史里的一条：要么是对话消息，要么是标记
@@ -208,7 +212,8 @@ class Context(BaseContext):
             marker = edit.maintain(self._apply(i), measure_view)
             if marker is not None:
                 self.add(marker)
-                events.append(ContextEdited(marker.describe(), before, measure_view()))
+                events.append(ContextEdited(marker.describe(), before, measure_view(),
+                                            usage=marker.cost()))
         return events
 
     def status(self) -> list[str]:

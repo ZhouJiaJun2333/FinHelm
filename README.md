@@ -71,10 +71,11 @@ pytest
 │   ├── core/                   ★ Agent 运行时（不依赖任何厂商/工具/数据库）
 │   │   ├── messages.py           统一消息结构 = 整个项目的「通用语」
 │   │   ├── events.py             运行事件（解耦「运行」和「展示」）
-│   │   ├── errors.py             运行时异常（截断 / 拒绝 / 未知停止原因）
+│   │   ├── errors.py             运行时异常（截断 / 拒绝 / 未知停止原因 / 压缩失败）
 │   │   ├── context/              上下文管理：只追加的历史（消息 + 标记）+ 一组按顺序套用的编辑工序
 │   │   │   ├── base.py             Context / ContextEdit / Marker；工序不持有状态，决定记成标记
 │   │   │   ├── tool_results.py     ClearOldToolResults：超阈值时把旧工具结果换成带线索的占位
+│   │   │   ├── compaction.py       CompactHistory：清理后还太大，把较早的回合换成模型写的摘要
 │   │   │   └── turns.py            KeepRecentTurns：按回合裁剪
 │   │   ├── tokens.py             上下文用量：锚点 + 增量估算（/context 命令看）
 │   │   └── agent.py              主循环 ← 心脏（run() 约 50 行，
@@ -100,7 +101,7 @@ pytest
 ├── examples/
 │   └── event_demo.py           事件/回调机制的最小演示
 ├── docs/                       可运行的「为什么这么写」说明（见上面的表）
-└── tests/                      130 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
+└── tests/                      151 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
     ├── test_agent_loop.py                    主循环行为
     ├── test_stop_reason_and_finish_turn.py   完成判定 + 结束钩子
     ├── test_provider_conversion.py           两家 provider 的格式转换
@@ -281,7 +282,7 @@ docker exec dataagent-postgres psql -U agent_ro -d analytics -c "DELETE FROM ord
 
 | 想加的东西 | 动哪里 | 大致做法 |
 |---|---|---|
-| **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 第一层已实现：超阈值时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）。下一层：把早期回合交给模型做摘要（阈值要比清理高得多） |
+| **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 两层都已实现：10 万时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）；清理后还超 15 万，把较早的回合交给模型写成滚动摘要，保留最近约 2 万 token 原文（`CompactHistory`）。待做：API 报超长时压缩再重试、`/compact` 手动压缩 |
 | **长期记忆** | `app.py` 里的 `dynamic_context` 钩子 | 用户偏好、历史结论落盘，每轮检索相关片段拼进系统提示词 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
 | **画图** | `tools/` 下开个 `chart/` 子包 | 查询结果交给 matplotlib，存图返回路径 |

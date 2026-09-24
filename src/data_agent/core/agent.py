@@ -51,7 +51,7 @@ ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]
 #    判断「模型完成了没有」不能只看有没有 tool_calls。被 max_tokens 截断时
 #    同样没有 tool_calls，但那是**话说到一半被砍了**，不是答完了。
 #    不查 stop_reason 的话，你会把半句话当成最终答案返回，而且毫无察觉。
-TRUNCATED_STOP_REASONS = frozenset({"max_tokens", "length"})
+#    截断的那几种定义在 messages.py（LLMResponse.truncated），写摘要时也要用。
 REFUSAL_STOP_REASONS = frozenset({"refusal", "content_filter"})
 NORMAL_STOP_REASONS = frozenset({
     "end_turn", "stop", "tool_use", "tool_calls", "function_call", "",
@@ -177,6 +177,7 @@ class Agent:
             for event in self.context.maintain(
                 lambda msgs: estimate_context(msgs, overhead=overhead).tokens
             ):
+                self.session_usage += event.usage      # 写摘要也是一次收费的调用
                 self.on_event(event)
 
             response = self.llm.chat(
@@ -265,7 +266,7 @@ class Agent:
         """
         reason = (response.stop_reason or "").lower()
 
-        if reason in TRUNCATED_STOP_REASONS:
+        if response.truncated:
             raise OutputTruncated(
                 f"模型输出被截断（stop_reason={response.stop_reason}），这不是「完成」。"
                 f"已生成 {response.usage.output} 个 token。"
