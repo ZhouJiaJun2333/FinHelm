@@ -18,7 +18,8 @@ Q123_25 = "o.order_date >= DATE '2025-01-01' AND o.order_date < DATE '2025-10-01
 SEP25 = "o.order_date >= DATE '2025-09-01' AND o.order_date < DATE '2025-10-01'"
 
 
-# 填充题：每条 50~130 行，工具结果接近 6000 字的上限
+# 填充题：每条 50~130 行。起初工具结果接近 6000 字的上限；0013876 之后模型只看前 10 行，
+# 回答里用 {{r3}} 引用，每轮只涨 0.7~1k
 F = {
     "华东9月订单": "把 2025 年 9 月华东区所有已完成的订单列出来：订单号、下单日期、客户名、实付金额，按日期排。",
     "华北客户": "列出所有华北的客户：客户名、城市、客户分层、注册日期。",
@@ -43,11 +44,14 @@ def fill(*names):
 
 
 # 门槛按真实配置的比例缩小（真实：清理 10 万 / 保留 3 条 / 至少 1 万；压缩 15 万 / 保留 2 万）。
-# 单个工具结果最多约 4k token，这个不会跟着缩 —— 门槛太低会变成每来一条大结果就清一次，
-# 缓存数字失真（第一次校准时门槛 1 万，一轮里清了 5 次）
-CLEAR = {"context_clear_trigger_tokens": 30000, "context_keep_tool_results": 3,
-         "context_clear_at_least": 8000}
-COMPACT = {"context_compact_trigger_tokens": 45000, "context_compact_keep_recent_tokens": 10000}
+# 缩多少看单个工具结果多大：门槛太低会变成每来一条结果就清一次，缓存数字失真。
+#   · 起初结果最多约 4k token（6000 字上限），门槛 3 万 / 4.5 万（1 万时一轮里清了 5 次）
+#   · run_sql 改成只给模型预览后（0013876），结果最多约 1.5k，每轮只涨 0.7~1k，
+#     3 万再也碰不到 → 降到 1 万 / 1.5 万试了一次：都触发了但太晚（B、C 最后一轮才压缩，
+#     回忆轮大多在压缩之前），再降到 8000 / 1.2 万
+CLEAR = {"context_clear_trigger_tokens": 8000, "context_keep_tool_results": 3,
+         "context_clear_at_least": 2000}
+COMPACT = {"context_compact_trigger_tokens": 12000, "context_compact_keep_recent_tokens": 2500}
 NO_CLEAR = {"context_clear_trigger_tokens": 1000000}
 NO_COMPACT = {"context_compact_trigger_tokens": 1000000}
 

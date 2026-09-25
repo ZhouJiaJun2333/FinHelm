@@ -147,6 +147,7 @@ def compare_results(
     if not pred:
         return ResultMatch(False, False, "Agent 的结果是空的")
 
+    pred = _drop_total_row(gold, pred, mode)
     n_gold, n_pred = len(gold[0]), len(pred[0])
     if n_pred < n_gold:
         return ResultMatch(False, False, f"列不够：标准答案 {n_gold} 列，Agent 只有 {n_pred} 列")
@@ -176,6 +177,26 @@ def compare_results(
         if _match_rows(gold, projected, mode):
             return ResultMatch(strict=(n_pred == n_gold), lenient=True)
     return ResultMatch(False, False, "每一列单独都对得上，但整行对不上（行和行串了）")
+
+
+# ROLLUP 或手写 UNION 出来的汇总行。只认文字标签，不认 NULL：
+# 按区域分组时「区域为空」本身就是一组真实的数据，不是合计
+TOTAL_LABELS = frozenset({"合计", "总计", "全部", "汇总", "总体", "total", "grand total", "all"})
+
+
+def _drop_total_row(gold: list[tuple], pred: list[tuple], mode: MatchMode) -> list[tuple]:
+    """Agent 比标准答案多出一行、而且正好有一行标着「合计」：去掉它再比。
+
+    多带一行合计是很常见的展示方式（2026-09-25 多轮评测里 Agent 用 ROLLUP 加了一行，
+    数全对，却按「行数不对」判错）。只在刚好多一行、刚好一行像合计时才去，别的不猜。
+    """
+    if mode not in ("set", "ordered") or len(pred) != len(gold) + 1:
+        return pred
+    totals = [i for i, r in enumerate(pred)
+              if any(isinstance(v, str) and v.lower() in TOTAL_LABELS for v in r)]
+    if len(totals) != 1:
+        return pred
+    return pred[:totals[0]] + pred[totals[0] + 1:]
 
 
 def _scale(v: Any, scale: float) -> Any:

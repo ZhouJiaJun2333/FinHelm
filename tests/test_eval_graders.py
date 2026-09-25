@@ -382,3 +382,14 @@ def test_回答引用了结果_按用户看到的整张表判分():
     grade(t, case, FakeDB({"SELECT": rows}), Gold([rows]))
     assert t.refs == 1 and "| 华北 | 42 |" in t.shown
     assert t.answer_ok
+
+
+def test_多一行合计不算错_但只认文字标签():
+    gold = [("线上", 100), ("线下", 60), ("分销", 40)]
+    with_total = gold + [("合计", 200)]
+    assert compare_results(gold, with_total, "set").lenient
+    assert compare_results(gold, with_total, "ordered").lenient
+    # NULL 那一行可能是真实的分组（区域为空的客户），不能当合计去掉
+    assert not compare_results(gold, gold + [(None, 200)], "set").lenient
+    # 多出来的不是合计：照样算错
+    assert not compare_results(gold, gold + [("其他", 5)], "set").lenient
