@@ -1,7 +1,7 @@
 [project]
-name = "data-agent"
+name = "finhelm"
 version = "0.1.0"
-description = "一个可扩展的 SQL 数据分析 Agent（学习用，从零手写）"
+description = "FinHelm：金融垂直领域的通用 Agent（学习用，从零手写）"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.70",
