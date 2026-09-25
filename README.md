@@ -125,7 +125,7 @@ pytest
 │   ├── runner.py / graders.py    跑一道题 / 判分（判分器有单元测试）
 │   ├── report.py / run.py        报告 / 命令行入口
 │   └── runs/                     每次运行的记录（不进 git）
-└── tests/                      248 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
+└── tests/                      321 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
     ├── test_agent_loop.py                    主循环行为
     ├── test_stop_reason_and_finish_turn.py   完成判定 + 结束钩子
     ├── test_provider_conversion.py           两家 provider 的格式转换
@@ -439,6 +439,21 @@ python -m evals.bird.prepare
 - **看哪条 SQL**：主分数看 Agent 跑过的任何一条；「只看最后一条 SQL」那一行是 BIRD 的判法，和公开榜单比用它。
 - **去重**：BIRD 比的是 `set(结果)`，所以题目用 `distinct` 模式（去重后比集合）。有 3 道题的标准 SQL 查出大量重复行
   （比如 461 行全是 `DISPONENT`），按我们原来的 `set`（重复行要一一对上）写了 DISTINCT 的 Agent 会被判错。
+
+**官方判分**：上面的分数都是我们的判分器算的。要对外说的分数用 BIRD 官方脚本再算一遍：
+
+```bash
+mkdir -p data/bird/official
+curl -L -o data/bird/official/evaluation_ex.py https://raw.githubusercontent.com/bird-bench/mini_dev/main/evaluation/evaluation_ex.py
+curl -L -o data/bird/official/evaluation_utils.py https://raw.githubusercontent.com/bird-bench/mini_dev/main/evaluation/evaluation_utils.py
+pip install psycopg2-binary func_timeout pymysql     # 官方脚本的依赖，只有这一步用
+python -m evals.bird.official evals/runs/<一次 bird_financial 的运行>
+```
+
+每个 trial 交最后一条执行成功的 SQL，报官方的 EX（分难度）。官方脚本只改了数据库连接（写死在脚本里，
+官方 README 让用户自己改），判分逻辑不动。先把标准答案本身当预测交一遍，必须 100 分 —— 官方脚本
+连不上库也只会静默记 0 分。首个基线：官方 EX 21.9 / 12.5 / 9.4（三个 trial），和报告里「只看最后一条」
+逐个 trial 都一样，说明我们模仿得没错；主分数（任何一条对）是 53%。
 
 ⚠️ BIRD 的标注错误率不低（社区统计 Mini-Dev 约一半的题有问题，比如 q94 的标准 SQL 就可疑）。只和自己的旧版本比，
 不追榜；失败分析时先看标准答案对不对。
