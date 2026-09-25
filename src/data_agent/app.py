@@ -16,6 +16,7 @@ from .db.introspection import SchemaInspector
 from .domains import get_domain
 from .prompts import build_system_prompt
 from .settings import Settings, build_provider
+from .tools.python import RunPythonTool, Sandbox, result_resolver
 from .tools.sql.describe_table import DescribeTableTool
 from .tools.sql.export_csv import ExportCsvTool
 from .tools.sql.list_tables import ListTablesTool
@@ -36,6 +37,17 @@ class Application:
     # 这次会话查出过的结果（r1、r2…）：界面展开 {{r3}}、/save 都从这里拿
     results: ResultStore
     export_dir: Path                  # CSV 写到哪（/save 和 export_csv 共用）
+    sandbox: Sandbox | None = None    # run_python 的内核；关掉沙箱时是 None
+
+    def reset(self) -> None:
+        """清空对话，内核也换个空的：新对话不该看到上一段留下的变量。"""
+        self.agent.reset()
+        if self.sandbox is not None:
+            self.sandbox.close()
+
+    def close(self) -> None:
+        if self.sandbox is not None:
+            self.sandbox.close()
 
 
 def build_application(
@@ -47,11 +59,13 @@ def build_application(
     llm: LLMProvider | None = None,
     results: ResultStore | None = None,
     export_dir: Path | None = None,
+    work_dir: Path | None = None,
 ) -> Application:
     """把所有零件拼成一个能跑的 Agent。
 
     settings 不传就从 .env 读；llm 可以塞假的（测试）。results 由界面先建好传进来
-    （打印事件的 sink 要用它展开 {{r3}}）；export_dir 不传用 settings.export_dir。
+    （打印事件的 sink 要用它展开 {{r3}}）；export_dir、work_dir 不传用 settings 里的。
+    用完要 close()：沙箱是个容器。
     """
     settings = settings or Settings()
     # 场景包：数据在哪个 schema、业务约定是什么。内核的其余部分不知道行业
@@ -75,6 +89,14 @@ def build_application(
         RunSqlTool(db, results),
         ExportCsvTool(db, results, export_dir),
     ])
+    sandbox = None
+    if settings.python_sandbox:
+        # 第一次 run_python 才启动容器
+        sandbox = Sandbox.docker(
+            settings.sandbox_image, work_dir or Path(settings.work_dir), result_resolver(results),
+            timeout_s=settings.sandbox_timeout_s, memory=settings.sandbox_memory, cpus=settings.sandbox_cpus,
+        )
+        tools.register(RunPythonTool(sandbox))
 
     # --- 模型层 ---
     llm = llm or build_provider(settings)
@@ -105,7 +127,7 @@ def build_application(
     agent = Agent(
         llm=llm,
         tools=tools,
-        system_prompt=build_system_prompt(domain),
+        system_prompt=build_system_prompt(domain, python=sandbox is not None),
         context=context,
         max_steps=settings.max_steps,
         approval_hook=approval_hook,
@@ -117,4 +139,5 @@ def build_application(
     return Application(
         agent=agent, db=db, inspector=inspector,
         tools=tools, llm=llm, settings=settings, results=results, export_dir=export_dir,
+        sandbox=sandbox,
     )

@@ -174,6 +174,7 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database,
     t = Trial(case.id, trial)
     results = ResultStore()
     started = time.perf_counter()
+    app = None
     try:
         app = build_application(settings, on_event=collect_sink(events), results=results)
         try:
@@ -189,6 +190,8 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database,
     if submit and not t.error:
         t.submission = submit_sql(app, submit, events)
         t.transcript = _transcript(app.agent.context.history)   # 带上提交轮，失败分析要看
+    if app is not None:
+        app.close()                       # 沙箱是个容器
     digest(t, answered)
     show(t, results)
     grade(t, case, db, gold)
@@ -333,6 +336,7 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
 
     st.elapsed_s = round(time.perf_counter() - started, 1)
     st.transcript = _transcript(app.agent.context.history)
+    app.close()
     return st
 
 

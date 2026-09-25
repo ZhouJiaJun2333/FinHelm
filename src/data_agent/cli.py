@@ -29,6 +29,7 @@ from .core.events import (
 from .core.messages import Usage
 from .session import Session
 from .settings import Settings
+from .tools.python.sandbox import Execution
 from .tools.sql.export_csv import export_query
 from .tools.sql.results import ResultStore, SqlResult, markdown_table
 
@@ -60,9 +61,16 @@ def _show_table(table: SqlResult) -> str:
     return text
 
 
+def _show_python(ex: Execution) -> str:
+    """输出可能很长会被折叠，图的路径单独列出来，保证用户看得到。"""
+    text = _preview("\n\n".join(p for p in (ex.output.rstrip(), ex.value or "") if p), 800)
+    return "\n".join([text, *(f"🖼  {path.resolve()}" for path in ex.figures)]).strip()
+
+
 # 按工具名找渲染函数，参数是 details（学 pi 的 renderResult）。没登记的显示模型看到的那份
 RESULT_RENDERERS: dict[str, Callable[[Any], str]] = {
     "run_sql": _show_table,
+    "run_python": _show_python,
 }
 
 
@@ -202,7 +210,7 @@ def handle_command(cmd: str, app: Application) -> bool:
             raise SystemExit(0)
 
         case "/reset":
-            app.agent.reset()
+            app.reset()
             print("对话已清空。")
 
         case "/tools":
@@ -282,13 +290,21 @@ def main() -> None:
     results = ResultStore(session.results_path)
     try:
         app = build_application(settings, on_event=make_console_sink(args.verbose, results),
-                                results=results, export_dir=session.exports_dir)
+                                results=results, export_dir=session.exports_dir,
+                                work_dir=session.work_dir)
     except Exception as exc:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")
         return
     app.agent.context.restore(history)
+    try:
+        _repl(app, session, results, settings, history)
+    finally:
+        app.close()
 
+
+def _repl(app: Application, session: Session, results: ResultStore, settings: Settings,
+          history: list[Entry]) -> None:
     try:
         version = app.db.ping().split(",")[0]
     except Exception as exc:

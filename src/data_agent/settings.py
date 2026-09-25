@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     # 没有会话目录时（评测、测试）export_csv 写到这里
     export_dir: str = "outputs"
 
+    # ---------------- Python 沙箱 ----------------
+    # run_python 跑在 Docker 里（先 docker build -t finhelm-sandbox docker/sandbox）。没有 Docker 就关掉
+    python_sandbox: bool = True
+    sandbox_image: str = "finhelm-sandbox"
+    sandbox_timeout_s: int = 60
+    sandbox_memory: str = "2g"
+    sandbox_cpus: float = 2
+    # 没有会话目录时（评测、测试）沙箱的工作目录，图表存在它下面的 figures/
+    work_dir: str = "outputs/work"
+
     # ---------------- Agent ----------------
     max_steps: int = 12
     # 输出上限，思考 token 也算在内。8192 时列长清单会被截断；只是封顶，调高不多花钱

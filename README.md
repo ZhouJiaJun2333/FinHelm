@@ -23,20 +23,26 @@ pip install -r requirements.txt
 cd docker && docker compose up -d
 ```
 
-**2. 配 key**
+**2. 建 Python 沙箱镜像**（`run_python` 在这个容器里跑；没有 Docker 就在 `.env` 里设 `PYTHON_SANDBOX=false`）
+
+```bash
+docker build -t finhelm-sandbox docker/sandbox
+```
+
+**3. 配 key**
 
 ```bash
 copy .env.example .env
 ```
 
-**3. 跑**
+**4. 跑**
 
 ```bash
 python run.py
 ```
 
 每次对话有一个会话目录 `sessions/<会话ID>/`：对话日志 `session.jsonl`、查询结果 `results.jsonl`、
-导出的 CSV `exports/`。启动时会打印会话 ID，接着上次聊：
+导出的 CSV `exports/`、沙箱的工作目录 `work/`（图在 `work/figures/`）。启动时会打印会话 ID，接着上次聊：
 
 ```bash
 python run.py --resume
@@ -69,6 +75,7 @@ pytest
 ├── run.py                      入口（薄壳，真正逻辑在 src/）
 ├── docker/
 │   ├── docker-compose.yml      Postgres（端口 5433，避开常用的 5432）
+│   ├── sandbox/Dockerfile      run_python 的沙箱镜像（pandas / scipy / statsmodels / matplotlib + 中文字体）
 │   └── initdb/                 容器首次启动自动执行
 │       ├── 01_schema.sql       建表 + 表/列注释
 │       ├── 02_seed.sql         造假数据
@@ -100,12 +107,16 @@ pytest
 │   │   └── openai_provider.py    DeepSeek/千问/Kimi/vLLM 都走这个
 │   │
 │   ├── tools/                  ★ 具体工具，按领域分包
-│   │   └── sql/
-│   │       ├── list_tables.py
-│   │       ├── describe_table.py
-│   │       ├── run_sql.py
-│   │       ├── export_csv.py       用户要文件时按编号重跑导出
-│   │       └── results.py          结果仓库：r1、r2… 只存一份，run_sql / 导出 / 界面 / 评测共用
+│   │   ├── sql/
+│   │   │   ├── list_tables.py
+│   │   │   ├── describe_table.py
+│   │   │   ├── run_sql.py
+│   │   │   ├── export_csv.py       用户要文件时按编号重跑导出
+│   │   │   └── results.py          结果仓库：r1、r2… 只存一份，run_sql / 导出 / 界面 / 评测 / 沙箱共用
+│   │   └── python/
+│   │       ├── run_python.py       在沙箱里跑 Python；load_result("r3") 直接拿 SQL 结果
+│   │       ├── sandbox.py          宿主这头：起容器、收发消息、超时就杀掉重来
+│   │       └── kernel.py           容器里那头：常驻内核，变量跨调用保留（运行时只读挂进容器）
 │   │
 │   ├── domains/                ★ 场景包：一个业务库的行业知识（schema、业务约定），.env 里 DOMAIN= 选
 │   │   ├── shop.py               自己造的电商库
@@ -127,7 +138,8 @@ pytest
 │   ├── runner.py / graders.py    跑一道题 / 判分（判分器有单元测试）
 │   ├── report.py / run.py        报告 / 命令行入口
 │   └── runs/                     每次运行的记录（不进 git）
-└── tests/                      329 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py）
+└── tests/                      371 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py；
+                                沙箱隔离的两个用例要 Docker，没有就跳过）
     ├── test_agent_loop.py                    主循环行为
     ├── test_stop_reason_and_finish_turn.py   完成判定 + 结束钩子
     ├── test_provider_conversion.py           两家 provider 的格式转换
@@ -138,8 +150,9 @@ pytest
 
 ```
 cli ──┐
-      ├──> app ──> { llm, tools/sql, db } ──> core
+      ├──> app ──> { llm, tools/sql, tools/python, db } ──> core
 tests ┘                  tools/sql ──> db ──> Postgres
+                         tools/python ──> tools/sql（结果仓库）；内核跑在 Docker 里
 ```
 
 **`core/` 不 import 包外的任何模块**：它自己定义需要的接口（`LLMProvider`、`Tool`、`BaseContext`），
@@ -279,6 +292,21 @@ docker exec dataagent-postgres psql -U agent_ro -d analytics -c "DELETE FROM ord
 ```
 
 会报 `ERROR: cannot execute DELETE in a read-only transaction`。
+
+### run_python：模型写的代码关在容器里
+
+Python 能做的事比 SQL 多得多，所以不在代码层面拦（拦不住），而是让它**跑在哪都伤不到人**：
+
+| 限制 | 怎么做（`tools/python/sandbox.py::Sandbox.docker`） |
+|---|---|
+| 断网 | `--network none`：以后读研报、网页，里面的注入也没法把数据发出去 |
+| 文件 | 根目录只读，只挂载会话的 `work/`；`/tmp` 是 256MB 的内存盘；非 root 用户，去掉所有 capabilities |
+| 资源 | 内存 2G（超了被杀，内核自动重启）、2 核、最多 128 个进程 |
+| 时间 | 两道超时：内核里的软超时打断代码、变量还在；卡在 C 代码里打断不了，宿主机再等 10 秒就杀掉整个内核 |
+| 依赖 | 镜像里预装，运行时不能装包 |
+
+数据只从一个口子进去：`load_result("r3")` 从结果仓库取完整结果，数字不经过模型的手。
+沙箱不能连数据库，取数只能走 `run_sql` 的三道防线。
 
 ---
 
@@ -499,7 +527,8 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 | **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，配一个按位置读的工具（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，会话目录已经有了（`Session.root`），放在它下面的 `tool-results/` |
 | **长期记忆** | 新包 `memory/`；索引走 `Agent(session_context=...)`，召回的正文走一道 `ContextEdit` | 索引在会话开始时拼进系统提示词、会话中不变（变了缓存全废）；每次提问挑几条相关的，作为标记并进这条用户消息。设计见 refs 里的对比笔记 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
-| **画图** | `tools/` 下开个 `chart/` 子包 | 查询结果交给 matplotlib，存图返回路径 |
+| **画图、统计** | 已实现：`tools/python/` | `run_python` 在沙箱里跑 pandas / scipy / statsmodels / matplotlib，图存进 `work/figures/` |
+| **Python 表格编号** | `tools/python/` + `tools/sql/results.py` | 现在只有 SQL 结果有 r 号；Python 算出来的表也编号，回答里就能 `{{r5}}` 引用、`/save` 导出 |
 | **流式输出** | `llm/` 各 provider 加 `stream_chat()` | `LLMResponse` 不变，只是分块 yield |
 | **人工审批** | 已实现：`build_application(approval_hook=...)` | 传个函数，工具执行前弹确认 |
 | **自定义结束条件** | 已实现：`build_application(finish_turn_hook=...)` | 见概念 8 |

@@ -4,6 +4,7 @@
         session.jsonl    对话历史（消息 + 标记），每轮成功之后追加
         results.jsonl    查询结果 r1、r2…（tools/sql/results.py 写）
         exports/         /save 和 export_csv 写的 CSV
+        work/            run_python 沙箱的工作目录（图表在 work/figures/）
 
 只记提交了的历史：Agent.run 是事务，失败的一轮会回滚，来一条写一条会在日志里留下半截回合
 （pi 不回滚，所以它来一条写一条）。/reset 在日志里记一行 reset。第一次真要写的时候才建目录。
@@ -41,6 +42,10 @@ class Session:
     @property
     def exports_dir(self) -> Path:
         return self.root / "exports"
+
+    @property
+    def work_dir(self) -> Path:
+        return self.root / "work"
 
     # ------------------------------------------------------------ 新建 / 打开
     @classmethod

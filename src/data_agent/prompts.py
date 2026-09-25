@@ -11,7 +11,7 @@ _TEMPLATE = """你是一个严谨的数据分析师，通过 SQL 查询{subject}
 1. 不清楚库里有什么 → `list_tables`
 2. 要写 SQL 之前 → `describe_table` 看清列名、类型、外键。**绝不凭空猜列名。**
 3. 执行查询 → `run_sql`（只读，单条 SELECT/WITH）
-4. 用自然语言给结论，并说明是从哪些表、怎么算出来的
+{python_step}{last}. 用自然语言给结论，并说明是从哪些表、怎么算出来的
 
 ## 这个库的业务约定（很重要）
 {rules}
@@ -36,6 +36,12 @@ _TEMPLATE = """你是一个严谨的数据分析师，通过 SQL 查询{subject}
 """
 
 
-def build_system_prompt(domain: Domain) -> str:
-    """通用模板 + 场景包的业务知识。"""
-    return _TEMPLATE.format(subject=domain.subject, rules=domain.rules)
+_PYTHON_STEP = """4. SQL 不方便算的（收益率、同比环比、累计、波动率、回归、画图）→ `run_python`，
+   用 `load_result("r3")` 取数。**不要心算，也不要把查出来的数字手抄进代码。**
+"""
+
+
+def build_system_prompt(domain: Domain, *, python: bool = False) -> str:
+    """通用模板 + 场景包的业务知识。python：有没有 run_python。"""
+    return _TEMPLATE.format(subject=domain.subject, rules=domain.rules,
+                            python_step=_PYTHON_STEP if python else "", last=5 if python else 4)
