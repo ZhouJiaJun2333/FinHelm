@@ -352,6 +352,7 @@ class Agent:
         self.context.add(Message.tool_result(call.id, result.content, result.summary))
         self.on_event(ToolFinished(
             name=call.name, ok=result.ok, content=result.content, elapsed_ms=elapsed_ms,
+            details=result.details,
         ))
 
     def _render_system_prompt(self) -> str:

@@ -5,11 +5,15 @@
 1. 参数用 pydantic 模型声明，JSON Schema 自动生成。不用手写 schema，
    而且模型传回来的参数会先过一遍校验。
 
-2. run() 里抛的任何异常都会被 execute() 捕获，变成 ToolOutput(ok=False)。
+2. 一个工具结果有两个读者：模型和界面。content 发给模型，details 只给界面（完整的结果表、
+   文件路径…），不进历史、不发给模型 —— 学 pi 的 content / details。模型要的是「够推理的
+   最少信息」，用户要的是完整数据，混在一份里，要么模型撑爆上下文，要么用户拿不到全貌。
+
+3. run() 里抛的任何异常都会被 execute() 捕获，变成 ToolOutput(ok=False)。
    **工具出错不应该中断 Agent** —— 把错误告诉模型，让它自己决定重试还是换路子。
    这是 Agent 能「自愈」的关键。
 
-3. 工具的依赖（数据库连接等）在 __init__ 里注入，不用全局变量。
+4. 工具的依赖（数据库连接等）在 __init__ 里注入，不用全局变量。
    这样写测试时塞个假的 Database 进去就行。
 """
 
@@ -31,6 +35,8 @@ class ToolOutput:
     # 一句话摘要。结果以后被上下文清理掉时，它留在占位里当线索（见 Message.summary）。
     # 工具不给也行，上下文会退回到「约 N 字符」。
     summary: str = ""
+    # 只给界面、不发给模型的数据（见模块说明第 2 点）。截断只截 content，不动它。
+    details: Any = None
 
     def capped(self, limit: int = MAX_OUTPUT_CHARS) -> "ToolOutput":
         if len(self.content) <= limit:
@@ -40,6 +46,7 @@ class ToolOutput:
             self.ok,
             self.content[:limit] + f"\n…（输出过长，已截断 {omitted} 字符，请缩小查询范围）",
             self.summary,
+            self.details,
         )
 
 
@@ -72,7 +79,7 @@ class Tool(ABC):
         """真正干活。args 是已经校验过的 Args 实例。
 
         一般返回字符串就行。想顺带给一句摘要（结果被清理后留作线索），
-        就返回 ToolOutput(True, 内容, summary=摘要)。
+        就返回 ToolOutput(True, 内容, summary=摘要)；有给界面的完整数据放 details。
         """
 
     def execute(self, raw_args: dict[str, Any]) -> ToolOutput:

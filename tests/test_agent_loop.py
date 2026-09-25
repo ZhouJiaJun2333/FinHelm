@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from data_agent.core.context import Context
 from data_agent.core.events import LLMResponded, ToolFinished
 from data_agent.core.messages import LLMResponse, Message, ToolCall
-from data_agent.tools.base import Tool
+from data_agent.tools.base import Tool, ToolOutput
 from data_agent.tools.registry import ToolRegistry
 
 from fakes import EchoTool, make_agent
@@ -57,6 +57,35 @@ def test_调用工具后再回答(registry):
     assert len(finished) == 1
     assert finished[0].ok is True
     assert finished[0].content == "echo: hi"
+
+
+class TableTool(Tool):
+    name = "table"
+    description = "模型看摘要，界面拿完整数据"
+
+    class Args(BaseModel):
+        pass
+
+    def run(self, args: Args) -> ToolOutput:
+        return ToolOutput(True, "共 3 行，看前 1 行：a", details={"rows": ["a", "b", "c"]})
+
+
+def test_details只给界面_不进历史():
+    """一个工具结果两个读者：content 给模型，details 随事件交给界面。"""
+    script = [LLMResponse(text="", tool_calls=[ToolCall("c1", "table", {})]), LLMResponse(text="好")]
+    agent, events = make_agent(script, tools=[TableTool()])
+    agent.run("查")
+
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.details == {"rows": ["a", "b", "c"]}
+    sent = agent.llm.seen[-1]
+    assert [m.content for m in sent if m.role == "tool"] == ["共 3 行，看前 1 行：a"]
+    assert "'b'" not in repr(sent)
+
+
+def test_截断只截content_不动details():
+    out = ToolOutput(True, "x" * 100, details=[1, 2, 3]).capped(10)
+    assert out.content.startswith("x" * 10) and out.details == [1, 2, 3]
 
 
 def test_工具抛异常不会中断Agent(registry):
