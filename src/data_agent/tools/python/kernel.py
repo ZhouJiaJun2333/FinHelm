@@ -167,7 +167,6 @@ def _cap(text: str) -> str:
 def _save_figures() -> list[str]:
     if plt is None or not plt.get_fignums():
         return []
-    os.makedirs("figures", exist_ok=True)
     saved, n = [], 1
     for num in plt.get_fignums():
         while os.path.exists(path := f"figures/fig-{n}.png"):
@@ -181,6 +180,7 @@ def _save_figures() -> list[str]:
 def main() -> None:
     if hasattr(signal, "SIGALRM"):
         signal.signal(signal.SIGALRM, _on_alarm)
+    os.makedirs("figures", exist_ok=True)         # 模型会自己往里存 PDF / SVG
     send({"op": "ready", "python": sys.version.split()[0], "pandas": pd.__version__})
     while True:
         msg = receive()

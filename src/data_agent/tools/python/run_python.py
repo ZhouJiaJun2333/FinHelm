@@ -29,7 +29,7 @@ class RunPythonTool(Tool):
         "回归、分布、图表等。内核有状态，变量在调用之间保留（像 Jupyter）。"
         "已经导入 pandas as pd、numpy as np、matplotlib.pyplot as plt；还能用 scipy、statsmodels。"
         '用 load_result("r3") 取 run_sql 结果 r3 的完整数据（DataFrame），不要把数字手抄进代码。'
-        "最后一行是表达式就显示它的值；用 plt 画的图执行完自动保存，会告诉你文件路径。中文字体已经配好，图里直接写中文，不用改字体设置。"
+        "最后一行是表达式就显示它的值；用 plt 画的图执行完自动保存，会告诉你文件路径。中文字体已经配好，图里直接写中文，不用改字体设置。要 PDF / SVG 等格式就自己 savefig 到 figures/ 下。"
         "沙箱不能联网、不能连数据库（取数用 run_sql）、不能装包。"
         "内核可能重启（超时、恢复会话），变量没了就重新运行定义它们的代码。"
     )
