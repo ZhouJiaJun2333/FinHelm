@@ -23,10 +23,12 @@ pip install -r requirements.txt
 cd docker && docker compose up -d
 ```
 
-**2. 建 Python 沙箱镜像**（`run_python` 在这个容器里跑；没有 Docker 就在 `.env` 里设 `PYTHON_SANDBOX=false`）
+**2. 建沙箱镜像**（`run_python` / `run_r` 在这两个容器里跑；没有 Docker 就在 `.env` 里设
+`PYTHON_SANDBOX=false`、`R_SANDBOX=false`。R 镜像只有医学科研场景用得到）
 
 ```bash
 docker build -t finhelm-sandbox docker/sandbox
+docker build -t finhelm-sandbox-r docker/sandbox-r
 ```
 
 **3. 配 key**
@@ -76,6 +78,7 @@ pytest
 ├── docker/
 │   ├── docker-compose.yml      Postgres（端口 5433，避开常用的 5432）
 │   ├── sandbox/Dockerfile      run_python 的沙箱镜像（pandas / scipy / statsmodels / matplotlib + 中文字体）
+│   ├── sandbox-r/Dockerfile    run_r 的沙箱镜像（meta / metafor / robvis / readxl / ggplot2 + 中文字体）
 │   └── initdb/                 容器首次启动自动执行
 │       ├── 01_schema.sql       建表 + 表/列注释
 │       ├── 02_seed.sql         造假数据
@@ -113,14 +116,19 @@ pytest
 │   │   │   ├── run_sql.py
 │   │   │   ├── export_csv.py       用户要文件时按编号重跑导出
 │   │   │   └── results.py          结果仓库：r1、r2… 只存一份，run_sql / 导出 / 界面 / 评测 / 沙箱共用
-│   │   └── python/
-│   │       ├── run_python.py       在沙箱里跑 Python；load_result("r3") 直接拿 SQL 结果
-│   │       ├── sandbox.py          宿主这头：起容器、收发消息、超时就杀掉重来
-│   │       └── kernel.py           容器里那头：常驻内核，变量跨调用保留（运行时只读挂进容器）
+│   │   ├── sandbox.py          沙箱的宿主这头（两种语言共用）：起容器、收发消息、超时就杀掉重来
+│   │   ├── python/
+│   │   │   ├── run_python.py       在沙箱里跑 Python；load_result("r3") 直接拿 SQL 结果
+│   │   │   └── kernel.py           容器里那头：常驻内核，变量跨调用保留（运行时只读挂进容器）
+│   │   └── r/
+│   │       ├── run_r.py            在沙箱里跑 R
+│   │       ├── kernel.R            R 版内核，协议和 Python 的一样
+│   │       └── templates.R         meta 分析模板 fh_*：算法和版式对齐 RevMan 5（见「医学科研」一节）
 │   │
-│   ├── domains/                ★ 场景包：一个业务库的行业知识（schema、业务约定），.env 里 DOMAIN= 选
+│   ├── domains/                ★ 场景包：数据在哪、业务约定、要哪些工具，.env 里 DOMAIN= 选
 │   │   ├── shop.py               自己造的电商库
-│   │   └── financial.py          BIRD 的捷克银行库
+│   │   ├── financial.py          BIRD 的捷克银行库
+│   │   └── research.py           医学科研（系统评价 / meta 分析）：不连数据库，分析上传的文件
 │   │
 │   ├── session/                ★ 会话落盘（学 pi / Claude Code 的 JSONL 日志）
 │   │   ├── store.py              会话目录；每轮成功之后追加日志；读回历史（--resume）
@@ -138,8 +146,8 @@ pytest
 │   ├── runner.py / graders.py    跑一道题 / 判分（判分器有单元测试）
 │   ├── report.py / run.py        报告 / 命令行入口
 │   └── runs/                     每次运行的记录（不进 git）
-└── tests/                      371 个用例，全部不需要 key 和数据库（共用的假模型在 fakes.py；
-                                沙箱隔离的两个用例要 Docker，没有就跳过）
+└── tests/                      398 个用例，都不需要 key 和数据库（共用的假模型在 fakes.py；
+                                沙箱隔离和 R 模板的用例要 Docker 镜像，没有就跳过）
     ├── test_agent_loop.py                    主循环行为
     ├── test_stop_reason_and_finish_turn.py   完成判定 + 结束钩子
     ├── test_provider_conversion.py           两家 provider 的格式转换
@@ -150,9 +158,9 @@ pytest
 
 ```
 cli ──┐
-      ├──> app ──> { llm, tools/sql, tools/python, db } ──> core
+      ├──> app ──> { llm, tools/sql, tools/python, tools/r, db } ──> core
 tests ┘                  tools/sql ──> db ──> Postgres
-                         tools/python ──> tools/sql（结果仓库）；内核跑在 Docker 里
+                         tools/python、tools/r ──> tools/sandbox.py ──> Docker 里的内核
 ```
 
 **`core/` 不 import 包外的任何模块**：它自己定义需要的接口（`LLMProvider`、`Tool`、`BaseContext`），
@@ -293,11 +301,11 @@ docker exec dataagent-postgres psql -U agent_ro -d analytics -c "DELETE FROM ord
 
 会报 `ERROR: cannot execute DELETE in a read-only transaction`。
 
-### run_python：模型写的代码关在容器里
+### run_python / run_r：模型写的代码关在容器里
 
-Python 能做的事比 SQL 多得多，所以不在代码层面拦（拦不住），而是让它**跑在哪都伤不到人**：
+Python 和 R 能做的事比 SQL 多得多，所以不在代码层面拦（拦不住），而是让它**跑在哪都伤不到人**：
 
-| 限制 | 怎么做（`tools/python/sandbox.py::Sandbox.docker`） |
+| 限制 | 怎么做（`tools/sandbox.py::Sandbox.docker`，两种语言一样） |
 |---|---|
 | 断网 | `--network none`：以后读研报、网页，里面的注入也没法把数据发出去 |
 | 文件 | 根目录只读，只挂载会话的 `work/`；`/tmp` 是 256MB 的内存盘；非 root 用户，去掉所有 capabilities |
@@ -305,8 +313,8 @@ Python 能做的事比 SQL 多得多，所以不在代码层面拦（拦不住�
 | 时间 | 两道超时：内核里的软超时打断代码、变量还在；卡在 C 代码里打断不了，宿主机再等 10 秒就杀掉整个内核 |
 | 依赖 | 镜像里预装，运行时不能装包 |
 
-数据只从一个口子进去：`load_result("r3")` 从结果仓库取完整结果，数字不经过模型的手。
-沙箱不能连数据库，取数只能走 `run_sql` 的三道防线。
+数据只从两个口子进去：`load_result("r3")` 从结果仓库取 SQL 的完整结果，数字不经过模型的手；
+用户 `/attach` 的文件复制进 `work/inputs/`（原件沙箱碰不到）。沙箱不能连数据库，取数只能走 `run_sql` 的三道防线。
 
 ---
 
@@ -332,6 +340,40 @@ Python 能做的事比 SQL 多得多，所以不在代码层面拦（拦不住�
 - `线上和线下渠道的客单价差多少`
 - `退货率最高的是哪个品类`
 - `有多少客户只下过一单`
+
+---
+
+## 医学科研：系统评价 / meta 分析
+
+同一个内核换一个场景包：`.env` 里 `DOMAIN=research`（或者启动时 `DOMAIN=research python run.py`）。
+不连数据库，工具只有 `run_python` 和 `run_r`，用户把 Excel 传上来，用一句话说要什么：
+
+```
+你 > /attach D:\课题\纳入研究.xlsx
+📎 纳入研究.xlsx → sessions\...\work\inputs\纳入研究.xlsx
+你 > 帮我做 meta 分析，画 RevMan 格式的森林图（带偏倚风险），再画偏倚风险图，按手术类型做个亚组分析
+```
+
+**模型不自己写统计公式和画图代码**，调 `tools/r/templates.R` 里的模板（`fh_help()` 列出全部）：
+
+| 模板 | 做什么 |
+|---|---|
+| `fh_meta_bin` / `fh_meta_cont` / `fh_meta_gen` | 二分类（RR/OR/RD，M-H / 倒方差 / Peto）、连续（MD/SMD）、文献直接给的效应量（HR 等）；可带亚组 |
+| `fh_report` / `fh_methods` / `fh_export` | RevMan 格式的结果文字、一段中文方法学描述、结果表存 Excel |
+| `fh_forest` | RevMan 5 版式的森林图，可带亚组、右侧附各领域偏倚风险；PNG 300dpi + PDF（可加 TIFF） |
+| `fh_rob` | RoB 1 / RoB 2（用户指定）的汇总图和比例图；判定写成 Low / 低 / + 都认 |
+| `fh_funnel` / `fh_sensitivity` | 漏斗图（10 项以上才做 Egger 检验）、逐一剔除的敏感性分析 |
+
+为什么这样分工：统计代码错了往往不报错（statsmodels 收到不认识的方法名照样算出负权重），
+R 包的参数名还在改，模型又看不见自己画的图。模板把「算得对、版式对、能复现」固定下来，
+模型负责读懂杂乱的 Excel（标题行、「12/100」写在一格里）、把用户的话翻译成参数、解释结果。
+
+**数字对齐 RevMan 5**：meta 包的 `settings.meta("RevMan5")`（τ² 用 DerSimonian-Laird、
+异质性 Q 用 Mantel-Haenszel 的合并值、零事件按 RevMan 的规则加 0.5）。`tests/test_r_sandbox.py`
+拿一份独立实现逐项对：固定效应对 metafor 的 `rma.mh`，随机效应按 RevMan 5 的公式手算（在有异质性的数据上，
+metafor 的 DL 用的是倒方差的 Q，结果会不一样），SMD 按 Hedges' g 的 RevMan 公式手算，误差都在 1e-10 以内。
+
+还没做：拿已发表的 Cochrane 系统评价的数据做评测题（像 BIRD 那样），网状 meta、meta 回归不在模板里。
 
 ---
 
@@ -527,7 +569,7 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 | **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，配一个按位置读的工具（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，会话目录已经有了（`Session.root`），放在它下面的 `tool-results/` |
 | **长期记忆** | 新包 `memory/`；索引走 `Agent(session_context=...)`，召回的正文走一道 `ContextEdit` | 索引在会话开始时拼进系统提示词、会话中不变（变了缓存全废）；每次提问挑几条相关的，作为标记并进这条用户消息。设计见 refs 里的对比笔记 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
-| **画图、统计** | 已实现：`tools/python/` | `run_python` 在沙箱里跑 pandas / scipy / statsmodels / matplotlib，图存进 `work/figures/` |
+| **画图、统计** | 已实现：`tools/python/`、`tools/r/` | `run_python` / `run_r` 在沙箱里跑，图存进 `work/figures/`；meta 分析有 RevMan 5 模板 |
 | **Python 表格编号** | `tools/python/` + `tools/sql/results.py` | 现在只有 SQL 结果有 r 号；Python 算出来的表也编号，回答里就能 `{{r5}}` 引用、`/save` 导出 |
 | **流式输出** | `llm/` 各 provider 加 `stream_chat()` | `LLMResponse` 不变，只是分块 yield |
 | **人工审批** | 已实现：`build_application(approval_hook=...)` | 传个函数，工具执行前弹确认 |

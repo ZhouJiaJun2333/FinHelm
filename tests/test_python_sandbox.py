@@ -20,10 +20,9 @@ from data_agent.db.connection import QueryResult
 from data_agent.domains import get_domain
 from data_agent.prompts import build_system_prompt
 from data_agent.settings import Settings
-from data_agent.tools.python import RunPythonTool, Sandbox, SandboxUnavailable, result_resolver
-from data_agent.tools.python.run_python import encode_result
-from data_agent.tools.python.sandbox import Execution
-from data_agent.tools.sql.results import ResultStore
+from data_agent.tools.python import PYTHON_KERNEL, RunPythonTool
+from data_agent.tools.sandbox import Execution, Sandbox, SandboxUnavailable
+from data_agent.tools.sql.results import ResultStore, encode_result, result_resolver
 
 from fakes import ScriptedProvider
 
@@ -43,7 +42,7 @@ def store_with_monthly() -> ResultStore:
 @pytest.fixture(scope="module")
 def kernel(tmp_path_factory):
     """几个测试共用一个内核：启动要 import pandas，一秒左右。"""
-    sandbox = Sandbox.local(tmp_path_factory.mktemp("work"), result_resolver(store_with_monthly()))
+    sandbox = Sandbox.local(PYTHON_KERNEL, tmp_path_factory.mktemp("work"), result_resolver(store_with_monthly()))
     yield sandbox
     sandbox.close()
 
@@ -93,7 +92,7 @@ def test_用户代码退出不了内核_也读不到协议(kernel):
 
 
 def test_硬超时_杀掉重来(tmp_path):
-    sandbox = Sandbox.local(tmp_path, result_resolver(ResultStore()), timeout_s=0.5, grace_s=0.5)
+    sandbox = Sandbox.local(PYTHON_KERNEL, tmp_path, result_resolver(ResultStore()), timeout_s=0.5, grace_s=0.5)
     try:
         sandbox.run("y = 1")
         # 屏蔽软超时，模拟卡在 C 代码里
@@ -108,7 +107,7 @@ def test_硬超时_杀掉重来(tmp_path):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="软超时靠 SIGALRM，Windows 上没有")
 def test_软超时_打断代码但变量还在(tmp_path):
-    sandbox = Sandbox.local(tmp_path, result_resolver(ResultStore()), timeout_s=0.5, grace_s=5)
+    sandbox = Sandbox.local(PYTHON_KERNEL, tmp_path, result_resolver(ResultStore()), timeout_s=0.5, grace_s=5)
     try:
         sandbox.run("y = 1")
         ex = sandbox.run("while True: pass")
@@ -119,7 +118,7 @@ def test_软超时_打断代码但变量还在(tmp_path):
 
 
 def test_内核崩了_下次自动起一个新的(tmp_path):
-    sandbox = Sandbox.local(tmp_path, result_resolver(ResultStore()))
+    sandbox = Sandbox.local(PYTHON_KERNEL, tmp_path, result_resolver(ResultStore()))
     try:
         ex = sandbox.run("import os\nos._exit(3)")
         assert ex.restarted and "意外退出" in ex.error
@@ -185,13 +184,13 @@ def test_工具输出_重启和NameError的提示():
 
 
 def test_什么都没输出时提醒怎么看结果():
-    assert "print" in run_tool(Execution()).content
+    assert "打印出来" in run_tool(Execution()).content
 
 
 def test_终端显示_输出长了会折叠_图的路径一定列出来():
-    from data_agent.cli import _show_python
+    from data_agent.cli import _show_execution
 
-    shown = _show_python(Execution(output="x" * 5000, value="42", figures=[Path("work/figures/fig-1.png")]))
+    shown = _show_execution(Execution(output="x" * 5000, value="42", figures=[Path("work/figures/fig-1.png")]))
     assert "已折叠" in shown
     assert shown.splitlines()[-1].endswith("fig-1.png")
 
@@ -202,18 +201,18 @@ def test_run_python不参与清理():
 
 # ---------------------------------------------------------------- 组装
 def test_开沙箱时注册工具_提示词里多一步_容器不急着启动():
-    app = build_application(Settings(python_sandbox=True), llm=ScriptedProvider())
+    app = build_application(Settings(domain="shop", python_sandbox=True), llm=ScriptedProvider())
     try:
-        assert "run_python" in app.tools
+        assert "run_python" in app.tools and "run_r" not in app.tools, "shop 场景包不要 R"
         assert "load_result" in app.agent.system_prompt
-        assert not app.sandbox.running, "第一次 run_python 才启动"
+        assert not app.sandboxes["python"].running, "第一次 run_python 才启动"
     finally:
         app.close()
 
 
 def test_关掉沙箱时只有SQL工具_提示词和原来一样():
-    app = build_application(Settings(python_sandbox=False), llm=ScriptedProvider())
-    assert "run_python" not in app.tools and app.sandbox is None
+    app = build_application(Settings(domain="shop", python_sandbox=False), llm=ScriptedProvider())
+    assert "run_python" not in app.tools and app.sandboxes == {}
     assert app.agent.system_prompt == build_system_prompt(get_domain(app.settings.domain))
     assert "4. 用自然语言给结论" in app.agent.system_prompt
 
@@ -235,7 +234,7 @@ docker_only = pytest.mark.skipif(not _docker_image_ready(),
 
 @docker_only
 def test_容器里_断网_只读_能画图_关了就删(tmp_path):
-    sandbox = Sandbox.docker("finhelm-sandbox", tmp_path, result_resolver(store_with_monthly()), timeout_s=20)
+    sandbox = Sandbox.docker("finhelm-sandbox", PYTHON_KERNEL, tmp_path, result_resolver(store_with_monthly()), timeout_s=20)
     try:
         net = sandbox.run("import socket\nsocket.create_connection(('1.1.1.1', 80), timeout=3)")
         assert net.error and "OSError" in net.error, net.error
@@ -260,7 +259,7 @@ def test_容器里_断网_只读_能画图_关了就删(tmp_path):
 
 @docker_only
 def test_容器里_内存超限被杀_自动重启(tmp_path):
-    sandbox = Sandbox.docker("finhelm-sandbox", tmp_path, result_resolver(ResultStore()),
+    sandbox = Sandbox.docker("finhelm-sandbox", PYTHON_KERNEL, tmp_path, result_resolver(ResultStore()),
                              timeout_s=30, memory="256m")
     try:
         ex = sandbox.run("big = b'x' * 1024 ** 3")   # 真写满，calloc 的零页不算数

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -29,7 +30,7 @@ from .core.events import (
 from .core.messages import Usage
 from .session import Session
 from .settings import Settings
-from .tools.python.sandbox import Execution
+from .tools.sandbox import Execution
 from .tools.sql.export_csv import export_query
 from .tools.sql.results import ResultStore, SqlResult, markdown_table
 
@@ -40,9 +41,10 @@ TERMINAL_ROWS = 20
 
 BANNER = """
 ┌─────────────────────────────────────────────────────┐
-│  FinHelm · 金融数据分析 Agent                       │
+│  FinHelm · 通用数据分析 Agent                       │
 │                                                     │
 │  /tables  看库里有哪些表      /tools   看有哪些工具 │
+│  /attach  上传文件（/attach 路径1 "带 空格的路径2"）│
 │  /context 看上下文用量        /compact 压缩上下文   │
 │  /save    把最近的结果存成 CSV（/save r3 指定编号） │
 │  /reset   清空对话            /exit    退出         │
@@ -61,7 +63,7 @@ def _show_table(table: SqlResult) -> str:
     return text
 
 
-def _show_python(ex: Execution) -> str:
+def _show_execution(ex: Execution) -> str:
     """输出可能很长会被折叠，图的路径单独列出来，保证用户看得到。"""
     text = _preview("\n\n".join(p for p in (ex.output.rstrip(), ex.value or "") if p), 800)
     return "\n".join([text, *(f"🖼  {path.resolve()}" for path in ex.figures)]).strip()
@@ -70,7 +72,8 @@ def _show_python(ex: Execution) -> str:
 # 按工具名找渲染函数，参数是 details（学 pi 的 renderResult）。没登记的显示模型看到的那份
 RESULT_RENDERERS: dict[str, Callable[[Any], str]] = {
     "run_sql": _show_table,
-    "run_python": _show_python,
+    "run_python": _show_execution,
+    "run_r": _show_execution,
 }
 
 
@@ -154,6 +157,27 @@ def _save(arg: str, app: Application) -> None:
         print(f"❌ 导出失败：{type(exc).__name__}: {exc}")
 
 
+def parse_paths(arg: str) -> list[Path]:
+    """/attach 的参数：空格分开，带空格的路径加引号。不用 POSIX 规则：Windows 路径里的反斜杠要留着。"""
+    return [Path(p.strip('"').strip("'")) for p in shlex.split(arg, posix=False)]
+
+
+def _attach(arg: str, app: Application) -> None:
+    if not app.sandboxes:
+        print("这个场景没有沙箱工具，上传了模型也读不了。")
+        return
+    paths = parse_paths(arg)
+    if not paths:
+        print('用法：/attach 文件1 "带 空格的文件2"。文件会复制进会话的 work/inputs/，下一条消息会告诉模型')
+        return
+    try:
+        for path in app.attach(paths):
+            print(f"📎 {path.name} → {path.resolve()}")
+        print("下一条消息会告诉模型有这些文件。")
+    except FileNotFoundError as exc:
+        print(f"❌ {exc}")
+
+
 def _k(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
@@ -218,13 +242,19 @@ def handle_command(cmd: str, app: Application) -> bool:
                 print(f"  · {tool.name}\n      {tool.description}")
 
         case "/tables":
-            print(app.inspector.overview())
+            print(app.inspector.overview() if app.inspector else "这个场景不连数据库。")
+
+        case "/attach":
+            _attach(arg, app)
 
         case "/context":
             _print_context(app)
 
         case "/save":
-            _save(arg, app)
+            if app.db is None:
+                print("这个场景不连数据库，没有查询结果可存。")
+            else:
+                _save(arg, app)
 
         case "/compact":
             # 整理的过程由事件打印，这里只管「什么都没做」和失败
@@ -263,7 +293,7 @@ def _handle(user_input: str, app: Application) -> None:
             print(f"未知命令：{user_input}")
         return
     try:
-        answer = app.agent.run(user_input)
+        answer = app.agent.run(app.with_uploads(user_input))
         print(f"\n💬 {app.results.expand(answer, _show_table)}")
     except KeyboardInterrupt:
         print("\n已中断本轮。")
@@ -305,16 +335,18 @@ def main() -> None:
 
 def _repl(app: Application, session: Session, results: ResultStore, settings: Settings,
           history: list[Entry]) -> None:
-    try:
-        version = app.db.ping().split(",")[0]
-    except Exception as exc:
-        print(f"❌ 连不上数据库：{exc}")
-        print("   数据库起来了吗？  cd docker && docker compose up -d")
-        return
+    version = "不连数据库（只分析上传的文件）"
+    if app.db is not None:
+        try:
+            version = app.db.ping().split(",")[0]
+        except Exception as exc:
+            print(f"❌ 连不上数据库：{exc}")
+            print("   数据库起来了吗？  cd docker && docker compose up -d")
+            return
 
     print(BANNER)
     print(f"模型：{settings.provider} / {app.llm.model}")
-    print(f"数据库：{version}")
+    print(f"场景：{settings.domain}　数据库：{version}")
     print(f"工具：{len(app.tools)} 个 —— {', '.join(t.name for t in app.tools)}")
     print(f"会话：{session.root}（下次 python run.py --resume {session.id} 接着聊）")
     if history:

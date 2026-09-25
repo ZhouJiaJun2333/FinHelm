@@ -1,6 +1,5 @@
-"""Python 工具：run_python，以及它背后的沙箱。"""
+"""Python 工具：run_python。内核在 kernel.py，宿主机那头是 tools/sandbox.py。"""
 
-from .run_python import RunPythonTool, result_resolver
-from .sandbox import Sandbox, SandboxUnavailable
+from .run_python import PYTHON_KERNEL, RunPythonTool
 
-__all__ = ["RunPythonTool", "Sandbox", "SandboxUnavailable", "result_resolver"]
+__all__ = ["PYTHON_KERNEL", "RunPythonTool"]

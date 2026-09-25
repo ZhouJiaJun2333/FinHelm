@@ -113,6 +113,7 @@ def run(code: str, timeout: float) -> dict:
     except SyntaxError as exc:
         return {"output": "", "value": None, "error": _format_error(exc), "figures": []}
     last = tree.body.pop() if tree.body and isinstance(tree.body[-1], ast.Expr) else None
+    before = _figure_files()
 
     _arm(timeout)
     try:
@@ -129,7 +130,14 @@ def run(code: str, timeout: float) -> dict:
         error = _format_error(exc)
     finally:
         _arm(0)
-    return {"output": _cap(out.getvalue()), "value": value, "error": error, "figures": _save_figures()}
+    written = [f for f, mtime in _figure_files().items() if before.get(f) != mtime]
+    return {"output": _cap(out.getvalue()), "value": value, "error": error,
+            "figures": written + _save_figures()}
+
+
+def _figure_files() -> dict[str, float]:
+    """figures/ 下的文件和修改时间：用户代码自己 savefig 的 PDF 也要报给宿主。"""
+    return {e.path: e.stat().st_mtime for e in os.scandir("figures") if e.is_file()}
 
 
 def _arm(seconds: float) -> None:

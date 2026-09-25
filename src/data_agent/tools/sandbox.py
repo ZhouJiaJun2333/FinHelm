@@ -1,7 +1,8 @@
-"""宿主机这一头：起内核进程、收发消息、超时就杀掉重来。
+"""沙箱的宿主机这一头：起内核进程、收发消息、超时就杀掉重来。Python 和 R 的内核共用。
 
 内核默认跑在 Docker 里：断网、只读根目录、非 root、限 CPU / 内存 / 进程数，只挂载会话的工作目录。
 测试用 local() 直接起一个本机进程，协议一样。第一次执行时才启动，会话结束时 close()。
+协议见 tools/python/kernel.py 开头：按行说 JSON，内核要 SQL 结果时回头来问（need / data）。
 
 两道超时：内核里的软超时打断用户代码，变量还在；软超时拦不住（卡在 C 代码里）时，
 宿主机的硬超时杀掉整个内核，变量就都没了。
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import secrets
 import subprocess
 import sys
@@ -19,14 +21,27 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
-KERNEL = Path(__file__).with_name("kernel.py")
-STARTUP_TIMEOUT_S = 60           # 冷启动容器 + import pandas
+from pydantic import BaseModel, Field
+
+from ..core.tools import Tool, ToolOutput
+
+STARTUP_TIMEOUT_S = 60           # 冷启动容器 + 加载 pandas / meta
 HARD_TIMEOUT_GRACE_S = 10
+MOUNT = "/opt/finhelm"
 
 # 给一个结果编号，返回内核要的数据：{"columns", "rows", "dates", "truncated"} 或 {"error"}
 Resolve = Callable[[str], dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class KernelSpec:
+    """一种语言的内核：files[0] 是入口脚本，其余（比如模板库）一起只读挂进容器。"""
+
+    files: tuple[Path, ...]
+    command: tuple[str, ...]              # 容器里怎么跑入口脚本，比如 ("python", "-u")
+    env: tuple[tuple[str, str], ...] = ()
 
 
 class SandboxUnavailable(RuntimeError):
@@ -35,8 +50,8 @@ class SandboxUnavailable(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class Execution:
-    output: str = ""                 # print 出来的
-    value: str | None = None         # 最后一行表达式的值
+    output: str = ""                 # 打印出来的
+    value: str | None = None         # 最后一行表达式的值（R 的可见值直接打印进 output）
     error: str | None = None
     figures: list[Path] = field(default_factory=list)
     restarted: bool = False          # 内核被杀掉重启了，之前的变量都没了
@@ -68,30 +83,32 @@ class Sandbox:
     # ------------------------------------------------------------ 构造
     @classmethod
     def docker(
-        cls, image: str, work_dir: Path, resolve: Resolve, *,
+        cls, image: str, kernel: KernelSpec, work_dir: Path, resolve: Resolve, *,
         timeout_s: float = 60, memory: str = "2g", cpus: float = 2,
     ) -> "Sandbox":
         work_dir = work_dir.resolve()
         name = f"finhelm-sandbox-{secrets.token_hex(4)}"
+        mounts = [arg for f in kernel.files for arg in
+                  ("--mount", f"type=bind,source={f.resolve()},target={MOUNT}/{f.name},readonly")]
+        env = [arg for key, value in (("HOME", "/tmp"), *kernel.env) for arg in ("-e", f"{key}={value}")]
         command = [
             "docker", "run", "-i", "--rm", "--name", name,
             "--network", "none",
             "--read-only", "--tmpfs", "/tmp:rw,size=256m",
             "--memory", memory, "--memory-swap", memory, "--cpus", str(cpus), "--pids-limit", "128",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000",
-            "--mount", f"type=bind,source={work_dir},target=/work",
-            "--mount", f"type=bind,source={KERNEL.resolve()},target=/opt/finhelm/kernel.py,readonly",
-            "-w", "/work", "-e", "MPLCONFIGDIR=/tmp", "-e", "HOME=/tmp",
-            image, "python", "-u", "/opt/finhelm/kernel.py",
+            "--mount", f"type=bind,source={work_dir},target=/work", *mounts,
+            "-w", "/work", *env,
+            image, *kernel.command, f"{MOUNT}/{kernel.files[0].name}",
         ]
         return cls(command, work_dir, resolve, timeout_s=timeout_s,
                    kill_command=["docker", "kill", name])
 
     @classmethod
-    def local(cls, work_dir: Path, resolve: Resolve, *, timeout_s: float = 60,
+    def local(cls, kernel: KernelSpec, work_dir: Path, resolve: Resolve, *, timeout_s: float = 60,
               grace_s: float = HARD_TIMEOUT_GRACE_S) -> "Sandbox":
-        """不隔离，只给测试用。"""
-        return cls([sys.executable, "-u", str(KERNEL)], work_dir, resolve,
+        """不隔离，只给测试用：用本机的 Python 跑 Python 内核。"""
+        return cls([sys.executable, "-u", str(kernel.files[0])], work_dir, resolve,
                    timeout_s=timeout_s, grace_s=grace_s, cwd=work_dir)
 
     # ------------------------------------------------------------ 执行
@@ -192,3 +209,49 @@ class Sandbox:
         if self._log is not None:
             self._log.close()
             self._log = None
+
+
+# ================================================================ 工具
+class SandboxTool(Tool):
+    """run_python / run_r 的共同部分：把代码交给内核，把执行结果整理成模型看的文字。
+
+    不是 rerunnable：内核有状态，重跑一次会改变里面的变量。
+    """
+
+    language: ClassVar[str]
+    # 变量找不到的报错（Python 的 NameError、R 的 object 'x' not found）：可能是内核重启过
+    missing_name: ClassVar[re.Pattern]
+
+    class Args(BaseModel):
+        code: str = Field(description="要执行的代码")
+
+    def __init__(self, sandbox: Sandbox) -> None:
+        self.sandbox = sandbox
+
+    def run(self, args: Args) -> ToolOutput:
+        ex = self.sandbox.run(args.code)
+        return ToolOutput(self.render(ex), _summarize(ex), details=ex, is_error=ex.error is not None)
+
+    def render(self, ex: Execution) -> str:
+        parts = []
+        if ex.output.strip():
+            parts.append(ex.output.rstrip())
+        if ex.value is not None:
+            parts.append(ex.value)
+        if ex.figures:
+            parts.append("图表已保存（用户能看到这些文件）：\n" + "\n".join(f"- {p}" for p in ex.figures))
+        if ex.error:
+            parts.append(f"出错了：\n{ex.error.rstrip()}")
+        restart = f"{self.language} 内核重启过，之前定义的变量都没了。需要的话重新运行定义它们的代码，数据用 load_result 重新取。"
+        if ex.restarted:
+            parts.append(restart)
+        elif ex.error and self.missing_name.search(ex.error):
+            parts.append("如果这个变量是之前的调用里定义的：内核可能重启过（超时、恢复会话），重新运行定义它的代码。")
+        return "\n\n".join(parts) or "执行成功，没有输出。要看结果就打印出来，或者把表达式放在最后一行。"
+
+
+def _summarize(ex: Execution) -> str:
+    if ex.error:
+        return "报错：" + ex.error.strip().splitlines()[-1]
+    text = f"输出 {(ex.output + (ex.value or '')).count(chr(10)) + 1} 行"
+    return text + (f"，{len(ex.figures)} 张图" if ex.figures else "")

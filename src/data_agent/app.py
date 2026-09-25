@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -16,11 +17,13 @@ from .db.introspection import SchemaInspector
 from .domains import get_domain
 from .prompts import build_system_prompt
 from .settings import Settings, build_provider
-from .tools.python import RunPythonTool, Sandbox, result_resolver
+from .tools.python import PYTHON_KERNEL, RunPythonTool
+from .tools.r import R_KERNEL, RunRTool
+from .tools.sandbox import Sandbox
 from .tools.sql.describe_table import DescribeTableTool
 from .tools.sql.export_csv import ExportCsvTool
 from .tools.sql.list_tables import ListTablesTool
-from .tools.sql.results import ResultStore
+from .tools.sql.results import ResultStore, result_resolver
 from .tools.sql.run_sql import RunSqlTool
 
 
@@ -29,25 +32,50 @@ class Application:
     """装配好的一整套东西。"""
 
     agent: Agent
-    db: Database
-    inspector: SchemaInspector
+    db: Database | None               # 场景包不连数据库时是 None
+    inspector: SchemaInspector | None
     tools: ToolRegistry
     llm: LLMProvider
     settings: Settings
     # 这次会话查出过的结果（r1、r2…）：界面展开 {{r3}}、/save 都从这里拿
     results: ResultStore
     export_dir: Path                  # CSV 写到哪（/save 和 export_csv 共用）
-    sandbox: Sandbox | None = None    # run_python 的内核；关掉沙箱时是 None
+    work_dir: Path                    # 沙箱的工作目录：inputs/ 放上传的文件，figures/ 放图
+    sandboxes: dict[str, Sandbox] = field(default_factory=dict)   # "python" / "r"
+    pending_uploads: list[Path] = field(default_factory=list)     # 上传了、还没告诉模型的文件
+
+    def attach(self, paths: list[Path]) -> list[Path]:
+        """把用户的文件复制进 work_dir/inputs/（原件不给沙箱碰），返回复制后的路径。"""
+        missing = [p for p in paths if not p.is_file()]
+        if missing:
+            raise FileNotFoundError(f"找不到文件：{'、'.join(map(str, missing))}")
+        inputs = self.work_dir / "inputs"
+        inputs.mkdir(parents=True, exist_ok=True)
+        copied = [Path(shutil.copy2(p, inputs / p.name)) for p in paths]
+        self.pending_uploads += copied
+        return copied
+
+    def with_uploads(self, text: str) -> str:
+        """下一条用户消息前面带上刚上传的文件：记进历史，--resume 之后模型也知道有这些文件。"""
+        if not self.pending_uploads:
+            return text
+        files = "、".join(f"{p.name}（{_size(p)}）" for p in self.pending_uploads)
+        self.pending_uploads = []
+        return f"[用户上传了文件，在 inputs/ 下：{files}]\n\n{text}"
 
     def reset(self) -> None:
         """清空对话，内核也换个空的：新对话不该看到上一段留下的变量。"""
         self.agent.reset()
-        if self.sandbox is not None:
-            self.sandbox.close()
+        self.close()
 
     def close(self) -> None:
-        if self.sandbox is not None:
-            self.sandbox.close()
+        for sandbox in self.sandboxes.values():
+            sandbox.close()
+
+
+def _size(path: Path) -> str:
+    n = path.stat().st_size
+    return f"{n / 1024 / 1024:.1f} MB" if n >= 1024 * 1024 else f"{max(1, round(n / 1024))} KB"
 
 
 def build_application(
@@ -72,31 +100,37 @@ def build_application(
     domain = get_domain(settings.domain)
 
     # --- 数据层 ---
-    db = Database(
-        settings.database_url,
-        statement_timeout_ms=settings.db_statement_timeout_ms,
-        search_path=domain.schema,
-    )
-    inspector = SchemaInspector(db, schemas=(domain.schema,))
+    db = inspector = None
+    if domain.schema is not None and "sql" in domain.tools:
+        db = Database(
+            settings.database_url,
+            statement_timeout_ms=settings.db_statement_timeout_ms,
+            search_path=domain.schema,
+        )
+        inspector = SchemaInspector(db, schemas=(domain.schema,))
 
     # --- 工具层 ---
-    # run_sql 往里存、export_csv 按编号取、界面和评测读：只有这一份
+    # run_sql 往里存、export_csv 按编号取、界面、评测和沙箱读：只有这一份
     results = results if results is not None else ResultStore()
     export_dir = export_dir or Path(settings.export_dir)
-    tools = ToolRegistry([
-        ListTablesTool(inspector),
-        DescribeTableTool(db, inspector, default_schema=domain.schema),
-        RunSqlTool(db, results),
-        ExportCsvTool(db, results, export_dir),
-    ])
-    sandbox = None
-    if settings.python_sandbox:
-        # 第一次 run_python 才启动容器
-        sandbox = Sandbox.docker(
-            settings.sandbox_image, work_dir or Path(settings.work_dir), result_resolver(results),
-            timeout_s=settings.sandbox_timeout_s, memory=settings.sandbox_memory, cpus=settings.sandbox_cpus,
-        )
-        tools.register(RunPythonTool(sandbox))
+    work_dir = work_dir or Path(settings.work_dir)
+    tools = ToolRegistry()
+    if db is not None:
+        for tool in (ListTablesTool(inspector), DescribeTableTool(db, inspector, default_schema=domain.schema),
+                     RunSqlTool(db, results), ExportCsvTool(db, results, export_dir)):
+            tools.register(tool)
+    # 沙箱：场景包要、.env 里也开着才有。第一次调用才启动容器；两个容器挂同一个工作目录
+    sandboxes: dict[str, Sandbox] = {}
+    for kind, enabled, image, kernel, tool_class in (
+        ("python", settings.python_sandbox, settings.sandbox_image, PYTHON_KERNEL, RunPythonTool),
+        ("r", settings.r_sandbox, settings.sandbox_r_image, R_KERNEL, RunRTool),
+    ):
+        if kind in domain.tools and enabled:
+            sandboxes[kind] = Sandbox.docker(
+                image, kernel, work_dir, result_resolver(results), timeout_s=settings.sandbox_timeout_s,
+                memory=settings.sandbox_memory, cpus=settings.sandbox_cpus,
+            )
+            tools.register(tool_class(sandboxes[kind]))
 
     # --- 模型层 ---
     llm = llm or build_provider(settings)
@@ -127,17 +161,17 @@ def build_application(
     agent = Agent(
         llm=llm,
         tools=tools,
-        system_prompt=build_system_prompt(domain, python=sandbox is not None),
+        system_prompt=build_system_prompt(domain, [t.name for t in tools]),
         context=context,
         max_steps=settings.max_steps,
         approval_hook=approval_hook,
         finish_turn_hook=finish_turn_hook,
         on_event=on_event,
-        session_context=inspector.overview,
+        session_context=inspector.overview if inspector else None,
     )
 
     return Application(
         agent=agent, db=db, inspector=inspector,
         tools=tools, llm=llm, settings=settings, results=results, export_dir=export_dir,
-        sandbox=sandbox,
+        work_dir=work_dir, sandboxes=sandboxes,
     )

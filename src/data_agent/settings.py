@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql://agent_ro:agent_ro_pwd@localhost:5433/analytics"
     )
-    # 场景包（domains/）：shop = 自己造的电商库，financial = BIRD 的银行库
+    # 场景包（domains/）：shop = 自己造的电商库，financial = BIRD 的银行库，research = 医学科研（只用上传的文件）
     domain: str = "shop"
     db_statement_timeout_ms: int = 30_000
     # 每次对话一个子目录：日志、查询结果、导出的 CSV
@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # run_python 跑在 Docker 里（先 docker build -t finhelm-sandbox docker/sandbox）。没有 Docker 就关掉
     python_sandbox: bool = True
     sandbox_image: str = "finhelm-sandbox"
+    # run_r（先 docker build -t finhelm-sandbox-r docker/sandbox-r）。场景包要 r 才注册，比如 research
+    r_sandbox: bool = True
+    sandbox_r_image: str = "finhelm-sandbox-r"
     sandbox_timeout_s: int = 60
     sandbox_memory: str = "2g"
     sandbox_cpus: float = 2

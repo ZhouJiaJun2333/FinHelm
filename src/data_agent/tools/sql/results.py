@@ -7,12 +7,15 @@ run_sql 存进来；export_csv 按编号找到 SQL 重跑；界面和评测把�
 
 from __future__ import annotations
 
+import datetime as dt
 import itertools
 import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from ...db.connection import QueryResult
 
@@ -74,6 +77,38 @@ def _encode(t: SqlResult) -> dict:
 def _decode(d: dict) -> SqlResult:
     result = QueryResult(d["columns"], [tuple(row) for row in d["rows"]], d["truncated"], d["elapsed_ms"])
     return SqlResult(d["ref"], d["sql"], result)
+
+
+def result_resolver(results: ResultStore) -> Callable[[str], dict[str, Any]]:
+    """沙箱内核 load_result("r3") 时，宿主机按编号从这里取数据。"""
+    def resolve(ref: str) -> dict[str, Any]:
+        table = results.get(ref)
+        if table is None:
+            known = "、".join(results.refs()) or "还没有"
+            return {"error": f"没有编号为 {ref} 的结果。本次对话里的编号：{known}"}
+        return encode_result(table.result)
+    return resolve
+
+
+def encode_result(result: QueryResult) -> dict[str, Any]:
+    """转成能过 JSON 的样子。Decimal 转 float（DataFrame 里本来也是 float）；日期列记下来，内核那头再转回去。"""
+    rows = [[_plain(v) for v in row] for row in result.rows]
+    dates = [
+        col for i, col in enumerate(result.columns)
+        if any(isinstance(row[i], dt.date) for row in result.rows)
+        and all(row[i] is None or isinstance(row[i], dt.date) for row in result.rows)
+    ]
+    return {"columns": result.columns, "rows": rows, "dates": dates, "truncated": result.truncated}
+
+
+def _plain(v: Any) -> Any:
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (dt.date, dt.datetime)):
+        return v.isoformat()
+    return str(v)
 
 
 def markdown_table(columns: list[str], rows: list[tuple]) -> str:
