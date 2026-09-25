@@ -1,0 +1,6 @@
+# 挂进 Linux 容器的文件固定用 LF：Dockerfile 里的反斜杠续行遇到 CRLF 会断
+Dockerfile text eol=lf
+*.R text eol=lf
+*.sh text eol=lf
+src/data_agent/tools/python/kernel.py text eol=lf
+docker/initdb/*.sql text eol=lf
