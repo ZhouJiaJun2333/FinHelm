@@ -14,14 +14,21 @@ pi 把工具给界面的 details 存在工具结果消息里，跟着会话日�
       展示过了，用户可能接着 /save r5 —— 用户见过的东西不能跟着回滚消失。
     · 编号也不能回收：回滚之后再查一次，如果又叫 r5，界面上就有两个不一样的 r5。
 所以这里记的是「用户见过什么」，只增不减。pi 没这个矛盾：它失败的一轮也留在日志里，不回滚。
+
+── 落盘 ──────────────────────────────────────────────────────────────
+给了 path（会话目录里的 results.jsonl）就一边查一边追加，打开时读回来，编号接着往下编 ——
+恢复会话以后，历史里提到的 r3 还能 {{r3}}、还能 /save。存的是**用户当时看到的**那份：
+Decimal、日期存成字符串，界面上 str() 出来和原来一样；导出不用它，按 SQL 重跑。
 """
 
 from __future__ import annotations
 
 import itertools
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from ...db.connection import QueryResult
 
@@ -39,14 +46,24 @@ class SqlResult:
 
 
 class ResultStore:
-    def __init__(self) -> None:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path              # None = 只在内存里（评测、测试）
         self._results: dict[str, SqlResult] = {}
-        self._numbers = itertools.count(1)
+        if path is not None and path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                table = _decode(json.loads(line))
+                self._results[table.ref] = table
+        last = max((int(ref[1:]) for ref in self._results), default=0)
+        self._numbers = itertools.count(last + 1)
 
     def add(self, sql: str, result: QueryResult) -> SqlResult:
         """存一个结果，编上下一个号。"""
         table = SqlResult(f"r{next(self._numbers)}", sql, result)
         self._results[table.ref] = table
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(_encode(table), ensure_ascii=False, default=str) + "\n")
         return table
 
     def get(self, ref: str) -> SqlResult | None:
@@ -62,6 +79,17 @@ class ResultStore:
             table = self.get(m.group(1))
             return render(table) if table else f"（找不到结果 {m.group(1)}）"
         return REF.sub(one, text)
+
+
+def _encode(t: SqlResult) -> dict:
+    r = t.result
+    return {"ref": t.ref, "sql": t.sql, "columns": r.columns, "rows": r.rows,
+            "truncated": r.truncated, "elapsed_ms": r.elapsed_ms}
+
+
+def _decode(d: dict) -> SqlResult:
+    result = QueryResult(d["columns"], [tuple(row) for row in d["rows"]], d["truncated"], d["elapsed_ms"])
+    return SqlResult(d["ref"], d["sql"], result)
 
 
 def markdown_table(columns: list[str], rows: list[tuple]) -> str:

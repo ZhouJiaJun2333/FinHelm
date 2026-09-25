@@ -117,6 +117,8 @@ class Message:
 
     # provider 的原生 content（比如 Anthropic 的 content blocks 列表）。
     # 回传历史时优先用它 —— 自己拼 text 回去会丢掉 thinking 块等信息。
+    # 必须是**纯 JSON 数据**（dict / list / str / 数字），不能是 SDK 对象：会话日志原样存盘、
+    # 恢复会话时原样读回来再发出去（session/codec.py）。provider 负责 model_dump。
     raw: Any = None
 
     meta: MessageMeta = field(default_factory=MessageMeta)

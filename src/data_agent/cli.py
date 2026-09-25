@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any, Callable
 from dotenv import load_dotenv
 
 from .app import Application, build_application
+from .core.context import Entry, turn_starts
 from .core.errors import AgentError
 from .core.events import (
     ContextEdited,
@@ -27,6 +29,7 @@ from .core.events import (
     TurnContinued,
 )
 from .core.messages import Usage
+from .session import Session
 from .settings import Settings
 from .tools.sql.export_csv import export_query
 from .tools.sql.results import ResultStore, SqlResult, markdown_table
@@ -140,7 +143,7 @@ def _save(arg: str, app: Application) -> None:
               f"本次对话里的编号：{'、'.join(app.results.refs()) or '还没有'}")
         return
     try:
-        done = export_query(app.db, table.sql, Path(app.settings.export_dir), filename or f"{ref}.csv")
+        done = export_query(app.db, table.sql, app.export_dir, filename or f"{ref}.csv")
         print(done.describe(ref))
     except Exception as exc:  # noqa: BLE001
         print(f"❌ 导出失败：{type(exc).__name__}: {exc}")
@@ -232,22 +235,64 @@ def handle_command(cmd: str, app: Application) -> bool:
 
 
 # -------------------------------------------------------------------- main
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="python run.py", description="SQL 数据分析 Agent")
+    parser.add_argument("--verbose", action="store_true", help="工具输出不折叠")
+    parser.add_argument("--resume", nargs="?", const="", metavar="会话ID",
+                        help="接着上次的对话聊；不写 ID 就是最近的一次")
+    return parser.parse_args(argv)
+
+
+def open_session(base: Path, resume: str | None) -> tuple[Session, list[Entry]]:
+    """新会话，或者读回一个旧会话的历史。resume：None = 新开，"" = 最近的，其他 = 那个 ID。"""
+    if resume is None:
+        return Session.create(base), []
+    session = Session.open(base, resume or None)
+    return session, session.load()
+
+
+def _handle(user_input: str, app: Application) -> None:
+    """处理一次输入：斜杠命令，或者让 Agent 跑一轮。"""
+    if user_input.startswith("/"):
+        if not handle_command(user_input, app):
+            print(f"未知命令：{user_input}")
+        return
+    try:
+        answer = app.agent.run(user_input)
+        print(f"\n💬 {app.results.expand(answer, _show_table)}")
+    except KeyboardInterrupt:
+        print("\n已中断本轮。")
+    except AgentError as exc:
+        # 我们自己抛的，消息里已经写清楚该怎么办了
+        print(f"\n⚠️ {exc}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"\n❌ 出错：{type(exc).__name__}: {exc}")
+
+
 def main() -> None:
     load_dotenv()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    verbose = "--verbose" in sys.argv
-    results = ResultStore()
-
+    args = parse_args(sys.argv[1:])
     settings = Settings()
     try:
-        app = build_application(settings, on_event=make_console_sink(verbose, results),
-                                results=results)
+        session, history = open_session(Path(settings.sessions_dir), args.resume)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"❌ 没法恢复会话：{exc}")
+        return
+
+    # 结果仓库要先于 Application 建好：打印事件的 sink 要用它展开 {{r3}}
+    results = ResultStore(session.results_path)
+    try:
+        app = build_application(settings, on_event=make_console_sink(args.verbose, results),
+                                results=results, export_dir=session.exports_dir)
     except Exception as exc:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")
         return
+    # 快照就是历史的副本（Context.snapshot），恢复会话 = 恢复到磁盘上的那份
+    app.agent.context.restore(history)
 
     # 启动时就把数据库连通性验掉，别等跑到一半才报错
     try:
@@ -261,6 +306,9 @@ def main() -> None:
     print(f"模型：{settings.provider} / {app.llm.model}")
     print(f"数据库：{version}")
     print(f"工具：{len(app.tools)} 个 —— {', '.join(t.name for t in app.tools)}")
+    print(f"会话：{session.root}（下次 python run.py --resume {session.id} 接着聊）")
+    if history:
+        print(f"已恢复 {len(turn_starts(history))} 轮对话、{len(results.refs())} 个查询结果")
 
     while True:
         try:
@@ -268,24 +316,14 @@ def main() -> None:
         except (EOFError, KeyboardInterrupt):
             print("\n再见。")
             return
-
         if not user_input:
             continue
-        if user_input.startswith("/"):
-            if not handle_command(user_input, app):
-                print(f"未知命令：{user_input}")
-            continue
-
         try:
-            answer = app.agent.run(user_input)
-            print(f"\n💬 {results.expand(answer, _show_table)}")
-        except KeyboardInterrupt:
-            print("\n已中断本轮。")
-        except AgentError as exc:
-            # 我们自己抛的，消息里已经写清楚该怎么办了
-            print(f"\n⚠️ {exc}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"\n❌ 出错：{type(exc).__name__}: {exc}")
+            _handle(user_input, app)
+        finally:
+            # 每处理完一次输入就落盘：成功的一轮、/compact 加的标记、/reset 都在这里写进日志。
+            # 失败的一轮已经被 Agent.run 回滚了，历史没变，什么都不写
+            session.sync(app.agent.context.history)
 
 
 if __name__ == "__main__":

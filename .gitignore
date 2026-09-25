@@ -10,3 +10,5 @@ dist/
 .vscode/
 evals/runs/
 outputs/
+
+sessions/

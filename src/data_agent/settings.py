@@ -38,7 +38,9 @@ class Settings(BaseSettings):
     )
     db_schema: str = "shop"
     db_statement_timeout_ms: int = 30_000
-    # 用户要导出结果时（/save、export_csv 工具），CSV 写到这里。只在用户要的时候写
+    # 会话目录的根：每次对话一个子目录，放对话日志、查询结果、导出的 CSV（见 session/store.py）
+    sessions_dir: str = "sessions"
+    # 没有会话目录时（评测、测试直接调 build_application），export_csv 把 CSV 写到这里
     export_dir: str = "outputs"
 
     # ---------------- Agent ----------------

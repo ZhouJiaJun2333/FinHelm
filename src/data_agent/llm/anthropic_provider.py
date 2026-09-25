@@ -151,7 +151,9 @@ class AnthropicProvider(LLMProvider):
         return LLMResponse(
             text="\n".join(text_parts).strip(),
             tool_calls=tool_calls,
-            raw_content=resp.content,
+            # 转成纯 dict 再存（Message.raw 的约定：会话日志要能原样存盘、读回）。
+            # 和 OpenAI provider 一样 exclude_none：去掉响应里为空的字段，回传的请求体干净些
+            raw_content=[b.model_dump(mode="json", exclude_none=True) for b in resp.content],
             usage=self.convert_usage(resp.usage),
             stop_reason=resp.stop_reason,
         )
