@@ -147,3 +147,12 @@ def test_步数耗尽就不算对_哪怕图画出来了():
     assert t.result_ok and not t.answer_ok and t.failure == "步数耗尽"
     t.step_limit = False
     assert t.answer_ok
+
+
+def test_提示词指纹跟着实际注册的工具变():
+    from data_agent.settings import Settings
+    from evals.run import prompt_fingerprint
+    base = {"domain": "research", "provider": "openai", "openai_api_key": "x"}
+    on, off = (prompt_fingerprint(Settings(**base, openai_vision=v)) for v in (True, False))
+    assert on != off, "view_image 注册与否，提示词和工具表都不一样"
+    assert on == prompt_fingerprint(Settings(**base, openai_vision=True))

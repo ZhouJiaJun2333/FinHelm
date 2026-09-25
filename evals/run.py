@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 
 from data_agent.db.connection import Database
 from data_agent.domains import get_domain
-from data_agent.prompts import build_system_prompt
+from data_agent.app import build_application
 from data_agent.settings import Settings
 
 from .cases import CaseSet, load_cases
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> None:
         "trials": args.trials,
         "started": f"{started:%Y-%m-%d %H:%M:%S}",
         "domain": domain.name,
-        "prompt_sha1": hashlib.sha1(build_system_prompt(domain).encode()).hexdigest()[:12],
+        "prompt_sha1": prompt_fingerprint(settings),
         "max_steps": settings.max_steps,
         **_git(),
     }
@@ -213,6 +213,20 @@ def _regrade(run_dir: Path, meta: dict, case_set: CaseSet, trials: list[Trial]) 
             f.write(json.dumps(t.to_dict(), ensure_ascii=False, default=str) + "\n")
     meta["regraded"] = f"{datetime.now():%Y-%m-%d %H:%M:%S}（题库 {case_set.sha1}，判分器 {_git()['git']}）"
     print(f"按现在的规则重判了 {len(trials)} 个 trial")
+
+
+def prompt_fingerprint(settings: Settings) -> str:
+    """系统提示词 + 工具定义的指纹，按这次真正会组装出来的 Agent 算。
+
+    提示词按注册了哪些工具拼（沙箱、view_image 开没开），只按场景包算的话，
+    开关不同的两次运行指纹一样，报告里就看不出提示词变过。不启动沙箱（第一次调用才起容器）。
+    """
+    app = build_application(settings)
+    try:
+        text = app.agent.system_prompt + json.dumps(app.tools.schemas(), ensure_ascii=False, sort_keys=True)
+    finally:
+        app.close()
+    return hashlib.sha1(text.encode()).hexdigest()[:12]
 
 
 def _database(settings: Settings, schema: str | None, cases: list) -> Database | None:
