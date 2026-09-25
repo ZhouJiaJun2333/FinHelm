@@ -1,12 +1,4 @@
-"""数据访问层：所有真正碰数据库的代码都在这一层。
-
-tools/sql/ 下的工具只调用这里的方法，不自己写连接管理。
-好处是以后换 MySQL / ClickHouse，只要实现一个同样接口的类，工具代码不用动。
-
-⚠️ 安全设计（两道防线，不依赖任何单点）：
-    第一道 —— 这里：只读事务 + 语句超时 + 强制 LIMIT
-    第二道 —— 数据库：agent_ro 账号物理上就没有写权限（见 docker/initdb/03_readonly_role.sql）
-"""
+"""数据访问层：只读事务 + 语句超时 + 行数上限。账号本身也没有写权限（docker/initdb/03_readonly_role.sql）。"""
 
 from __future__ import annotations
 
@@ -32,25 +24,20 @@ class QueryResult:
 
 
 class Database:
-    """一个很薄的 Postgres 封装。
-
-    为什么不用 SQLAlchemy？这个项目的重点是搞懂 Agent，不是 ORM。
-    直连 psycopg 代码更少、更透明，出了问题一眼能看到 SQL。
-    """
+    """很薄的 psycopg 封装，出了问题一眼能看到 SQL。"""
 
     def __init__(self, dsn: str, *, statement_timeout_ms: int = 30_000,
                  search_path: str | None = None) -> None:
         self._dsn = dsn
         self._statement_timeout_ms = statement_timeout_ms
-        # SQL 里不写 schema 前缀时去哪找表。BIRD 的标准 SQL 都不带前缀（FROM account），
-        # 设成场景包的 schema，Agent 的 SQL 和标准 SQL 就都能跑
+        # SQL 不写 schema 前缀时去哪找表（BIRD 的标准 SQL 都不带前缀）
         self._search_path = search_path
 
     # ------------------------------------------------------------------
     def _connect(self) -> psycopg.Connection:
         conn = psycopg.connect(self._dsn, autocommit=True)
         with conn.cursor() as cur:
-            # 双保险：即使连的是有写权限的账号，这个连接也只能读
+            # 连的是有写权限的账号，这个连接也只能读
             cur.execute("SET default_transaction_read_only = on")
             cur.execute(f"SET statement_timeout = {self._statement_timeout_ms}")
             if self._search_path:
@@ -58,7 +45,7 @@ class Database:
         return conn
 
     def ping(self) -> str:
-        """连通性检查，返回服务端版本。启动时跑一次，比跑到一半才报错友好。"""
+        """返回服务端版本。启动时跑一次。"""
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT version()")
             return cur.fetchone()[0]
@@ -66,11 +53,7 @@ class Database:
     # ------------------------------------------------------------------
     def query(self, sql: str, params: tuple[Any, ...] | None = None,
               *, max_rows: int = 200) -> QueryResult:
-        """执行一条只读查询。
-
-        max_rows 是硬上限：多取一行用来判断「是不是还有更多」，
-        但只返回 max_rows 行。不能让一条 SELECT * 把整个上下文撑爆。
-        """
+        """执行一条只读查询。多取一行判断是不是还有更多，只返回 max_rows 行。"""
         started = time.perf_counter()
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(sql, params)

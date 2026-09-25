@@ -1,11 +1,4 @@
-"""Schema 自省：从 information_schema / pg_catalog 里读出库的结构。
-
-这是数据分析 Agent 的「眼睛」。模型写 SQL 之前必须先看到表结构，
-否则它只能瞎猜列名 —— 然后你会看到一堆 column "xxx" does not exist。
-
-顺便把 COMMENT 也读出来：表注释和列注释是**最廉价的业务上下文**，
-写在数据库里，Agent 自动就能读到，不用塞进提示词。
-"""
+"""Schema 自省：表、列、约束，连同 COMMENT（最廉价的业务上下文，跟着表走，不占提示词）。"""
 
 from __future__ import annotations
 
@@ -82,10 +75,7 @@ class SchemaInspector:
 
     # ------------------------------------------------------------------
     def constraints_of(self, schema: str, table: str) -> list[str]:
-        """主键 / 外键 / 唯一约束的人类可读描述。
-
-        外键尤其重要 —— 它告诉模型这些表**怎么 JOIN**。
-        """
+        """主键 / 外键 / 唯一约束。外键告诉模型怎么 JOIN。"""
         rows = self.db.query_dicts(
             """
             SELECT pg_get_constraintdef(con.oid) AS definition,
@@ -103,11 +93,7 @@ class SchemaInspector:
 
     # ------------------------------------------------------------------
     def overview(self) -> str:
-        """一段塞进系统提示词的库概览。
-
-        只放表名、行数、注释 —— 详细列信息让模型用 describe_table 自己查。
-        全部塞进提示词会又长又贵，而且模型反而抓不住重点。
-        """
+        """塞进系统提示词的库概览：只放表名、行数、注释，列信息让模型用 describe_table 查。"""
         tables = self.list_tables()
         if not tables:
             return "[数据库] 没有找到任何表。"

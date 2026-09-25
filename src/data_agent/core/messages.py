@@ -1,12 +1,4 @@
-"""统一的消息 / 工具调用结构 —— 整个 Agent 的「通用语」。
-
-为什么要单独一层？
-    不同厂商的消息格式差别很大：Anthropic 用 content blocks（text / tool_use /
-    tool_result / thinking），OpenAI 用 tool_calls + role="tool"，参数一个是 dict
-    一个是 JSON 字符串。如果主循环直接操作厂商格式，换模型就得重写一遍。
-
-    所以这里定义一套中立结构：core / tools 只认它，格式翻译全部关在 llm/ 里面。
-"""
+"""中立的消息 / 工具调用结构。core 和 tools 只认它，各厂商格式的翻译都关在 llm/ 里。"""
 
 from __future__ import annotations
 
@@ -18,15 +10,9 @@ Role = Literal["system", "user", "assistant", "tool"]
 
 @dataclass(frozen=True, slots=True)
 class Usage:
-    """一次模型调用的 token 用量（已归一化）。
+    """一次调用的 token 用量，统一成互不重叠的四块（各家「输入」口径不同，provider 负责拆）。
 
-    ⚠️ 各家的「输入 token」口径不一样，这是算错上下文大小最常见的原因：
-
-        Anthropic   input_tokens **不含**缓存部分，完整输入 = input + 读缓存 + 写缓存
-        OpenAI 系   prompt_tokens **已含**缓存命中部分
-
-    这里统一成「互不重叠的四块」，各 provider 负责拆分。上层只用这四个字段，
-    不用关心厂商叫它什么、包不包含。
+    Anthropic 的 input_tokens 不含缓存部分；OpenAI 系的 prompt_tokens 已含缓存命中。
     """
 
     input: int = 0          # 没走缓存、按全价计费的输入
@@ -36,15 +22,12 @@ class Usage:
 
     @property
     def prompt_tokens(self) -> int:
-        """这次请求的完整输入：系统提示词 + 工具定义 + 全部历史消息。"""
+        """完整输入：系统提示词 + 工具定义 + 全部消息。"""
         return self.input + self.cache_read + self.cache_write
 
     @property
     def context_tokens(self) -> int:
-        """这次回复之后，对话一共占多少上下文。
-
-        要加上 output：这次的回复会原样进历史，下一次请求就是输入的一部分。
-        """
+        """这次回复之后对话占多少上下文（回复会进历史，所以加上 output）。"""
         return self.prompt_tokens + self.output
 
     def __add__(self, other: "Usage") -> "Usage":
@@ -58,7 +41,7 @@ class Usage:
 
 @dataclass(frozen=True, slots=True)
 class ToolCall:
-    """模型发出的一次工具调用请求。注意：它只是「请求」，执行的是我们自己的代码。"""
+    """模型发出的一次工具调用请求（执行的是我们自己的代码）。"""
 
     id: str                      # 调用 ID，回传结果时必须原样带上
     name: str                    # 工具名
@@ -67,58 +50,34 @@ class ToolCall:
 
 @dataclass(frozen=True, slots=True)
 class MessageMeta:
-    """挂在消息上、**只在本地用、不发给模型**的信息。
+    """只在本地用、不发给模型的信息。要给消息加本地信息就加在这里，别加在 Message 上。"""
 
-    和 Message 的其余字段分开放，是为了让边界一眼可见：
-        Message 本身的字段   → provider 会翻译成请求体发出去
-        meta 里的字段        → 只给上下文管理、记账、界面用，provider 碰都不碰
-
-    以后要给消息加本地信息（来源、时间、检索片段 ID…），加在这里，
-    不要再往 Message 上加字段 —— 那会让「什么会发给模型」越来越说不清。
-    """
-
-    # 只有模型真实返回的 assistant 消息才带。它是估算上下文大小的「锚点」：
-    # 这条消息之前（含它自己）的 token 数是 API 报的精确值，之后的才需要估。
-    # 挂在消息上而不是 Agent 上：一轮失败被回滚时，它跟着消息一起消失。
+    # 模型真实返回的 assistant 消息才带：估算上下文大小的锚点。挂在消息上，回滚时跟着消失
     usage: Usage | None = None
 
-    # usage 是在哪份视图上量的：这条消息**之前**那段视图的指纹，由 Context.add 盖上。
-    # 之后不管哪种编辑策略改了它前面的内容，指纹就对不上，这个 usage 自动作废。
+    # usage 是在哪份视图上量的（前缀指纹，Context.add 盖上）；前缀被改了 usage 就作废
     measured_on: str | None = None
 
-    # 工具结果的一句话摘要（「42 行 × 4 列（region, gmv, …）」），由工具自己给。
-    # 结果被清理时，它留在占位文字里当线索（可恢复的压缩）。
+    # 工具给的一句话摘要，结果被清理时留在占位里当线索
     summary: str = ""
 
-    # Agent 自己补的消息：finish_turn 的 nudge、步数耗尽时的兜底回答。
-    # 它们不是真人说的话，也不是模型真实的输出。发给模型时和普通消息没区别，
-    # 只影响本地怎么认它 —— 比如 nudge 虽然是 role="user"，却不算新回合的开头。
-    # （Claude Code 给这类消息标 isMeta，是同一回事。）
+    # Agent 自己补的消息（nudge、步数耗尽的兜底），不是真人说的。Claude Code 叫 isMeta
     synthetic: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """一条对话消息。
-
-    **不可变**（frozen）。上下文管理要「改」一条消息时，只能生成新对象 ——
-    原消息还在历史和快照里，原地修改会让回滚恢复出被改过的内容。
-    以前这条规则只写在注释里，现在由语言保证：直接赋值会抛异常。
-    需要改的时候用 dataclasses.replace() 或下面的 with_meta()。
-    """
+    """一条对话消息。不可变：上下文管理要「改」只能生成新对象，否则回滚会恢复出改过的内容。"""
 
     role: Role
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_call_id: str | None = None   # role="tool" 时，对应哪次调用
-    # role="tool" 时：这次调用失败了（报错、被拒绝）。Anthropic 翻译成 tool_result 的 is_error；
-    # OpenAI 系没有这个字段，靠 content 里的报错文字。上下文清理不清失败的结果。
+    # role="tool" 时这次调用失败了。上下文清理不清失败的结果
     is_error: bool = False
 
-    # provider 的原生 content（比如 Anthropic 的 content blocks 列表）。
-    # 回传历史时优先用它 —— 自己拼 text 回去会丢掉 thinking 块等信息。
-    # 必须是**纯 JSON 数据**（dict / list / str / 数字），不能是 SDK 对象：会话日志原样存盘、
-    # 恢复会话时原样读回来再发出去（session/codec.py）。provider 负责 model_dump。
+    # provider 的原生 content（thinking 块、reasoning_content 等），回传时优先用它。
+    # 必须是纯 JSON 数据：会话日志要原样存盘、读回
     raw: Any = None
 
     meta: MessageMeta = field(default_factory=MessageMeta)
@@ -181,6 +140,6 @@ class LLMResponse:
             content=self.text,
             tool_calls=self.tool_calls,
             raw=self.raw_content,
-            # 全 0 说明厂商没报用量（有些兼容接口会这样），不能当锚点用
+            # 全 0 = 厂商没报用量，不能当锚点
             meta=MessageMeta(usage=self.usage if self.usage.context_tokens > 0 else None),
         )

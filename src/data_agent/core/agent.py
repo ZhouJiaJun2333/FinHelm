@@ -1,20 +1,6 @@
-"""Agent 主循环 —— 整个项目的心脏。
+"""Agent 主循环：请求模型 → 有工具调用就执行、把结果放回历史 → 直到模型不再调工具。
 
-一个 Agent 的本质就是这个循环：
-
-    while True:
-        response = 模型(历史, 工具表)
-        if 没有工具调用:
-            结束，返回答案
-        执行所有工具调用，把结果塞回历史
-
-就这么简单。剩下的复杂度全在「历史怎么管」「工具怎么写」「提示词怎么写」上，
-所以那三块各自是独立模块。
-
-这个文件刻意不 import 任何具体的工具、厂商、数据库。它只依赖三个抽象，都在 core 里：
-    LLMProvider （core/provider.py）
-    ToolRegistry（core/tools.py）
-    BaseContext （core/context/）
+只依赖 core 里的三个抽象：LLMProvider、ToolRegistry、BaseContext。
 """
 
 from __future__ import annotations
@@ -45,26 +31,20 @@ from .tools import ToolRegistry
 ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]
 
 
-# ------------------------------------------------------------------ finishTurn
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
-    """一轮结束时交给钩子判断的材料。"""
+    """一步结束时交给 finish_turn_hook 判断的材料。"""
 
     step: int
     response: LLMResponse
-
-    # ⚠️ 语义是「模型**请求**了工具」，不是「工具真的跑成功了」。
-    #    它在执行之前就赋值，所以被审批钩子拒掉的调用也算 True。
-    #    想知道工具到底跑没跑、结果如何，订阅 ToolFinished / ToolDenied 事件。
+    # 模型**请求**了工具（被审批拒掉的也算），不代表工具跑成功了
     requested_tools: bool
 
 
 @dataclass(frozen=True, slots=True)
 class TurnDecision:
-    """钩子的判断结果：这一轮之后该收工还是继续。"""
-
     action: Literal["end", "continue"]
-    nudge: str = ""          # continue 且本轮没跑工具时，用它推动模型继续
+    nudge: str = ""          # continue 且这一步没调工具时，用它推动模型继续
 
     @staticmethod
     def end() -> "TurnDecision":
@@ -75,11 +55,7 @@ class TurnDecision:
         return TurnDecision("continue", nudge)
 
 
-# 决定「这一轮之后要不要继续」的钩子。
-#
-# 不装钩子时用默认规则：有工具调用就继续，没有就结束。
-# 装上钩子，你就能表达「模型以为自己答完了，但我检查后觉得没完成，让它接着干」——
-# 这正是把「结束条件」从主循环里搬出来的意义（pi 的 finishTurn 是同一个设计）。
+# 决定「这一步之后收工还是继续」。不装时：调了工具就继续，没调就结束（pi 的 finishTurn）
 FinishTurnHook = Callable[[TurnOutcome], TurnDecision]
 
 
@@ -99,8 +75,6 @@ class Agent:
         self.llm = llm
         self.tools = tools
         self.system_prompt = system_prompt
-        # 写 is None 而不是 `context or Context()`：「空的」和「没传」是两回事，
-        # 别让对象的真假值决定用不用它。
         self.context = context if context is not None else Context()
         self.max_steps = max_steps
         self.approval_hook = approval_hook
@@ -109,33 +83,16 @@ class Agent:
         # 会话开始时拼到系统提示词末尾的内容（库概览，以后的记忆索引）。只算一次
         self.session_context = session_context
         self._system: str | None = None
-
-        # 本次会话一共花了多少 token —— 算钱用，和「上下文多大」是两回事。
-        #
-        # ⚠️ 它和历史里的锚点对回滚的态度**正好相反**：
-        #    失败的一轮会从历史里抹掉（锚点跟着消失），但那几次调用的钱已经花了，
-        #    所以这里不回滚。/reset 也不清零。
+        # 本次会话花了多少 token。钱花了就是花了：失败的一轮回滚历史，但不回滚这里
         self.session_usage = Usage()
 
     # ------------------------------------------------------------------
     def run(self, user_input: str) -> str:
-        """跑一轮完整对话（内部可能调用多次工具），返回最终回答。
+        """跑一轮对话，返回最终回答。
 
-        **事务语义：要么完整完成，要么历史回到进来之前的样子。**
-
-        为什么必须这样：一轮失败时（截断、模型拒绝、网络错、Ctrl-C），历史里会
-        留下半截状态：
-
-            工具调用后失败  → assistant 有 tool_calls 却没有对应结果
-                              两家都 400，而且**之后每一轮**都 400 ——
-                              一次失败升级成整个会话报废，只能 /reset
-            提问后失败      → [user]，用户再问一次 → [user, user]
-                              不报错（两家都会把连续 user 合并成一条），
-                              但模型看到的是「同一个问题问了两遍」，
-                              或者上一个没答的问题混进了新问题里
-
-        第一种是致命的，第二种是静默的 —— 不报错，只是答案莫名其妙地变怪。
-        一个 snapshot/restore 把两种都兜住，不用分别打补丁。
+        事务：要么完整完成，要么历史回到进来之前。半截的一轮会毒化历史——
+        tool_call 没有结果，之后每次请求都 400；只有提问没有回答，下一次提问会和它粘在一起。
+        用 finally 而不是 except，连 Ctrl-C 一起兜住。
         """
         snapshot = self.context.snapshot()
         completed = False
@@ -144,28 +101,22 @@ class Agent:
             completed = True
             return answer
         finally:
-            # 用 finally 而不是 except，是为了连 KeyboardInterrupt 一起兜住 ——
-            # 用户 Ctrl-C 打断的半截回合同样会毒化历史。
             if not completed:
                 self.context.restore(snapshot)
 
     # ------------------------------------------------------------------
     def _run_turn(self, user_input: str) -> str:
-        """run() 的实际循环体。失败时由 run() 负责回滚，这里只管往前跑。"""
         self.context.add(Message.user(user_input))
 
         for step in range(1, self.max_steps + 1):
             system = self._render_system_prompt()
             tools = self.tools.schemas()
 
-            # 发请求之前给上下文一次整理的机会（超阈值就清理旧工具结果之类）。
-            # 放在循环里、而不是只在一轮开头：一轮里可能连调十几次工具，
-            # 上下文在一轮**之内**就可能涨过阈值。
+            # 每一步都整理：一轮里连调十几次工具，上下文在一轮之内就可能涨过阈值
             self._maintain(system, tools)
 
             response = self._chat(step, system, tools)
-            # 在分诊之前记账：被截断的回复同样收费。
-            self.session_usage += response.usage
+            self.session_usage += response.usage      # 被截断的回复同样收费，先记账
             self.on_event(LLMResponded(
                 step=step,
                 text=response.text,
@@ -174,26 +125,11 @@ class Agent:
                 context_window=self.llm.context_window,
             ))
 
-            # 先分诊，**再**决定要不要写进历史 —— 顺序很重要。
-            #
-            # 被截断/被拒绝的回复不可信，绝不能留在历史里：
-            #   · 半截话会被模型当成自己已经说过的结论，下一轮接着往下编
-            #   · 更致命：截断发生在工具调用中途时，历史里会留下一个
-            #     没有结果的 tool_call，下一次请求直接 400 —
-            #         An assistant message with 'tool_calls' must be followed
-            #         by tool messages responding to each 'tool_call_id'
-            #     而且这个错是**永久**的：坏消息一直躺在历史里，此后每一轮
-            #     都报同样的错，用户只能 /reset 清空整个对话。
-            #     一轮失败变成整个会话报废。
-            #
-            # 「不让它进去」比「进去了再删」干净：没有回滚逻辑，也不会有中间状态。
+            # 先查 stop_reason 再进历史：截断、被拒的回复不可信，不能让它进去
             self._check_stop_reason(response)
 
             self.context.add(response.to_message())
 
-            # 注意是「请求了工具」，不是「工具跑成功了」—— 见 TurnOutcome 的注释。
-            # 这里必须在 _execute 之前取值：循环跑完后 response 不会变，
-            # 但放在后面容易让人误以为它反映的是执行结果。
             requested_tools = bool(response.tool_calls)
             for call in response.tool_calls:
                 self._execute(call)
@@ -203,30 +139,14 @@ class Agent:
                 return response.text
 
             if not requested_tools:
-                # 本轮没有工具结果，历史以 assistant 结尾。必须补一条 user 消息：
-                # 以 assistant 结尾发请求，Anthropic 会当成 prefill（让模型接着
-                # 这段往下写），Opus 4.6 之后的模型不支持 prefill，直接 400。
-                # 标成 synthetic：它是 user 角色，但不是真人的新问题，不能算新回合的开头。
+                # 历史以 assistant 结尾不能直接再请求（Anthropic 会当成 prefill，新模型直接 400），
+                # 补一条 nudge。标成 synthetic：它不是真人的新问题，不算新回合的开头
                 nudge = decision.nudge or "请继续完成上面的任务。"
                 self.context.add(Message.user(nudge).with_meta(synthetic=True))
                 self.on_event(TurnContinued(step=step, nudge=nudge))
 
-        # 步数耗尽 —— 循环是被强行打断的，模型没机会说收尾那句话。
-        #
-        # ⚠️ 这条兜底消息**必须进历史**，不能只 return 给用户。两个理由：
-        #
-        # 1. 模型知情：不进历史的话，下一轮模型完全不知道上一轮卡住了，
-        #    很可能原样再试一遍同样的死路。
-        #
-        # 2. 历史形状：正常一轮总是以 assistant 收尾。这里不补的话，历史会以
-        #    tool 结果（模型一直在调工具）或 nudge 的 user 消息（finish_turn
-        #    一直说继续）结尾。用户下一次提问再追加一条 user，就变成：
-        #        [..., tool,        user]  → Anthropic 把 tool_result 包进
-        #                                    user 消息，和新问题合并成一条
-        #        [..., user(nudge), user]  → nudge 和新问题合并成一条
-        #    不报错，但新问题前面粘着一段上一轮的残留。
-        #    被截断之类走的是异常路径，由 run() 的事务兜住；这里是**正常返回**，
-        #    事务照常提交 —— 所以必须在这里自己收尾。
+        # 步数耗尽：兜底回答也要进历史，让模型下一轮知道上一轮卡住了，
+        # 也保证历史以 assistant 结尾（正常返回，事务不会替我们收尾）
         self.on_event(StepLimitReached(self.max_steps))
         fallback = (
             f"已达到最大步数 {self.max_steps} 仍未得出结论。"
@@ -237,13 +157,7 @@ class Agent:
 
     # ------------------------------------------------------------------
     def _chat(self, step: int, system: str, tools: list) -> LLMResponse:
-        """请求模型。API 报上下文超长时，强制整理一次再试 —— 只试一次。
-
-        我们的估算说没超、API 说超了：估算偏小，或者配置的窗口比实际大。
-        这时阈值已经不可信，所以不看阈值，能清的清、能压的压（pi 的 overflow 触发
-        是同一个思路）。整理不出东西（比如只有当前这一轮），或者整理完还超，
-        那就是真的装不下了，异常照常抛出去，这一轮按事务回滚。
-        """
+        """请求模型。API 报上下文超长时，不看阈值强制整理一次再重试，只试一次。"""
         try:
             return self.llm.chat(messages=self.context.render(), tools=tools, system=system)
         except ContextOverflow:
@@ -253,11 +167,7 @@ class Agent:
             return self.llm.chat(messages=self.context.render(), tools=tools, system=system)
 
     def _maintain(self, system: str, tools: list, *, force: bool = False) -> list[Event]:
-        """让上下文整理一次，事件转发给界面。返回做了什么（空 = 什么都没做）。
-
-        system / tools 是马上要发的这次请求用的：量大小要算上它们；写摘要时原样带上，
-        才能和平时的请求共用前缀、命中缓存。
-        """
+        """让上下文整理一次。system / tools 用来量大小，写摘要时原样带上以命中缓存。"""
         events = self.context.maintain(self._measure(system, tools), force=force,
                                        prompt=Prompt(system, tuple(tools)))
         for event in events:
@@ -266,18 +176,12 @@ class Agent:
         return events
 
     def _measure(self, system: str, tools: list) -> Measure:
-        """给上下文用的尺子：一份消息列表发出去（带上系统提示词和工具定义）大概多大。"""
         overhead = estimate_overhead(system, tools)
         return lambda msgs: estimate_context(msgs, overhead=overhead).tokens
 
     # ------------------------------------------------------------------
     def _check_stop_reason(self, response: LLMResponse) -> None:
-        """看模型「为什么停下来」，把不可信的那几种拦掉。
-
-        为什么不能只看 tool_calls：被 max_tokens 截断时同样没有 tool_calls，
-        但那是话说到一半被砍了。静默地把半句话当答案返回，是这类系统里
-        最难排查的一种 bug —— 不报错、不告警，只是答案莫名其妙地不完整。
-        """
+        """被截断时同样没有 tool_calls，不查 stop_reason 就会把半句话当答案返回。"""
         if response.truncated:
             raise OutputTruncated(
                 f"模型输出被截断（stop_reason={response.stop_reason}），这不是「完成」。"
@@ -298,34 +202,18 @@ class Agent:
                 "NORMAL_STOP_REASONS。"
             )
 
-    # ------------------------------------------------------------------
     def _decide_next(self, outcome: TurnOutcome) -> TurnDecision:
-        """这一轮之后，收工还是继续？
-
-        默认规则（和没加钩子之前的行为完全一致）：
-            请求了工具 → 继续（要把结果喂回去让它接着想）
-            没请求工具 → 结束（模型认为任务完成了）
-
-        注意「请求了工具」包含被审批钩子拒掉的情况 —— 那时历史里是一条
-        「已拒绝」的 tool_result，同样需要再跑一轮让模型看到并改道。
-
-        装上 finish_turn_hook 就能覆盖它。典型用途：
-            · 模型说完了但你检查发现少了关键内容 → keep_going("还缺占比，补上")
-            · 达到某个业务条件就强制收工       → end()
-            · 输出格式不合规就打回重做
-        """
         if self.finish_turn_hook is None:
             return TurnDecision.keep_going() if outcome.requested_tools else TurnDecision.end()
         return self.finish_turn_hook(outcome)
 
-    # ------------------------------------------------------------------
     def _execute(self, call: ToolCall) -> None:
         self.on_event(ToolStarted(name=call.name, arguments=call.arguments))
 
         if self.approval_hook is not None:
             allowed, reason = self.approval_hook(call)
             if not allowed:
-                # 被拒绝也要给模型一条结果，否则它不知道发生了什么，会一直重试
+                # 被拒绝也要给模型一条结果，否则 tool_call 没有配对，它也不知道发生了什么
                 self.context.add(Message.tool_result(call.id, f"用户拒绝执行：{reason}", is_error=True))
                 self.on_event(ToolDenied(name=call.name, reason=reason))
                 return
@@ -349,19 +237,12 @@ class Agent:
         return self._system
 
     def context_usage(self) -> ContextEstimate:
-        """如果现在发下一次请求，输入大概有多大。
-
-        估的是 render() 之后的消息，也就是真正会发出去的那份。
-        """
+        """如果现在发下一次请求，输入大概有多大（按 render() 之后真正会发的那份估）。"""
         overhead = estimate_overhead(self._render_system_prompt(), self.tools.schemas())
         return estimate_context(self.context.render(), overhead=overhead)
 
     def compact(self) -> list[Event]:
-        """手动整理上下文（/compact）：不看阈值，能清的清、能压的压。
-
-        和 run() 一样是事务：写摘要失败时，历史回到调用之前的样子。
-        返回做了什么；空列表 = 没什么可整理的（比如只有一轮对话）。
-        """
+        """手动整理（/compact）：不看阈值。和 run() 一样是事务，失败时历史不变。"""
         snapshot = self.context.snapshot()
         try:
             return self._maintain(self._render_system_prompt(), self.tools.schemas(), force=True)

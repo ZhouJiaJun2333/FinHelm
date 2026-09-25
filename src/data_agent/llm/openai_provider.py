@@ -1,21 +1,7 @@
-"""OpenAI 兼容后端。
+"""OpenAI 兼容后端（DeepSeek、通义、Kimi、智谱、vLLM…，换 base_url + model 就行）。
 
-DeepSeek / 通义千问 / Kimi / 智谱 / 本地 vLLM、Ollama 都提供 OpenAI 兼容接口，
-换一家只要换 base_url + model，代码完全一样。
-
-和 Anthropic 的三个格式差异：
-1. system 是 messages 里的第一条，不是顶层参数。
-2. 工具调用的参数是 **JSON 字符串**，不是 dict，要自己 json.loads。
-   有些模型会吐出不合法的 JSON，必须兜住 —— 不能让一次解析失败把整个 Agent 搞崩。
-3. 思考模型（deepseek-flash、各家的 reasoning 模型）会多返回一个
-   `reasoning_content` 字段，而且**要求回传时原样带上**，否则 400：
-       The `reasoning_content` in the thinking mode must be passed back to the API.
-   所以这里和 Anthropic provider 一样，把原生 message 存进 Message.raw，
-   回传时优先用它。
-
-   ⚠️ 这里曾经写着「OpenAI 格式能从中立结构无损还原，不需要存原生内容」——
-      那句话是错的。当时没出事纯属运气：调工具时 content 恰好是空的，
-      绕过了服务端校验。**别假设中立结构能覆盖所有厂商的私有字段。**
+和 Anthropic 的差异：system 是 messages 第一条；工具参数是 JSON 字符串（可能不合法，要兜住）；
+思考模型的 reasoning_content 回传时必须原样带上，否则 400 —— 所以原生 message 存进 Message.raw。
 """
 
 from __future__ import annotations
@@ -45,7 +31,6 @@ class OpenAICompatibleProvider(LLMProvider):
         self.model = model
         self.max_tokens = max_tokens
         self.context_window = context_window
-        # 兼容接口背后是什么模型都有可能，会不会思考只能靠配置告诉它
         self.native_thinking = native_thinking
 
     # ------------------------------------------------ 中立格式 -> 厂商格式
@@ -78,8 +63,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
             elif msg.role == "assistant":
                 if msg.raw is not None:
-                    # 原生 message 原样回传，保住 reasoning_content 这类私有字段。
-                    # 自己从中立结构拼回去一定会丢东西。
+                    # 原样回传，保住 reasoning_content 这类私有字段
                     out.append(dict(msg.raw))
                 else:
                     item: dict[str, Any] = {
@@ -138,8 +122,7 @@ class OpenAICompatibleProvider(LLMProvider):
             try:
                 arguments = json.loads(call.function.arguments or "{}")
             except json.JSONDecodeError:
-                # 模型吐了非法 JSON。不要崩 —— 传个特殊标记下去，
-                # pydantic 校验会失败，错误信息自然会回到模型那里让它重来。
+                # 非法 JSON 不崩：交给 pydantic 校验失败，错误会回到模型那里
                 arguments = {"__invalid_json__": call.function.arguments}
             tool_calls.append(
                 ToolCall(id=call.id, name=call.function.name, arguments=arguments)
@@ -148,8 +131,7 @@ class OpenAICompatibleProvider(LLMProvider):
         return LLMResponse(
             text=(message.content or "").strip(),
             tool_calls=tool_calls,
-            # 存原生 message（含 reasoning_content 等厂商私有字段），回传时原样用它。
-            # exclude_none 去掉 refusal / audio 这些没用到的空字段，请求体干净些。
+            # exclude_none：去掉 refusal / audio 这类空字段
             raw_content=message.model_dump(exclude_none=True),
             usage=self.convert_usage(resp.usage),
             stop_reason=choice.finish_reason,
@@ -157,14 +139,8 @@ class OpenAICompatibleProvider(LLMProvider):
 
     @staticmethod
     def convert_usage(u: Any) -> Usage:
-        """OpenAI 系的 prompt_tokens **已经包含**缓存命中的部分，要拆出来。
-
-        缓存命中数各家放的位置不一样：
-            OpenAI    prompt_tokens_details.cached_tokens
-            DeepSeek  prompt_cache_hit_tokens（顶层私有字段，SDK 里是 extra 属性）
-        都没有就当 0。缓存写入 OpenAI 系一般不单独报（写缓存不额外收费）。
-
-        有些兼容接口干脆不返回 usage，那就全 0 —— to_message() 不会拿它当锚点。
+        """prompt_tokens 已含缓存命中，要拆出来。命中数 OpenAI 放在 prompt_tokens_details.cached_tokens，
+        DeepSeek 放在顶层的 prompt_cache_hit_tokens。没有 usage 就全 0（不会被当成锚点）。
         """
         if u is None:
             return Usage()

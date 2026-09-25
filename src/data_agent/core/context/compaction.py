@@ -1,32 +1,12 @@
-"""编辑工序：上下文还是太大时，把较早的回合交给模型写成摘要。有损，所以最后才用。
+"""工序：清理之后上下文还太大，把较早的回合交给模型写成摘要。有损，所以排在清理后面。
 
     压缩前：问1 答1 … 问7 答7 │ 问8 答8 问9 工具…（进行中）
-                              ↑ 切口：落在一次真人提问上
+                              ↑ 切口：落在一次真人提问上，至少保留当前这一轮
     压缩后：[摘要(问1~7)] 问8 答8 问9 工具…
 
-和清理工具结果的分工：
-    清理  几乎无损（数据能重查，占位留线索），10 万就做
-    压缩  有损（细节概括掉就找不回来，还要多花一次调用），清理之后还超 15 万才做
-所以它排在 ClearOldToolResults **后面**：只有清理不够时才轮到它；
-交给模型写摘要的也是清理过的视图，这次请求本身不会太大。
-
-── 学 pi 的地方 ────────────────────────────────────────────────────
-    · 保留最近约 2 万 token 的原文（pi 的 keepRecentTokens），其余换成摘要
-    · 切口不落在工具结果上（tool_call 和结果必须成对）
-    · 摘要滚动更新：第二次压缩时，输入里带着上一份摘要，要求保留并更新它
-    · 摘要是一个标记，原文还在历史里（pi 是日志里的一条 compaction 记录）
-
-── 和 pi 不一样的地方 ──────────────────────────────────────────────
-    · 写摘要不把对话序列化成文本，而是原样发、末尾追加要求（学 Claude Code），
-      和平时的请求共用前缀、命中缓存。评测数据见 llm_summarizer
-    · 切口只落在**真人提问**上（turns.turn_starts），且至少保留当前这一轮。
-      pi 能切在一轮中间（split turn），再给前半轮单写一份摘要。我们一轮最多
-      十几步、轮内膨胀有清理兜着，先不做。
-    · pi 用 firstKeptEntryId 记切口，我们的消息没有 ID，改记「标记之前保留
-      最近几轮」。标记在历史里的位置固定，往前数出来的切口也固定，apply 仍是纯函数。
-    · 摘要不单独占一条 user 消息，而是并进第一条保留的提问前面。连续两条 user
-      API 反正会合并成一条；我们自己合并，守住「user / assistant 严格交替」
-      这个不变量（见 base.py 的说明）。
+学 pi：保留最近约 2 万 token 原文；滚动摘要（上一份摘要一起交给模型更新）；摘要是一个标记。
+和 pi 不同：写摘要原样发对话、共用缓存（学 Claude Code）；不在一轮中间切；
+摘要并进第一条保留的提问前面，守住 user / assistant 交替。
 """
 
 from __future__ import annotations
@@ -50,11 +30,10 @@ class Summary:
 
 
 class Summarize(Protocol):
-    """把一段对话写成摘要。作为参数注入：context 包不用关心是哪个模型写的，测试里传个假函数就行。
+    """把一段对话写成摘要。注入进来：测试里传个假函数就行。
 
-    messages  要压掉的那些消息（可能以上一份摘要开头）—— 正好是上一次请求的**开头一段**
-    prompt    上一次请求的系统提示词和工具定义。带上它们、原样发 messages，写摘要的请求
-              就和上一次请求共用前缀，能命中缓存（见 llm_summarizer）
+    messages 是要压掉的消息（可能以上一份摘要开头），正好是上一次请求的开头一段；
+    带上 prompt 原样发，就和上一次请求共用缓存前缀。
     """
 
     def __call__(self, messages: list[Message], prompt: Prompt | None = None) -> Summary: ...
@@ -77,13 +56,9 @@ class HistoryCompacted(Marker):
 
 
 class CompactHistory(ContextEdit):
-    """
-        summarize           写摘要的函数，一般用 llm_summarizer(llm)
-        trigger_tokens      请求估算（清理之后）超过它才压缩
-        keep_recent_tokens  保留多少最近的原文（按回合取整，至少保留当前这一轮）
-    """
+    """trigger_tokens：清理之后还超过它才压缩；keep_recent_tokens：保留多少最近的原文（按回合取整）。"""
 
-    # 并进第一条保留提问前面的内容。只依赖摘要本身 —— 同样的标记必须渲染出同样的文字。
+    # 只依赖摘要本身：同样的标记必须渲染出同样的文字
     SUMMARY_HEADER = (
         "[以下是本次会话较早部分的摘要。原始对话已被压缩，不在上下文里了；"
         "如果需要其中的细节（比如完整的查询结果），请重新查询。]\n\n"
@@ -102,13 +77,13 @@ class CompactHistory(ContextEdit):
 
     # ------------------------------------------------------------ 视图
     def apply(self, entries: list[Entry]) -> list[Entry]:
-        # 只看最后一个压缩标记：新摘要是在旧摘要基础上写的，已经包含了它。
+        # 只看最后一个压缩标记：新摘要已经包含了旧摘要
         at = _last_compaction(entries)
         if at is None:
             return list(entries)
         marker: HistoryCompacted = entries[at]  # type: ignore[assignment]
 
-        # 前面的工序（比如按回合裁剪）可能已经切掉了一些回合，剩下的不够数就全留
+        # 前面的工序可能已经切掉了一些回合，不够数就全留
         starts = turn_starts(entries[:at])
         kept = min(marker.kept_turns, len(starts))
         if kept == 0:
@@ -128,13 +103,10 @@ class CompactHistory(ContextEdit):
         if not force and measure_view() <= self.trigger_tokens:
             return None
 
-        # 在「已经套过自己」的视图上找切口：上一份摘要在开头，会被一起交给模型，
-        # 新摘要自然就是在旧摘要基础上更新的（滚动摘要）。
+        # 在套过自己的视图上找切口：上一份摘要在开头，一起交给模型更新（滚动摘要）
         view = self.apply(entries)
         starts = turn_starts(view)
-        # 强制时只留当前这一轮：
-        #   · 手动 /compact —— 用户明确要压；按 2 万 token 留原文的话，短对话什么都压不掉
-        #   · API 报超长   —— 只重试一次，这一次要压到最狠，重试才有把握装得下
+        # 强制时只留当前这一轮：/compact 是用户明确要压；API 报超长只重试一次，要压到最狠
         kept = 1 if force else self._turns_to_keep(view, starts)
         if len(starts) <= kept:
             return None                     # 只有当前这一轮，没有可压的
@@ -172,10 +144,8 @@ def _last_compaction(entries: list[Entry]) -> int | None:
 
 
 # ====================================================== 用模型写摘要
-# 对话原样留在前面（和上一次请求同一个前缀），末尾追加这一条。模型这时还是「数据分析师」、
-# 手边还有工具，所以开头先把话说死：这不是新问题，别调工具。
-# 小节参考 pi（目标 / 约束偏好 / 进度 / 关键决定 / 下一步 / 关键上下文）和
-# Claude Code 的 /compact，按数据分析场景改：表结构和数字是最贵的，丢了就得重查。
+# 追加在原样的对话后面。模型手边还有工具，所以开头先说死：这不是新问题，别调工具。
+# 小节参考 pi 和 Claude Code，按数据分析改：用户原话、口径、表结构、数字最不能丢。
 SUMMARY_PROMPT = """[这不是新的分析问题。上下文快满了，请先停下手上的工作，把上面到这里为止的整段对话写成一份摘要，
 之后的对话只能看到这份摘要，看不到原文。不要调用任何工具，不要继续回答之前的问题。]
 
@@ -215,23 +185,16 @@ SUMMARY_PROMPT = """[这不是新的分析问题。上下文快满了，请先�
   不要把旧摘要原样附在后面。
 {output_format}"""
 
-# 模型自己会思考：直接写
 DIRECT_OUTPUT = "- 直接输出摘要，不要开场白。"
 
-# 模型不会自己思考：先打草稿再写（Claude Code 的 <analysis> 做法）。
-# 写摘要最怕漏，先按顺序逐条过一遍，第 3 轮随口一句的限定才不会被略过。
-# 草稿是明文，排查「摘要漏了什么」时可以看；最终只保留 <summary> 里的内容。
+# 模型不会自己思考时先打草稿（Claude Code 的 <analysis>），逐条过一遍才不会漏掉随口一句的限定
 SCRATCHPAD_OUTPUT = """- 先在 <analysis> 标签里按时间顺序逐条过一遍对话：每条用户消息说了什么、定了什么口径、
   查到了什么数字、报过什么错。确认没有遗漏后，再在 <summary> 标签里输出摘要。
   <analysis> 只是草稿，不会被保留。"""
 
 
 def extract_summary(text: str) -> str:
-    """从回复里取出摘要正文：有 <summary> 就取里面的，没有就去掉草稿后取剩下的。
-
-    模型不一定听话 —— 可能忘了写结束标签，也可能根本没用标签。
-    宁可多留一点，也不要因为格式不对就把整份摘要扔掉。
-    """
+    """有 <summary> 取里面的，没有就去掉草稿取剩下的。标签没写全也不扔，宁可多留。"""
     summary = re.search(r"<summary>(.*?)(?:</summary>|$)", text, re.DOTALL)
     if summary:
         return summary.group(1).strip()
@@ -241,28 +204,14 @@ def extract_summary(text: str) -> str:
 def llm_summarizer(
     llm: LLMProvider, *, scratchpad: bool | None = None, max_tokens: int | None = None,
 ) -> Summarize:
-    """用 llm 写摘要。
+    """用 llm 写摘要：和上一次请求一模一样的系统提示词、工具、消息，末尾追加一条要求（学 Claude Code）。
 
-    Args:
-        scratchpad: 要不要让模型先在 <analysis> 里打草稿。默认看模型自己会不会
-                    思考（llm.native_thinking）：会思考的再打草稿等于想两遍，白花输出 token。
-        max_tokens: 这一次的输出上限。思考 token 也算输出，平时的上限可能不够。
+    前缀全部命中缓存。以前学 pi 序列化成文本发，一个 token 都命中不了；换过来后多轮评测里
+    写摘要命中 27% → 99%，摘要输出 5.8k → 1.6k token，准确率不变（2026-09-25）。
+    代价是模型可能去调工具：原样再发一次，还不写就算失败。
 
-    ── 为什么原样发（学 Claude Code） ────────────────────────────────
-    系统提示词、工具定义、消息都和上一次请求一模一样，只在末尾追加一条「请写摘要」，
-    前面几万 token 全部命中缓存。压缩发生在上下文最大的时候，这一次最贵。
-
-    以前学 pi：对话序列化成一段纯文本，换一个「摘要助手」的系统提示词、不带工具发 ——
-    模型只是在读一份记录，不会接着聊、不会调工具。但请求从第一个字就和平时不同，
-    一个 token 都命中不了。多轮评测（2026-09-25，DeepSeek 官方）里换过来之后：写摘要命中
-    27% → 99%，每段会话未命中少 35%，一份摘要的输出 5.8k → 1.6k token（原文就在上下文里，
-    不用把几万字的记录从头理一遍），准确率、回忆、用户定的口径都没掉。
-
-    代价是模型手边有工具，可能去调工具而不写摘要：那就原样再发一次（还是命中缓存，很便宜），
-    还不写就算失败，这一轮按事务回滚。
-
-    没传 prompt（调用方没说平时的请求长什么样）时不带系统提示词和工具发：照样能写，
-    只是吃不到缓存。Agent 每次都会传。
+    scratchpad：先在 <analysis> 里打草稿。默认只给不会自己思考的模型（会思考的再打草稿是想两遍）。
+    max_tokens：写摘要这一次的输出上限，思考 token 也算在内。
     """
     if scratchpad is None:
         scratchpad = not llm.native_thinking

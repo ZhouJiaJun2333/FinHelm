@@ -1,10 +1,4 @@
-"""工具 2：看一张表的详细结构。
-
-为什么要和 list_tables 分开？
-    全部表的全部列一次性塞进上下文，又长又贵，模型反而抓不住重点。
-    分成两步：先看有哪些表（便宜），再针对性地看需要的那张（精确）。
-    这是上下文工程里很常用的「渐进式披露」。
-"""
+"""describe_table：看一张表的详细结构。和 list_tables 分开是渐进式披露：先看有哪些表，再看需要的那张。"""
 
 from __future__ import annotations
 
@@ -18,7 +12,7 @@ from .results import markdown_table
 
 class DescribeTableTool(Tool):
     name = "describe_table"
-    rerunnable = True          # 只读查询：旧结果被清理后，再调一次就能拿回来
+    rerunnable = True
     description = (
         "查看一张表的详细结构：列名、类型、是否可空、列注释、主键外键约束，"
         "以及几行样例数据。**写任何 SQL 之前都应该先查这个**，不要凭空猜列名。"
@@ -60,13 +54,13 @@ class DescribeTableTool(Tool):
 
         if args.sample_rows > 0:
             lines += ["", f"**样例数据（{args.sample_rows} 行）**：", ""]
-            # 表名来自 information_schema，不是用户自由输入，这里用标识符引用拼接是安全的
+            # 表已经确认存在（columns_of 查到了），用标识符引用拼接
             result = self.db.query(
                 f'SELECT * FROM "{schema}"."{table}" LIMIT {args.sample_rows}'
             )
             lines.append(markdown_table(result.columns, result.rows) if result.rows else "（无数据）")
 
-        # 线索里放全部列名：清理之后模型照样能写 SQL，多半不用再查一遍结构
+        # 线索里放全部列名：清理之后模型照样能写 SQL
         summary = f"{schema}.{table} 的表结构，{len(columns)} 列：" + ", ".join(
             c.name for c in columns
         )

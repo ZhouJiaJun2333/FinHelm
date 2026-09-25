@@ -1,4 +1,4 @@
-"""编辑工序：超过阈值时，把较早的工具结果换成一句带线索的占位。最便宜的一种压缩。"""
+"""工序：超过阈值时，把较早的工具结果换成一句带线索的占位。最便宜的一种压缩。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .base import ContextEdit, Entry, Marker, Prompt
 
 @dataclass(frozen=True, slots=True)
 class ToolResultsCleared(Marker):
-    """标记：这几条工具结果从此以后换成占位。"""
+    """这几条工具结果从此换成占位。"""
 
     tool_call_ids: frozenset[str]
 
@@ -21,47 +21,22 @@ class ToolResultsCleared(Marker):
 
 
 class ClearOldToolResults(ContextEdit):
-    """参数照抄 Anthropic 服务端的同款功能（context editing 的 clear_tool_uses）：
+    """参数照抄 Anthropic 服务端的 clear_tool_uses。
 
         trigger_tokens  请求估算超过它才动手
-        keep_recent     最近几条工具结果不动（模型多半正在用）
-        clear_at_least  一次至少要省下这么多，否则不清 —— 见下面「缓存」
-        tools           只清这些工具的结果；None = 不限（测试里方便）。
-                        app.py 传的是「rerunnable 的工具」—— 见下面「只清能重拿的」
+        keep_recent     最近几条不动（模型多半正在用）
+        clear_at_least  一次省不到这么多就不清
+        tools           只清这些工具的结果（app.py 传 rerunnable 的工具）；None = 不限
 
-    为什么先清工具结果：它是上下文里最大的一块（SQL 结果表格），而且
-    **能重新拿到** —— 调用参数（那条 SQL）还留在 assistant 消息里，占位里
-    还留着线索。用户的原话、模型的结论清掉就找不回来了，那是摘要的事。
+    只清能重拿、而且成功的结果：占位叫模型「重新调用一次」，只对只读工具成立；
+    失败的结果记着「这条路走不通」，清掉等于鼓励它再撞一次墙。
 
-    ── 只清能重拿的、成功的结果 ──────────────────────────────────────
-    占位对模型说「重新调用一次即可」，这句话只对只读工具成立：导出文件的工具重跑一次
-    就多写一个文件。能不能重拿只有工具自己知道（Tool.rerunnable），所以是白名单，
-    由组装层从工具上读出来传进来 —— Claude Code 的 microcompact 也是白名单
-    （读文件、搜索、bash 这几种），不是按大小一刀切。
-    失败的结果（报错、被拒绝）不清：它们记着「这条路走不通、为什么」，换成
-    「重新调用一次即可」等于鼓励模型再撞一次墙。
-
-    ── 原件不删，只改视图 ────────────────────────────────────────────
-    历史里的工具结果一个字不动。决定清理时往历史追加一个 ToolResultsCleared
-    标记，apply() 看到标记才把对应结果换成占位。这个类自己不记任何东西。
-
-    ── 缓存：为什么要攒一批才清 ──────────────────────────────────────
-    prompt 缓存是前缀匹配。改了第 k 条消息，第 k 条之后的缓存全部失效，
-    下一次请求要重新写缓存（Anthropic 写缓存比正常输入还贵 25%）。
-    如果规则是「永远只留最近 3 条」，每来一条新结果，边界就往后挪一格，
-    **每次请求都改历史** —— 缓存永远命中不了。
-    所以：超过 trigger 才动手，一动手就把能清的全清掉，而且省得不够
-    clear_at_least 就干脆不动。清完以后远低于阈值，之后的请求都是纯追加，
-    缓存又能命中，直到下一次涨过阈值。
-
-    试过、没用的改法（2026-09-25 多轮评测）：「小结果不清」「清完降不到低水位就不清」
-    让清理后的缓存断得少了，但上下文涨得更大、压缩更频繁，未命中的 token 打平；
-    不清理则总输入多 17%，按缓存价算反而更贵。清理的收益在于之后每次请求都少带一截，
-    断一次缓存是值得的。（Claude Code 热缓存时不在本地改历史，靠的是 Anthropic 服务端的
-    cache_edits；pi 干脆不单独清理。我们两样都没有，维持现状。）
+    攒一批才清：缓存是前缀匹配，改一条消息后面全部失效。「永远只留最近 3 条」会让每次请求都改历史；
+    超过阈值才动手、一次清完，之后又是纯追加。（评测试过「小结果不清」「降不到低水位就不清」，
+    未命中打平；不清理总输入多 17%，更贵。2026-09-25）
     """
 
-    # 占位的开头。测试、日志靠它认出「这是被清理过的结果」。
+    # 测试、日志靠它认出被清理过的结果
     CLEARED_PREFIX = "[这条工具结果已被清理，以节省上下文。"
 
     def __init__(
@@ -78,14 +53,9 @@ class ClearOldToolResults(ContextEdit):
 
     @classmethod
     def placeholder(cls, m: Message) -> str:
-        """被清理的结果换成什么。
+        """占位里留线索（工具给的 summary，比如「1 行：total=4242」），模型常常不用重查。
 
-        不只是说「清掉了」，还要留下**线索**：原来是几行几列、哪些列
-        （工具自己给的 summary）。模型看到「1 行：total=4242」就不必重查；
-        看到「42 行 × 4 列（region, gmv, …）」能判断跟当前问题有没有关系。
-        工具没给摘要时，至少告诉它原来有多大。
-
-        只依赖消息本身，不掺时间、计数之类会变的东西 —— 占位一变，缓存就废。
+        只依赖消息本身，不掺时间、计数这类会变的东西：占位一变，缓存就废。
         """
         clue = m.meta.summary or f"约 {len(m.content)} 字符"
         return (
@@ -116,12 +86,12 @@ class ClearOldToolResults(ContextEdit):
             return None
         freed = sum(estimate_message(m) - estimate_text(self.placeholder(m)) for m in targets)
         if not force and freed < self.clear_at_least:
-            # 省得太少，不值得为此让缓存失效一次。强制整理时（已经超长了）能省一点是一点。
+            # 省得太少，不值得断一次缓存。强制时（已经超长了）能省一点是一点
             return None
         return ToolResultsCleared(frozenset(m.tool_call_id for m in targets))
 
     def _clearable(self, entries: list[Entry]) -> list[Message]:
-        """能清的工具结果：还没清过、成功的、白名单里的工具、不是最近 keep_recent 条，而且换成占位确实更短。"""
+        """还没清过、成功的、白名单里的、不是最近 keep_recent 条、换成占位确实更短的。"""
         messages = [e for e in entries if isinstance(e, Message)]
         cleared = _cleared_ids(entries)
         tool_names = {c.id: c.name for m in messages for c in m.tool_calls}
@@ -132,7 +102,6 @@ class ClearOldToolResults(ContextEdit):
             if m.tool_call_id not in cleared
             and not m.is_error
             and (self.tools is None or tool_names.get(m.tool_call_id) in self.tools)
-            # 占位本身有七八十个字，「1 行：total=4242」这种小结果换了反而更长
             and estimate_message(m) > estimate_text(self.placeholder(m))
         ]
 
@@ -142,7 +111,6 @@ class ClearOldToolResults(ContextEdit):
 
 
 def _cleared_ids(entries: list[Entry]) -> set[str]:
-    """历史里所有清理标记记下的 tool_call_id。"""
     ids: set[str] = set()
     for e in entries:
         if isinstance(e, ToolResultsCleared):

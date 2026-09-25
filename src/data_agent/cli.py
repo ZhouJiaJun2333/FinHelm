@@ -1,8 +1,4 @@
-"""命令行界面。
-
-这一层只负责「怎么显示」——订阅 Agent 抛出的事件，打到终端。
-换成 Web 界面时，只要换一个 EventSink，core/ 里一行都不用动。
-"""
+"""命令行界面：订阅 Agent 的事件打到终端，处理斜杠命令。"""
 
 from __future__ import annotations
 
@@ -36,7 +32,7 @@ from .tools.sql.results import ResultStore, SqlResult, markdown_table
 
 REF_NAME = re.compile(r"r\d+")
 
-# 终端里一张结果表最多显示几行。要完整的就 /save —— 不自动落盘，用户要才写文件
+# 终端里一张结果表最多显示几行，要完整的就 /save
 TERMINAL_ROWS = 20
 
 BANNER = """
@@ -62,24 +58,21 @@ def _show_table(table: SqlResult) -> str:
     return text
 
 
-# 按工具名找「怎么显示它的结果」，参数是工具给界面的 details（学 pi 的 renderResult：
-# 每个工具一个渲染函数，通用的打印代码不认识具体工具）。没登记的工具显示模型看到的那份。
+# 按工具名找渲染函数，参数是 details（学 pi 的 renderResult）。没登记的显示模型看到的那份
 RESULT_RENDERERS: dict[str, Callable[[Any], str]] = {
-    "run_sql": _show_table,       # 用户看完整结果，不是模型看到的预览
+    "run_sql": _show_table,
 }
 
 
 def make_console_sink(verbose: bool, results: ResultStore):
-    """把 Agent 事件打印到终端。results 用来展开过渡的话里的 {{r3}}。"""
+    """results 用来展开过渡的话里的 {{r3}}。"""
 
     def sink(event: Event) -> None:
         match event:
             case LLMResponded(text=text, tool_calls=calls, usage=usage, context_window=window):
-                # 只打印「动手之前说的话」。最终回答由主循环统一打印，
-                # 否则同一段话会出现两遍。
+                # 只打印动手之前说的话，最终回答由主循环打印
                 if calls:
                     if text:
-                        # 过渡的话里也可能引用结果，和最终回答一样展开 —— 别让用户看到 {{r8}} 原文
                         print(f"\n🤖 {results.expand(text, _show_table)}")
                     print(f"   ↳ 调用：{', '.join(calls)}")
                 print(f"   📊 {_usage_line(usage, window)}")
@@ -119,14 +112,9 @@ def make_console_sink(verbose: bool, results: ResultStore):
 
 # ---------------------------------------------------------------- /save
 def parse_save(arg: str, refs: list[str]) -> tuple[str | None, str]:
-    """/save 的参数 → (编号, 文件名)。refs 是已有的编号，按先后排。编号可以省：
+    """/save 的参数 → (编号, 文件名)，编号不存在返回 None。
 
-        /save                 最近一个结果
-        /save r3              r3
-        /save r3 华东订单     r3，文件名叫 华东订单.csv
-        /save 华东订单        第一个词不像编号，就当文件名，存最近一个结果
-
-    编号不存在返回 None。
+        /save、/save r3、/save r3 华东订单、/save 华东订单（第一个词不像编号就当文件名）
     """
     first, _, rest = arg.strip().partition(" ")
     if REF_NAME.fullmatch(first):
@@ -135,7 +123,7 @@ def parse_save(arg: str, refs: list[str]) -> tuple[str | None, str]:
 
 
 def _save(arg: str, app: Application) -> None:
-    """/save [r3] [文件名]：和 export_csv 工具走同一个函数（按当时的 SQL 重跑再写）。"""
+    """和 export_csv 工具走同一个函数（按当时的 SQL 重跑再写）。"""
     ref, filename = parse_save(arg, app.results.refs())
     table = app.results.get(ref) if ref else None
     if table is None:
@@ -222,7 +210,7 @@ def handle_command(cmd: str, app: Application) -> bool:
             _save(arg, app)
 
         case "/compact":
-            # 整理的过程（🧹 那几行）由事件打印，这里只处理「什么都没做」和失败
+            # 整理的过程由事件打印，这里只管「什么都没做」和失败
             try:
                 if not app.agent.compact():
                     print("没有可整理的内容（压缩至少要保留当前这一轮，对话还太短）。")
@@ -244,7 +232,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def open_session(base: Path, resume: str | None) -> tuple[Session, list[Entry]]:
-    """新会话，或者读回一个旧会话的历史。resume：None = 新开，"" = 最近的，其他 = 那个 ID。"""
+    """resume：None = 新开，"" = 最近的，其他 = 那个 ID。"""
     if resume is None:
         return Session.create(base), []
     session = Session.open(base, resume or None)
@@ -263,7 +251,6 @@ def _handle(user_input: str, app: Application) -> None:
     except KeyboardInterrupt:
         print("\n已中断本轮。")
     except AgentError as exc:
-        # 我们自己抛的，消息里已经写清楚该怎么办了
         print(f"\n⚠️ {exc}")
     except Exception as exc:  # noqa: BLE001
         print(f"\n❌ 出错：{type(exc).__name__}: {exc}")
@@ -282,7 +269,7 @@ def main() -> None:
         print(f"❌ 没法恢复会话：{exc}")
         return
 
-    # 结果仓库要先于 Application 建好：打印事件的 sink 要用它展开 {{r3}}
+    # 结果仓库先建好：打印事件的 sink 要用它展开 {{r3}}
     results = ResultStore(session.results_path)
     try:
         app = build_application(settings, on_event=make_console_sink(args.verbose, results),
@@ -291,10 +278,8 @@ def main() -> None:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")
         return
-    # 快照就是历史的副本（Context.snapshot），恢复会话 = 恢复到磁盘上的那份
     app.agent.context.restore(history)
 
-    # 启动时就把数据库连通性验掉，别等跑到一半才报错
     try:
         version = app.db.ping().split(",")[0]
     except Exception as exc:
@@ -321,8 +306,7 @@ def main() -> None:
         try:
             _handle(user_input, app)
         finally:
-            # 每处理完一次输入就落盘：成功的一轮、/compact 加的标记、/reset 都在这里写进日志。
-            # 失败的一轮已经被 Agent.run 回滚了，历史没变，什么都不写
+            # 每处理完一次输入就落盘。失败的一轮已经回滚，历史没变，什么都不写
             session.sync(app.agent.context.history)
 
 

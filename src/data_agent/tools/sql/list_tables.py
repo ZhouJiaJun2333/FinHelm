@@ -1,8 +1,4 @@
-"""工具 1：列出库里有哪些表。
-
-没有这个工具，模型就是个瞎子 —— 你问「我们有什么数据」，它只能反问你。
-**模型的世界 = 它的工具能感知到的 + 上下文里写着的**，仅此而已。
-"""
+"""list_tables：列出库里有哪些表。"""
 
 from __future__ import annotations
 
@@ -14,7 +10,7 @@ from ...core.tools import Tool, ToolOutput
 
 class ListTablesTool(Tool):
     name = "list_tables"
-    rerunnable = True          # 只读查询：旧结果被清理后，再调一次就能拿回来
+    rerunnable = True
     description = (
         "列出数据库里所有可查询的表，返回表名、大致行数和表注释（业务含义）。"
         "当你不确定有哪些数据、或者用户问『我们有什么数据』时，先用这个。"

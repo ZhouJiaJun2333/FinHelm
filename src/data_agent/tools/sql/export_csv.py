@@ -1,13 +1,6 @@
-"""工具 4：把 run_sql 的某个结果导出成 CSV，交给用户。
+"""export_csv：把 run_sql 的某个结果导出成 CSV。只在用户要的时候写文件。
 
-只在用户要的时候写文件（说「导出」「下载」「存成表格」，或者在终端里敲 /save r3）。
-查出来的大结果不自动落盘：界面本来就拿着完整数据，模型要看更多就改 SQL 重查，
-落盘只剩「交给用户」这一个用途 —— 那就按需做。
-
-导出不用结果仓库里存的那份，而是**按编号找到当时的 SQL，重新跑一遍**：
-    · 可以比仓库里多导一些行（run_sql 最多取 1 万行）
-    · 前提是两次之间数据没变。分析库是离线灌的，没问题；接实时库时导出的是「导出那一刻」的数据，
-      回复里会写明
+按编号找到当时的 SQL 重新跑（可以比仓库多导一些行）；前提是数据没变，分析库是离线灌的。
 """
 
 from __future__ import annotations
@@ -33,7 +26,7 @@ class Exported:
     truncated: bool          # 超过 EXPORT_ROWS，只导了前面这些
 
     def describe(self, ref: str) -> str:
-        # 写绝对路径：相对路径是相对「启动程序时所在的目录」，用户未必知道是哪
+        # 写绝对路径：用户未必知道相对的是哪个目录
         text = f"已把 {ref} 导出到 {self.path.resolve()}（{self.rows} 行 × {self.columns} 列，按导出时的数据重新查询）"
         if self.truncated:
             text += f"。⚠️ 结果超过 {EXPORT_ROWS} 行，只导出了前 {EXPORT_ROWS} 行"
@@ -66,7 +59,7 @@ def _free_path(out_dir: Path, filename: str) -> Path:
 
 class ExportCsvTool(Tool):
     name = "export_csv"
-    # rerunnable 保持默认 False：重跑一次会再写一个文件，它的结果不能清理成「重新调用即可」
+    # 不是 rerunnable：重跑一次会再写一个文件
     description = (
         "把 run_sql 的某个结果（按编号，比如 r3）导出成 CSV 文件，交给用户。"
         "只在用户要导出、下载、保存成文件时用；只是想让用户看到整张表，在回答里写 {{r3}} 就行。"
@@ -79,7 +72,7 @@ class ExportCsvTool(Tool):
 
     def __init__(self, db: Database, results: ResultStore, out_dir: Path) -> None:
         self.db = db
-        self.results = results        # 和 run_sql 共用的结果仓库（app.py 注入）
+        self.results = results
         self.out_dir = out_dir
 
     def run(self, args: Args) -> str:

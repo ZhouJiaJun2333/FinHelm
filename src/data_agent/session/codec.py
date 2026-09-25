@@ -1,8 +1,6 @@
-"""历史条目（消息 + 标记）和 JSON 之间的转换。会话日志里每一行就是一条的 encode()。
+"""历史条目（消息 + 标记）↔ JSON。decode(encode(x)) == x，tests/test_session.py 对每种标记都验。
 
-规则：decode(encode(x)) == x。tests/test_session.py 对每种消息、每种标记都验一遍 ——
-尤其是标记：以后新写一种 ContextEdit，它的标记不用在这里登记，但字段类型要在下面
-_to_json / _from_json 认得的范围里（str、数字、bool、frozenset、Usage），测试会替你检查。
+新标记不用在这里登记，但字段类型要在 _to_json / _from_json 认得的范围里（str、数字、bool、frozenset、Usage）。
 """
 
 from __future__ import annotations
@@ -37,8 +35,7 @@ def decode(data: dict[str, Any]) -> Entry:
 
 
 # ------------------------------------------------------------------ 消息
-# 只写非默认值：一条普通的用户提问就是 {"type": "message", "role": "user", "content": "…"}，
-# 日志打开来能直接读。
+# 只写非默认值，日志打开来能直接读
 def _encode_message(m: Message) -> dict[str, Any]:
     d: dict[str, Any] = {"type": "message", "role": m.role, "content": m.content}
     if m.tool_calls:
@@ -90,11 +87,10 @@ def _from_json(value: Any, hint: Any) -> Any:
 
 
 def _marker_classes() -> dict[str, type[Marker]]:
-    """Marker 的所有子类（按类名）。context 包已经把它们全 import 进来了。
+    """Marker 的所有子类（按类名）。
 
-    ⚠️ 只认模块里真正叫这个名字的那个类。@dataclass(slots=True) 会**另造一个新类**替换原来的，
-    旧类还挂在 __subclasses__() 里（等垃圾回收）。拿旧类解码出来的对象，和正常的标记
-    长得一样却不相等（类不是同一个）—— 恢复出来的清理标记会被 isinstance 认不出来。
+    只认模块里真正叫这个名字的类：@dataclass(slots=True) 会另造一个新类，旧类还挂在
+    __subclasses__() 里，拿它解码出来的标记 isinstance 认不出来。
     """
     found: dict[str, type[Marker]] = {}
     todo = list(Marker.__subclasses__())

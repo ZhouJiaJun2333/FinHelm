@@ -1,12 +1,4 @@
-"""组装层（composition root）—— 唯一一个知道「所有零件怎么拼起来」的地方。
-
-为什么要单独一层？
-    因为每个模块都只依赖抽象：agent 不知道有 Postgres，工具不知道有 DeepSeek。
-    总得有个地方把具体实现塞进去 —— 就是这里，而且只有这里。
-
-    好处：cli 要的是 Agent，测试要的也是 Agent，两边都从这里拿，
-    差别只是传进来的 settings 不同。以后加 Web API，同样调 build_agent()。
-"""
+"""组装层：唯一知道所有零件怎么拼起来的地方。CLI、测试、评测都从 build_application() 拿。"""
 
 from __future__ import annotations
 
@@ -33,7 +25,7 @@ from .tools.sql.run_sql import RunSqlTool
 
 @dataclass(slots=True)
 class Application:
-    """装配好的一整套东西。CLI / 测试 / 以后的 Web 层都拿这个。"""
+    """装配好的一整套东西。"""
 
     agent: Agent
     db: Database
@@ -41,7 +33,7 @@ class Application:
     tools: ToolRegistry
     llm: LLMProvider
     settings: Settings
-    # 这次会话查出过的结果（r1、r2…）。界面展开 {{r3}}、/save 导出都从这里拿
+    # 这次会话查出过的结果（r1、r2…）：界面展开 {{r3}}、/save 都从这里拿
     results: ResultStore
     export_dir: Path                  # CSV 写到哪（/save 和 export_csv 共用）
 
@@ -58,15 +50,8 @@ def build_application(
 ) -> Application:
     """把所有零件拼成一个能跑的 Agent。
 
-    Args:
-        settings:         不传就从 .env / 环境变量读
-        on_event:         事件消费者（CLI 打终端、测试收集起来断言）
-        approval_hook:    工具执行前的审批钩子
-        finish_turn_hook: 每轮结束时决定「收工还是继续」
-        llm:              显式指定 provider。测试时可以塞个假的，不打真实 API。
-        results:          结果仓库。界面的事件 sink 在 Application 之前就要建好、就要用到它，
-                          那就自己建一个传进来；不传就新建（只在内存里）。
-        export_dir:       CSV 写到哪。CLI 传会话目录下的 exports/；不传用 settings.export_dir。
+    settings 不传就从 .env 读；llm 可以塞假的（测试）。results 由界面先建好传进来
+    （打印事件的 sink 要用它展开 {{r3}}）；export_dir 不传用 settings.export_dir。
     """
     settings = settings or Settings()
     # 场景包：数据在哪个 schema、业务约定是什么。内核的其余部分不知道行业
@@ -80,8 +65,8 @@ def build_application(
     )
     inspector = SchemaInspector(db, schemas=(domain.schema,))
 
-    # --- 工具层：依赖在这里注入，工具内部不碰全局变量 ---
-    # run_sql 往里存、export_csv 按编号取，界面和评测也读它 —— 只有这一份
+    # --- 工具层 ---
+    # run_sql 往里存、export_csv 按编号取、界面和评测读：只有这一份
     results = results if results is not None else ResultStore()
     export_dir = export_dir or Path(settings.export_dir)
     tools = ToolRegistry([
@@ -95,21 +80,18 @@ def build_application(
     llm = llm or build_provider(settings)
 
     # --- 上下文 ---
-    # 触发线取「配置值」和「窗口 - 余量」里小的那个：配置写 10 万，
-    # 但换成一个 32k 窗口的模型时，不能等到 10 万才动手。
+    # 触发线不超过「窗口 - 余量」：换成小窗口的模型时不能等到 10 万才动手
     def cap(trigger: int) -> int:
         if llm.context_window:
             return min(trigger, llm.context_window - settings.context_reserve_tokens)
         return trigger
 
-    # 编辑工序按顺序套用：先清理（几乎无损），清理完还超标再压缩（有损）。
-    # 以后加去重之类，往这个列表里加就行。
+    # 先清理（几乎无损），清理完还超标再压缩（有损）
     context = Context([
         ClearOldToolResults(
             trigger_tokens=cap(settings.context_clear_trigger_tokens),
             keep_recent=settings.context_keep_tool_results,
             clear_at_least=settings.context_clear_at_least,
-            # 只清结果能重拿的工具（只读查询）。能不能重拿由工具自己声明
             tools=[t.name for t in tools if t.rerunnable],
         ),
         CompactHistory(

@@ -1,14 +1,7 @@
 """Anthropic（Claude）后端。
 
-两个和 OpenAI 不一样的地方：
-
-1. system prompt 是**顶层参数**，不是 messages 里的一条。
-
-2. 回复是一串 content blocks，可能含 thinking 块。把历史回传给模型时必须原样带回去，
-   所以 Message.raw 里存了原生 blocks，转换时优先用它。自己拼 text 回去会丢信息。
-
-3. prompt 缓存要**自己开**。DeepSeek、百炼是自动缓存前缀，什么都不用做；Anthropic 不打
-   cache_control 就一个 token 都不缓存。见 _request_kwargs。
+和 OpenAI 的差异：system 是顶层参数；回复是 content blocks（可能有 thinking），回传时原样带上；
+prompt 缓存要自己打 cache_control（DeepSeek、百炼是自动前缀缓存）。
 """
 
 from __future__ import annotations
@@ -82,8 +75,7 @@ class AnthropicProvider(LLMProvider):
                 }
                 if msg.is_error:
                     block["is_error"] = True
-                # 连续的工具结果要合并进同一条 user 消息。
-                # 拆开发会让模型以后不敢再并行调用工具。
+                # 连续的工具结果合并进同一条 user 消息，拆开发会让模型不敢再并行调工具
                 if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):
                     out[-1]["content"].append(block)
                 else:
@@ -98,18 +90,8 @@ class AnthropicProvider(LLMProvider):
         system: str | None,
         max_tokens: int | None,
     ) -> dict[str, Any]:
-        """拼请求参数。缓存用两个断点（Anthropic 文档推荐给 Agent 循环的组合）：
-
-            系统提示词最后一块  显式 cache_control。渲染顺序是 tools → system → messages，
-                                所以这一个断点把工具定义和系统提示词一起缓存；后面的消息
-                                怎么变（清理、压缩），这一段都能命中
-            请求顶层            cache_control = 自动缓存：断点放在最后一个块上、跟着对话往后挪。
-                                每次请求写到末尾，下一次请求往回找（最多 20 个位置）就能读到。
-                                我们一步只新增两三个位置（助手的文字 / 工具调用、一组工具结果）
-
-        写摘要的请求是「上一次请求的开头 + 追加一条要求」，往回两三个位置就能找到上一轮写下的缓存。
-        TTL 用默认的 5 分钟：一轮里的步子远没那么慢，每次读都会续期。
-        写缓存比普通输入贵 25%，读缓存是一折；Agent 每步只多写几百到几千 token，划算。
+        """两个缓存断点：系统提示词末尾（连同工具定义一起缓存，后面的消息怎么变都能命中），
+        加顶层自动缓存（断点跟着对话末尾往后挪）。写摘要的请求往回两三个位置就能读到上一轮的缓存。
         """
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -151,8 +133,7 @@ class AnthropicProvider(LLMProvider):
         return LLMResponse(
             text="\n".join(text_parts).strip(),
             tool_calls=tool_calls,
-            # 转成纯 dict 再存（Message.raw 的约定：会话日志要能原样存盘、读回）。
-            # 和 OpenAI provider 一样 exclude_none：去掉响应里为空的字段，回传的请求体干净些
+            # 转成纯 dict（Message.raw 要能存盘读回）
             raw_content=[b.model_dump(mode="json", exclude_none=True) for b in resp.content],
             usage=self.convert_usage(resp.usage),
             stop_reason=resp.stop_reason,
@@ -160,12 +141,7 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def convert_usage(u: Any) -> Usage:
-        """Anthropic 的 input_tokens 是**扣掉缓存之后**剩下的部分。
-
-        开了缓存以后，一个 50k 的对话 input_tokens 可能只有几百 —— 只看它会以为
-        上下文还很空。完整输入要三块加起来，Usage 里已经拆好了，直接对应。
-        两个缓存字段在没开缓存时可能是 None。
-        """
+        """input_tokens 已经扣掉缓存部分，三块加起来才是完整输入。"""
         return Usage(
             input=u.input_tokens,
             output=u.output_tokens,

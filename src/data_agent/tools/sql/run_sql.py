@@ -1,20 +1,10 @@
-"""工具 3：执行只读 SQL。
+"""run_sql：执行只读 SQL。
 
-这是整个 Agent 唯一真正「产出结论」的工具，也是唯一有安全风险的工具。
+安全是三道独立的防线：这里只放行单条 SELECT / WITH（能被绕过，只是减少误伤）；
+连接层只读事务 + 超时 + 行数上限；数据库账号 agent_ro 物理上没有写权限（真正的底线）。
 
-安全设计是**三道独立的防线**，不指望任何单点：
-    1. 这里：只允许单条 SELECT / WITH 语句，拒绝多语句和一切写操作关键字
-    2. 连接层（db/connection.py）：只读事务 + 语句超时 + 强制行数上限
-    3. 数据库（docker/initdb/03_readonly_role.sql）：agent_ro 账号物理上没有写权限
-
-第 1 道是可以被绕过的（注释、大小写、奇怪语法…），所以第 3 道才是真正的底线。
-**永远不要只靠关键字黑名单来做安全。**
-
-结果分两份（见 core/tools.py 的 details）：
-    模型    20 行以内原样给；更多只给前 10 行 + 行列数 —— 它要的是够推理的信息，
-            要看别的行就改 SQL 再查（只读查询重跑拿到的是同一份数据，还能顺手筛选、聚合）
-    界面    完整结果（最多 1 万行），存进结果仓库（results.py），也放在 details 里
-每个结果有编号（r1、r2…），模型和用户靠它指认同一份结果；用户要文件时按编号导出（export_csv）。
+结果分两份：模型 20 行以内原样给，更多只给前 10 行（要别的行就改 SQL 再查）；
+界面拿完整结果（最多 1 万行），存进结果仓库并编号。
 """
 
 from __future__ import annotations
@@ -27,10 +17,9 @@ from ...core.tools import Tool, ToolOutput
 from ...db.connection import Database, QueryResult
 from .results import ResultStore, markdown_table
 
-# 语句必须以这些开头
 ALLOWED_STARTS = ("select", "with")
 
-# 一眼就该拒绝的写操作。这是「减少误伤」，不是安全边界。
+# 一眼就该拒绝的写操作。减少误伤，不是安全边界
 FORBIDDEN = re.compile(
     r"\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|"
     r"copy|vacuum|reindex|call|do|set|reset)\b",
@@ -38,16 +27,16 @@ FORBIDDEN = re.compile(
 )
 
 
-# 界面拿到的完整结果最多这么多行。再多就不是「看」的量了，该在 SQL 里聚合
+# 界面拿到的完整结果最多这么多行，再多该在 SQL 里聚合
 FETCH_ROWS = 10_000
-# 模型看到的：不超过 FULL_ROWS 行原样给，超过就只给前 PREVIEW_ROWS 行
+# 模型看到的：不超过 FULL_ROWS 行原样给，超过只给前 PREVIEW_ROWS 行
 FULL_ROWS = 20
 PREVIEW_ROWS = 10
 
 
 class RunSqlTool(Tool):
     name = "run_sql"
-    rerunnable = True          # 只读查询：旧结果被清理后，再调一次就能拿回来
+    rerunnable = True
     description = (
         "在分析库上执行一条只读 SQL（只能是 SELECT 或 WITH 开头的单条语句），返回结果表。"
         "执行前请先用 describe_table 确认列名和外键。"
@@ -65,7 +54,7 @@ class RunSqlTool(Tool):
 
     def __init__(self, db: Database, results: ResultStore | None = None) -> None:
         self.db = db
-        # 查出来的结果存这里、在这里编号。和 export_csv、界面共用一个（app.py 注入）
+        # 和 export_csv、界面共用（app.py 注入）
         self.results = results if results is not None else ResultStore()
 
     def run(self, args: Args) -> ToolOutput:
@@ -83,7 +72,7 @@ def _validate(raw: str) -> str:
     if not sql:
         raise ValueError("SQL 为空。")
 
-    # 去掉注释再判断，避免 `/* select */ delete ...` 这种绕过
+    # 去掉注释再判断，防 `/* select */ delete ...`
     stripped = re.sub(r"--[^\n]*", " ", sql)
     stripped = re.sub(r"/\*.*?\*/", " ", stripped, flags=re.DOTALL).strip()
 
@@ -106,11 +95,7 @@ def _validate(raw: str) -> str:
 
 # ---------------------------------------------------------------- 格式化
 def _summarize(result: QueryResult, ref: str = "") -> str:
-    """结果被清理后留下的线索：几行几列、叫什么。
-
-    只有一行几列的小结果（典型的 COUNT / SUM 聚合）直接把值写进来 ——
-    这种结果重查一次也要一个来回，而线索本身就几乎等于原件。
-    """
+    """结果被清理后留下的线索。一行几列的小结果（COUNT / SUM）直接把值写进来，线索就等于原件。"""
     if not result.columns:
         return "语句执行成功，没有结果集"
     head = f"结果 {ref}：" if ref else ""
