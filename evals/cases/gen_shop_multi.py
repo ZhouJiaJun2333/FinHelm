@@ -98,7 +98,8 @@ B = {
     "tags": ["清理", "压缩"],
     "settings": {**CLEAR, **COMPACT},
     "turns": [
-        {"question": "2024 年各渠道的销售额是多少？",
+        # 「增长 12%」只在对话里，库里查不到 —— 最后一轮考摘要有没有记住它
+        {"question": "我们给 2025 年定的销售目标是比 2024 年增长 12%。先看看 2024 年各渠道的销售额是多少？",
          "gold_sql": f"SELECT o.channel, SUM({AMT}) {FROM} WHERE {DONE} AND {Y24} GROUP BY o.channel",
          "tags": ["分组"]},
         # 写明「全部年份」：上一轮问的是 2024 年，不写的话 Agent 延续 2024 也说得通
@@ -120,6 +121,10 @@ B = {
          "gold_sql": f"SELECT p.category, SUM(oi.quantity) AS n {RET_OFFLINE_25} GROUP BY p.category ORDER BY n DESC LIMIT 1",
          "tags": ["指代"],
          "note": "退货率最高的是线下（第 2 轮算过）。按件数问：按订单数、明细行数，笔记本和耳机并列"},
+        {"question": "按我一开始说的增长目标，2025 年全年的销售额目标应该是多少？", "match": "answer",
+         "answer_sql": f"SELECT SUM({AMT}) * 1.12 {FROM} WHERE {DONE} AND {Y24}",
+         "tags": ["回忆:查不到"],
+         "note": "12% 是用户在第 1 轮顺口说的，库里没有，只能靠摘要记住；2024 年的销售额可以重查"},
     ],
 }
 
@@ -132,6 +137,8 @@ C = {
         {"question": "先说好：接下来我说的「销售额」都按成交价算，不扣折扣，也就是 数量 × 成交单价，"
                      "其他口径照旧。2024 年的销售额是多少？", "match": "contains",
          "gold_sql": f"SELECT SUM({LIST}) {FROM} WHERE {DONE} AND {Y24}", "tags": ["用户约定"]},
+        # 只在对话里的数：不判分，最后一轮要用
+        {"question": "再记一下：我们给线上渠道定的毛利率目标是 35%，后面算目标会用到。", "filler": True},
         *fill("25年7月订单", "西南华南客户", "25年取消订单", "24年6月明细", "24年12月线上订单",
               "华北客户", "政府客户",
               # 基线（df78559）里 2 次有 1 次没到 4.5 万、压根没压缩。多塞 3 条保证压缩
@@ -146,6 +153,10 @@ C = {
          "tags": ["用户约定"]},
         {"question": "第一个问题的答案是多少来着？", "match": "answer",
          "answer_sql": f"SELECT SUM({LIST}) {FROM} WHERE {DONE} AND {Y24}", "tags": ["回忆"]},
+        {"question": "2025 年线上渠道的销售额，按我说的毛利率目标，对应的毛利目标是多少？", "match": "answer",
+         "answer_sql": f"SELECT SUM({LIST}) * 0.35 {FROM} WHERE {DONE} AND {Y25} AND o.channel = '线上'",
+         "tags": ["回忆:查不到", "用户约定"],
+         "note": "35% 只在第 2 轮的对话里；销售额还得按第 1 轮的约定不扣折扣"},
     ],
 }
 

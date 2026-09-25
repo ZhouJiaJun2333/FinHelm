@@ -125,6 +125,9 @@ def summarize_sessions(case_set: CaseSet, sessions: list[SessionTrial]) -> dict[
         "回忆轮": len(recalls),
         "回忆轮答对": sum(t.answer_ok for t in recalls),
         "回忆轮重查": sum(bool(t.sql_calls) for t in recalls),
+        # 一轮里整理了两次以上：清完还贴着门槛、又过线。门槛缩小的评测里会放大，真实门槛下该很少
+        "一轮多次整理": sum(t.context_edits >= 2 for st in sessions for t in st.turns),
+        "总轮数": sum(len(st.turns) for st in sessions),
         # 填充轮不判分，出错不进「运行出错」—— 但它会让这一轮回滚、上下文没按预期变大，得单独看
         "填充轮出错": dict(Counter(t.error.split(":")[0] for st in sessions for t in st.turns
                                     if not t.graded and t.error)),
@@ -196,7 +199,9 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
             "## 会话", "",
             f"- {ss['会话数']} 段会话，平均每段 {ss['平均会话输入token']:,} 输入 token、{ss['平均会话耗时s']}s",
             f"- 平均每段清理 {ss['平均清理次数']} 次、压缩 {ss['平均压缩次数']} 次",
-            f"- 回忆轮 {ss['回忆轮']} 次：答对 {ss['回忆轮答对']}，其中重新查了 {ss['回忆轮重查']} 次",
+            f"- 回忆轮 {ss['回忆轮']} 次：答对 {ss['回忆轮答对']}，其中重新查了 {ss['回忆轮重查']} 次"
+            "（标签「回忆:查不到」的只能靠上下文 / 摘要，见按标签一节）",
+            f"- 一轮里整理 ≥ 2 次：{ss.get('一轮多次整理', 0)} / {ss.get('总轮数', 0)} 轮",
             *([f"- ⚠️ 填充轮出错（这一轮回滚，没撑大上下文）："
                + "，".join(f"{k} × {v}" for k, v in ss["填充轮出错"].items())] if ss.get("填充轮出错") else []),
             "",
