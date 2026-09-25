@@ -81,6 +81,26 @@ def test_别的错误不触发整理():
     assert calls == []
 
 
+def test_超长重试时写摘要也超长_丢掉最老的回合照样救回来():
+    """强制压缩只留当前一轮；当前一轮很小时，写摘要的请求和刚报超长的那次差不多大。"""
+    summaries = [ContextOverflow("prompt is too long"), Summary("摘要")]
+
+    def summarize(messages, prompt=None):
+        step = summaries.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+    agent, events = make_agent([OK, OK, OK, OVERFLOW, OK], context=Context([
+        CompactHistory(summarize, trigger_tokens=10**9, keep_recent_tokens=1)]))
+    for n in range(3):
+        agent.run(f"问题{n}")
+    assert agent.run("问题3") == "答"
+
+    [edited] = [e for e in events if isinstance(e, ContextEdited)]
+    assert "最早的 1 轮太长放不下" in edited.description
+
+
 # ================================================================ /compact
 def test_手动压缩不看阈值():
     calls: list = []

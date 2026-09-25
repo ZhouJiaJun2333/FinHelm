@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Callable, Protocol
 
-from ..errors import CompactionFailed
+from ..errors import CompactionFailed, ContextOverflow
 from ..messages import Message, Usage
 from ..provider import LLMProvider
 from ..tokens import estimate_message
@@ -47,9 +47,13 @@ class HistoryCompacted(Marker):
     kept_turns: int
     compacted_turns: int      # 这次新压掉了几轮，给人看的
     usage: Usage = field(default_factory=Usage)
+    dropped_turns: int = 0    # 其中最早的几轮太长、写摘要时放不下，没写进摘要
 
     def describe(self) -> str:
-        return f"把较早的 {self.compacted_turns} 轮对话压缩成了摘要（保留最近 {self.kept_turns} 轮原文）"
+        text = f"把较早的 {self.compacted_turns} 轮对话压缩成了摘要（保留最近 {self.kept_turns} 轮原文）"
+        if self.dropped_turns:
+            text += f"，其中最早的 {self.dropped_turns} 轮太长放不下，没写进摘要"
+        return text
 
     def cost(self) -> Usage:
         return self.usage
@@ -64,6 +68,9 @@ class CompactHistory(ContextEdit):
         "如果需要其中的细节（比如完整的查询结果），请重新查询。]\n\n"
     )
     SUMMARY_FOOTER = "\n\n[摘要结束。下面是用户的问题：]\n\n"
+    OMITTED_NOTE = "[更早的对话太长，写摘要时放不下，已省略。]"
+    # 写摘要的请求自己超长时，最多丢几次最老的回合
+    OVERFLOW_RETRIES = 3
 
     def __init__(
         self,
@@ -113,9 +120,41 @@ class CompactHistory(ContextEdit):
         cut = starts[-kept]
 
         old = [e for e in view[:cut] if isinstance(e, Message)]
-        summary = self.summarize(old, prompt)
-        return HistoryCompacted(summary=summary.text, kept_turns=kept,
-                                compacted_turns=len(starts) - kept, usage=summary.usage)
+        summary, dropped = self._summarize_fitting(old, prompt)
+        return HistoryCompacted(summary=summary.text, kept_turns=kept, compacted_turns=len(starts) - kept,
+                                usage=summary.usage, dropped_turns=dropped)
+
+    def _summarize_fitting(self, old: list[Message], prompt: Prompt | None) -> tuple[Summary, int]:
+        """写摘要的请求自己也超长时，丢掉最老的一半回合再试（学 Claude Code），上一份摘要留着。
+
+        强制压缩只留当前一轮，当前一轮又很小时，写摘要的请求和刚报超长的那次几乎一样大。
+        """
+        dropped = 0
+        for attempt in range(self.OVERFLOW_RETRIES + 1):
+            try:
+                return self.summarize(old, prompt), dropped
+            except ContextOverflow as exc:
+                starts = turn_starts(old)
+                if attempt == self.OVERFLOW_RETRIES or len(starts) < 2:
+                    raise CompactionFailed(
+                        f"写摘要的请求本身超出了上下文窗口，丢掉最早的 {dropped} 轮之后还是放不下。"
+                    ) from exc
+                n = max(1, (len(starts) - 1) // 2)
+                old = self._drop_oldest(old, starts[n])
+                dropped += n
+        raise AssertionError("unreachable")
+
+    def _drop_oldest(self, old: list[Message], cut: int) -> list[Message]:
+        """丢掉 old[:cut]。开头如果带着上一份摘要，把它并进新的开头。"""
+        first, rest = old[cut], old[cut + 1:]
+        head = old[0].content
+        if head.startswith(self.SUMMARY_HEADER) and self.SUMMARY_FOOTER in head:
+            previous = head[len(self.SUMMARY_HEADER):].split(self.SUMMARY_FOOTER, 1)[0]
+            previous = previous.removesuffix(f"\n\n{self.OMITTED_NOTE}")      # 第二次丢时别叠两句
+            prefix = f"{self.SUMMARY_HEADER}{previous}\n\n{self.OMITTED_NOTE}{self.SUMMARY_FOOTER}"
+        else:
+            prefix = f"{self.OMITTED_NOTE}\n\n"
+        return [replace(first, content=prefix + first.content), *rest]
 
     def _turns_to_keep(self, view: list[Entry], starts: list[int]) -> int:
         """从最新一轮往前数，攒到 keep_recent_tokens 为止；至少 1 轮（当前这轮）。"""

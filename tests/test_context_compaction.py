@@ -17,7 +17,7 @@ from data_agent.core.context import (
     llm_summarizer,
 )
 from data_agent.core.context.compaction import extract_summary
-from data_agent.core.errors import CompactionFailed
+from data_agent.core.errors import CompactionFailed, ContextOverflow
 from data_agent.core.events import ContextEdited
 from data_agent.core.messages import LLMResponse, Message, MessageMeta, ToolCall, Usage
 from data_agent.core.tokens import estimate_context
@@ -259,6 +259,86 @@ def test_排在清理后面_写摘要看到的是清理过的视图():
 def test_摘要被截断或为空时报错_不静默跳过(response):
     with pytest.raises(CompactionFailed):
         llm_summarizer(ScriptedProvider([response]))([Message.user("q")])
+
+
+# ============================================================ 写摘要的请求自己超长
+class OverflowingSummarizer(FakeSummarizer):
+    """前 fails 次调用报超长，之后正常写。"""
+
+    def __init__(self, fails: int) -> None:
+        super().__init__()
+        self.fails = fails
+
+    def __call__(self, messages, prompt=None) -> Summary:
+        if len(self.inputs) < self.fails:
+            self.inputs.append(messages)
+            raise ContextOverflow("prompt is too long")
+        return super().__call__(messages, prompt)
+
+
+def firsts(messages: list[Message]) -> list[str]:
+    """每个回合的第一条（用户提问）的内容。"""
+    return [m.content for m in messages if m.role == "user"]
+
+
+def test_写摘要超长时丢掉最老的一半回合再试():
+    fake = OverflowingSummarizer(fails=1)
+    ctx = Context([compactor(fake)])
+    for n in range(5):
+        add_turn(ctx, n)
+
+    [event] = ctx.maintain(measure)                  # 压第 0~3 轮，第一次超长
+    assert firsts(fake.inputs[0]) == ["问题0", "问题1", "问题2", "问题3"]
+    retry = firsts(fake.inputs[1])
+    assert retry[0] == CompactHistory.OMITTED_NOTE + "\n\n问题1", "丢掉 1 轮（4 轮留 1 轮之外的一半），开头注明省略了"
+    assert retry[1:] == ["问题2", "问题3"]
+    marker = ctx.history[-1]
+    assert marker.dropped_turns == 1 and marker.compacted_turns == 4
+    assert "最早的 1 轮太长放不下" in event.description
+
+
+def test_丢回合时上一份摘要留着():
+    fake = OverflowingSummarizer(fails=0)
+    ctx = Context([compactor(fake)])
+    for n in range(3):
+        add_turn(ctx, n)
+    ctx.maintain(measure)                            # 摘要1
+    for n in range(3, 6):
+        add_turn(ctx, n)
+
+    fake.fails = 3                                   # 已经调过 1 次：接下来 2 次超长
+    ctx.maintain(measure)
+    first = fake.inputs[-1][0].content
+    assert first.startswith(CompactHistory.SUMMARY_HEADER + "摘要1\n\n" + CompactHistory.OMITTED_NOTE
+                            + CompactHistory.SUMMARY_FOOTER), "丢了两次，省略说明只有一句"
+    assert first.count(CompactHistory.OMITTED_NOTE) == 1
+    assert first.endswith("问题4"), "要压的是 [摘要1+问题2]、问题3、问题4，每次丢一轮"
+    assert ctx.history[-1].dropped_turns == 2
+
+
+def test_写摘要一直超长_最多重试三次就报错():
+    fake = OverflowingSummarizer(fails=10**9)
+    ctx = Context([compactor(fake)])
+    for n in range(20):
+        add_turn(ctx, n)
+    with pytest.raises(CompactionFailed, match="写摘要的请求本身超出了上下文窗口"):
+        ctx.maintain(measure)
+    assert len(fake.inputs) == 1 + CompactHistory.OVERFLOW_RETRIES
+
+
+def test_只剩一轮可丢时不再重试():
+    fake = OverflowingSummarizer(fails=10**9)
+    ctx = Context([compactor(fake)])
+    for n in range(2):
+        add_turn(ctx, n)
+    with pytest.raises(CompactionFailed):
+        ctx.maintain(measure)                        # 只压第 0 轮，丢无可丢
+    assert len(fake.inputs) == 1
+
+
+def test_旧日志里的压缩标记没有dropped_turns也能读():
+    marker = HistoryCompacted(summary="s", kept_turns=1, compacted_turns=2)
+    assert marker.dropped_turns == 0 and "放不下" not in marker.describe()
 
 
 # ============================================================ 放进 Agent
