@@ -497,7 +497,7 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 |---|---|---|
 | **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 两层都已实现：10 万时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）；清理后还超 15 万，把较早的回合交给模型写成滚动摘要，保留最近约 2 万 token 原文（`CompactHistory`）。API 报上下文超长时强制整理一次再重试；`/compact` 手动压缩 |
 | **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，配一个按位置读的工具（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，会话目录已经有了（`Session.root`），放在它下面的 `tool-results/` |
-| **长期记忆** | `app.py` 里的 `dynamic_context` 钩子 | 用户偏好、历史结论落盘，每轮检索相关片段拼进系统提示词 |
+| **长期记忆** | 新包 `memory/`；索引走 `Agent(session_context=...)`，召回的正文走一道 `ContextEdit` | 索引在会话开始时拼进系统提示词、会话中不变（变了缓存全废）；每次提问挑几条相关的，作为标记并进这条用户消息。设计见 refs 里的对比笔记 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
 | **画图** | `tools/` 下开个 `chart/` 子包 | 查询结果交给 matplotlib，存图返回路径 |
 | **流式输出** | `llm/` 各 provider 加 `stream_chat()` | `LLMResponse` 不变，只是分块 yield |

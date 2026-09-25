@@ -30,7 +30,9 @@ def decode(data: dict[str, Any]) -> Entry:
         if cls is None:
             raise ValueError(f"不认识的标记：{data['kind']}（日志是更新的版本写的？）")
         hints = get_type_hints(cls)
-        return cls(**{f.name: _from_json(data[f.name], hints[f.name]) for f in fields(cls)})
+        # 旧日志里没有的字段（标记后来加的）用默认值
+        return cls(**{f.name: _from_json(data[f.name], hints[f.name])
+                      for f in fields(cls) if f.name in data})
     raise ValueError(f"不认识的记录类型：{data['type']}")
 
 

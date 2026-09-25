@@ -129,9 +129,7 @@ def build_application(
         approval_hook=approval_hook,
         finish_turn_hook=finish_turn_hook,
         on_event=on_event,
-        # 每轮把库概览拼到系统提示词末尾。
-        # 以后接记忆 / RAG，也从这个钩子注入。
-        dynamic_context=inspector.overview,
+        session_context=inspector.overview,
     )
 
     return Application(

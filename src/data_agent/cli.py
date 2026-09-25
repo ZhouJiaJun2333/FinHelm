@@ -41,7 +41,7 @@ TERMINAL_ROWS = 20
 
 BANNER = """
 ┌─────────────────────────────────────────────────────┐
-│  SQL 数据分析 Agent                                 │
+│  FinHelm · 金融数据分析 Agent                       │
 │                                                     │
 │  /tables  看库里有哪些表      /tools   看有哪些工具 │
 │  /context 看上下文用量        /compact 压缩上下文   │
@@ -236,7 +236,7 @@ def handle_command(cmd: str, app: Application) -> bool:
 
 # -------------------------------------------------------------------- main
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="python run.py", description="SQL 数据分析 Agent")
+    parser = argparse.ArgumentParser(prog="python run.py", description="FinHelm：金融垂直领域的通用 Agent")
     parser.add_argument("--verbose", action="store_true", help="工具输出不折叠")
     parser.add_argument("--resume", nargs="?", const="", metavar="会话ID",
                         help="接着上次的对话聊；不写 ID 就是最近的一次")

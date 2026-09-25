@@ -142,8 +142,10 @@ class Message:
                        is_error=is_error, meta=MessageMeta(summary=summary))
 
 
-# 「话说到一半被 max_tokens 砍断」的 stop_reason。Anthropic 叫 max_tokens，OpenAI 系叫 length。
+# stop_reason 的分类，各家叫法不同。没见过的值 Agent 会直接报错，不当成「完成」
 TRUNCATED_STOP_REASONS = frozenset({"max_tokens", "length"})
+REFUSAL_STOP_REASONS = frozenset({"refusal", "content_filter"})
+NORMAL_STOP_REASONS = frozenset({"end_turn", "stop", "tool_use", "tool_calls", "function_call", ""})
 
 
 @dataclass(slots=True)
@@ -157,9 +159,21 @@ class LLMResponse:
     stop_reason: str | None = None
 
     @property
+    def _reason(self) -> str:
+        return (self.stop_reason or "").lower()
+
+    @property
     def truncated(self) -> bool:
         """被截断了：没有工具调用也不代表说完了。Agent 主循环和写摘要都要查它。"""
-        return (self.stop_reason or "").lower() in TRUNCATED_STOP_REASONS
+        return self._reason in TRUNCATED_STOP_REASONS
+
+    @property
+    def refused(self) -> bool:
+        return self._reason in REFUSAL_STOP_REASONS
+
+    @property
+    def finished_normally(self) -> bool:
+        return self._reason in NORMAL_STOP_REASONS
 
     def to_message(self) -> Message:
         return Message(

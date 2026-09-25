@@ -1,3 +1,3 @@
-"""data_agent —— 一个可扩展的 SQL 数据分析 Agent。"""
+"""FinHelm —— 金融垂直领域的通用 Agent（Python 包名沿用 data_agent）。"""
 
 __version__ = "0.1.0"

@@ -45,20 +45,6 @@ from .tools import ToolRegistry
 ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]
 
 
-# ---------------------------------------------------------------- stop_reason
-# 「这一轮为什么停下来」的分类。不同厂商的叫法不一样，在这里统一识别。
-#
-# ⚠️ 这是新手最容易漏的一件事：
-#    判断「模型完成了没有」不能只看有没有 tool_calls。被 max_tokens 截断时
-#    同样没有 tool_calls，但那是**话说到一半被砍了**，不是答完了。
-#    不查 stop_reason 的话，你会把半句话当成最终答案返回，而且毫无察觉。
-#    截断的那几种定义在 messages.py（LLMResponse.truncated），写摘要时也要用。
-REFUSAL_STOP_REASONS = frozenset({"refusal", "content_filter"})
-NORMAL_STOP_REASONS = frozenset({
-    "end_turn", "stop", "tool_use", "tool_calls", "function_call", "",
-})
-
-
 # ------------------------------------------------------------------ finishTurn
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
@@ -108,7 +94,7 @@ class Agent:
         approval_hook: ApprovalHook | None = None,
         finish_turn_hook: FinishTurnHook | None = None,
         on_event: Callable[[Event], None] = noop_sink,
-        dynamic_context: Callable[[], str] | None = None,
+        session_context: Callable[[], str] | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -120,8 +106,9 @@ class Agent:
         self.approval_hook = approval_hook
         self.finish_turn_hook = finish_turn_hook
         self.on_event = on_event
-        # 每轮动态拼到系统提示词末尾的内容（数据库概览、记忆、RAG 检索结果…）
-        self.dynamic_context = dynamic_context
+        # 会话开始时拼到系统提示词末尾的内容（库概览，以后的记忆索引）。只算一次
+        self.session_context = session_context
+        self._system: str | None = None
 
         # 本次会话一共花了多少 token —— 算钱用，和「上下文多大」是两回事。
         #
@@ -291,8 +278,6 @@ class Agent:
         但那是话说到一半被砍了。静默地把半句话当答案返回，是这类系统里
         最难排查的一种 bug —— 不报错、不告警，只是答案莫名其妙地不完整。
         """
-        reason = (response.stop_reason or "").lower()
-
         if response.truncated:
             raise OutputTruncated(
                 f"模型输出被截断（stop_reason={response.stop_reason}），这不是「完成」。"
@@ -300,16 +285,16 @@ class Agent:
                 "解决办法：调大 .env 里的 MAX_TOKENS，或让它分步输出。"
             )
 
-        if reason in REFUSAL_STOP_REASONS:
+        if response.refused:
             raise ModelRefused(
                 f"模型拒绝了这个请求（stop_reason={response.stop_reason}）。"
             )
 
-        if reason not in NORMAL_STOP_REASONS:
+        if not response.finished_normally:
             # 没见过的值。宁可炸掉，也不要静默当成「完成」。
             raise UnexpectedStopReason(
                 f"遇到未处理的 stop_reason='{response.stop_reason}'。"
-                "如果这是个正常的结束原因，请把它加进 core/agent.py 的 "
+                "如果这是个正常的结束原因，请把它加进 core/messages.py 的 "
                 "NORMAL_STOP_REASONS。"
             )
 
@@ -357,14 +342,11 @@ class Agent:
         ))
 
     def _render_system_prompt(self) -> str:
-        """系统提示词 = 固定人设 + 动态上下文。
-
-        动态内容放在**末尾**：前缀保持稳定才能吃到 prompt 缓存。
-        以后接记忆 / RAG，检索到的内容就从 dynamic_context 拼进来。
-        """
-        if self.dynamic_context is None:
-            return self.system_prompt
-        return f"{self.system_prompt}\n\n{self.dynamic_context()}"
+        """固定人设 + 会话上下文。一个会话只算一次：系统提示词一变，后面整段缓存都废了。"""
+        if self._system is None:
+            extra = self.session_context() if self.session_context else ""
+            self._system = f"{self.system_prompt}\n\n{extra}" if extra else self.system_prompt
+        return self._system
 
     def context_usage(self) -> ContextEstimate:
         """如果现在发下一次请求，输入大概有多大。
@@ -389,3 +371,4 @@ class Agent:
 
     def reset(self) -> None:
         self.context.clear()
+        self._system = None

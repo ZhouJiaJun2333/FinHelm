@@ -186,3 +186,24 @@ def test_全量上下文不裁剪():
     for i in range(10):
         ctx.add(Message.user(f"m{i}"))
     assert len(ctx.render()) == 10
+
+
+def test_系统提示词一个会话只算一次_reset后重算():
+    """会话上下文（库概览）每步都重算的话，每步都要查一次库；内容一变，缓存也跟着废。"""
+    calls = []
+
+    def overview() -> str:
+        calls.append(1)
+        return f"库概览 v{len(calls)}"
+
+    ok = LLMResponse(text="答", stop_reason="end_turn")
+    tool = LLMResponse(text="", tool_calls=[ToolCall("c1", "echo", {"text": "x"})], stop_reason="tool_use")
+    agent, _ = make_agent([tool, ok, ok], session_context=overview)
+    agent.run("问题1")
+    agent.run("问题2")
+    assert len(calls) == 1
+    assert set(agent.llm.system_seen) == {"测试\n\n库概览 v1"}
+
+    agent.reset()
+    agent.run("问题3")
+    assert agent.llm.system_seen[-1] == "测试\n\n库概览 v2"

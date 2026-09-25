@@ -53,6 +53,12 @@ def test_每种标记都有编解码样例():
     assert all(isinstance(m, Marker) for m in SAMPLE_MARKERS)
 
 
+def test_旧日志缺了后来加的字段_用默认值():
+    data = encode(SAMPLE_MARKERS[1])
+    del data["usage"]
+    assert decode(data).usage == Usage()
+
+
 def test_普通消息写出来一眼能读():
     assert encode(Message.user("你好")) == {"type": "message", "role": "user", "content": "你好"}
 
