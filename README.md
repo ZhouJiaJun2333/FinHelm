@@ -68,8 +68,10 @@ pytest
 │   ├── prompts.py              系统提示词
 │   ├── cli.py                  终端界面（只管显示）
 │   │
-│   ├── core/                   ★ Agent 运行时（不依赖任何厂商/工具/数据库）
+│   ├── core/                   ★ Agent 运行时（不 import 包外任何模块，tests/test_imports.py 守着）
 │   │   ├── messages.py           统一消息结构 = 整个项目的「通用语」
+│   │   ├── provider.py           LLMProvider 接口（实现在 llm/）
+│   │   ├── tools.py              Tool / ToolOutput / ToolRegistry 工具框架（具体工具在 tools/）
 │   │   ├── events.py             运行事件（解耦「运行」和「展示」）
 │   │   ├── errors.py             运行时异常（截断 / 拒绝 / 未知停止原因 / 上下文超长 / 压缩失败）
 │   │   ├── context/              上下文管理：只追加的历史（消息 + 标记）+ 一组按顺序套用的编辑工序
@@ -81,15 +83,13 @@ pytest
 │   │   └── agent.py              主循环 ← 心脏（run() 约 50 行，
 │   │                             其余是 stop_reason 分诊和两个钩子）
 │   │
-│   ├── llm/                    ★ 模型抽象层（换厂商只动这个包）
-│   │   ├── base.py               LLMProvider 接口
+│   ├── llm/                    ★ 各家模型的实现（换厂商只动这个包）
+│   │   ├── overflow.py           认出各家「上下文超长」的报错
 │   │   ├── anthropic_provider.py
 │   │   └── openai_provider.py    DeepSeek/千问/Kimi/vLLM 都走这个
 │   │
-│   ├── tools/                  ★ 工具框架
-│   │   ├── base.py               Tool 基类
-│   │   ├── registry.py           注册表
-│   │   └── sql/                  具体工具按领域分包
+│   ├── tools/                  ★ 具体工具，按领域分包
+│   │   └── sql/
 │   │       ├── list_tables.py
 │   │       ├── describe_table.py
 │   │       ├── run_sql.py
@@ -118,12 +118,12 @@ pytest
 
 ```
 cli ──┐
-      ├──> app ──> core ──> { llm, tools }
-tests ┘                          │
-                              tools/sql ──> db ──> Postgres
+      ├──> app ──> { llm, tools/sql, db } ──> core
+tests ┘                  tools/sql ──> db ──> Postgres
 ```
 
-**`core/` 不 import 任何具体的厂商、工具或数据库。** 这是整个结构的地基：
+**`core/` 不 import 包外的任何模块**：它自己定义需要的接口（`LLMProvider`、`Tool`、`BaseContext`），
+llm/ 和 tools/ 去实现（依赖倒置）。这是整个结构的地基：
 正因为这样，`tests/test_agent_loop.py` 才能塞个假模型把主循环完整测一遍。
 
 ---
@@ -399,7 +399,7 @@ run_sql 只给预览之后结果最多约 1.5k，改成清理 8000 / 压缩 1.2 
 | 想加的东西 | 动哪里 | 大致做法 |
 |---|---|---|
 | **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 两层都已实现：10 万时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）；清理后还超 15 万，把较早的回合交给模型写成滚动摘要，保留最近约 2 万 token 原文（`CompactHistory`）。API 报上下文超长时强制整理一次再重试；`/compact` 手动压缩 |
-| **大结果落盘（tool-results/）** | `tools/base.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，配一个按位置读的工具（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，还要先有会话目录（持久化会话） |
+| **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，配一个按位置读的工具（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，还要先有会话目录（持久化会话） |
 | **长期记忆** | `app.py` 里的 `dynamic_context` 钩子 | 用户偏好、历史结论落盘，每轮检索相关片段拼进系统提示词 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
 | **画图** | `tools/` 下开个 `chart/` 子包 | 查询结果交给 matplotlib，存图返回路径 |
@@ -448,9 +448,12 @@ settings ──► llm.base ──► core.messages
 `import data_agent.settings` 作为第一个导入时直接 `ImportError`。之前一直没暴露，
 纯粹因为 `app.py` 恰好先导入了 `core.agent`，顺序绕开了。
 
-解法：`core/__init__.py` 改成惰性导出（`__getattr__`），和 `llm/__init__.py` 一样。
+当时的解法是 `core/__init__.py` 改成惰性导出（`__getattr__`）—— 绕开了，但环还在。
+后来根治：`LLMProvider` 接口挪进 `core/provider.py`，工具框架挪进 `core/tools.py`，
+core 不再 import 包外任何东西，环没了，惰性导出也删了。`tests/test_imports.py` 里有一条测试守着这条规则。
 
 **教训：能跑 ≠ 没问题。** 这类 bug 会在你加一个新入口脚本时突然出现。
+**绕开不如拆掉**：循环导入说明两个包互相依赖，该问的是「接口归谁」。
 
 ### 3. 中立结构装不下厂商私有字段
 

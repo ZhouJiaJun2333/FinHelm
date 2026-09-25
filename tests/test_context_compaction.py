@@ -345,7 +345,7 @@ def _shape(messages: list[Message]) -> list[tuple]:
 def test_写摘要的请求是上一次请求原样加一条要求():
     """前缀缓存从第一个不同的字开始全部重算。系统提示词、工具定义、前面的消息都得和上一次一模一样。"""
     from data_agent.core.agent import Agent
-    from data_agent.tools.registry import ToolRegistry
+    from data_agent.core.tools import ToolRegistry
     from fakes import EchoTool
 
     llm = ScriptedProvider([

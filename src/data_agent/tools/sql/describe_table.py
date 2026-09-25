@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from ...db.connection import Database
 from ...db.introspection import SchemaInspector
-from ..base import Tool, ToolOutput
+from ...core.tools import Tool, ToolOutput
 
 
 class DescribeTableTool(Tool):

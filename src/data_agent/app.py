@@ -19,10 +19,10 @@ from .core.context import ClearOldToolResults, CompactHistory, Context, llm_summ
 from .core.events import Event, noop_sink
 from .db.connection import Database
 from .db.introspection import SchemaInspector
-from .llm.base import LLMProvider
+from .core.provider import LLMProvider
 from .prompts import SYSTEM_PROMPT
 from .settings import Settings, build_provider
-from .tools.registry import ToolRegistry
+from .core.tools import ToolRegistry
 from .tools.sql.describe_table import DescribeTableTool
 from .tools.sql.export_csv import ExportCsvTool
 from .tools.sql.list_tables import ListTablesTool

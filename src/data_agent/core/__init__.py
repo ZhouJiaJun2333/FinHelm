@@ -1,34 +1,24 @@
-"""core —— Agent 运行时。不依赖任何具体的模型厂商、工具或数据库。
+"""core —— Agent 运行时：主循环、消息、上下文管理，以及它依赖的三个接口。
 
-⚠️ 这里的导出必须是**惰性**的，否则会循环导入：
+    agent.py      主循环
+    messages.py   中立的消息结构（整个项目的通用语）
+    provider.py   LLMProvider：模型接口       实现在 llm/
+    tools.py      Tool / ToolRegistry：工具接口  实现在 tools/
+    context/      上下文管理
 
-    settings ──► llm.base ──► core.messages
-                                  │
-                                  └─ 导入子模块会先执行 core/__init__
-                                         │
-                                         └─ 如果这里直接 import agent
-                                                │
-                                                └─ agent 又 import llm.base
-                                                       （此时它还没初始化完）→ 炸
-
-    以前没炸，只是因为 app.py 恰好先导入了 core.agent，顺序刚好绕过去了。
-    这种「靠导入顺序活着」的代码迟早要出事，所以改成按需导入。
-    llm/__init__.py 用的是同一个套路。
+**core 不 import 包外的任何模块**（tests/test_imports.py 守着这条）。依赖只有一个方向：
+llm/、tools/、app.py、cli.py 依赖 core，core 不知道它们的存在。
 """
 
+from .agent import Agent
 from .context import BaseContext, ClearOldToolResults, Context, ContextEdit, KeepRecentTurns
 from .messages import LLMResponse, Message, ToolCall, Usage
+from .provider import LLMProvider
+from .tools import Tool, ToolOutput, ToolRegistry
 
 __all__ = [
     "Agent",
     "BaseContext", "Context", "ContextEdit", "ClearOldToolResults", "KeepRecentTurns",
     "Message", "ToolCall", "LLMResponse", "Usage",
+    "LLMProvider", "Tool", "ToolOutput", "ToolRegistry",
 ]
-
-
-def __getattr__(name: str):
-    # Agent 依赖 llm.base，必须延迟到真正被访问时才导入
-    if name == "Agent":
-        from .agent import Agent
-        return Agent
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

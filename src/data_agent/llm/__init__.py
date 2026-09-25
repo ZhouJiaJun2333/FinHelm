@@ -1,8 +1,6 @@
-"""llm —— 模型抽象层。换厂商只动这个包。"""
+"""llm —— 各家模型的 LLMProvider 实现（接口在 core/provider.py）。换厂商只动这个包。"""
 
-from .base import LLMProvider
-
-__all__ = ["LLMProvider", "AnthropicProvider", "OpenAICompatibleProvider"]
+__all__ = ["AnthropicProvider", "OpenAICompatibleProvider"]
 
 
 def __getattr__(name: str):

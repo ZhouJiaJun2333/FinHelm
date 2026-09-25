@@ -11,9 +11,9 @@
 就这么简单。剩下的复杂度全在「历史怎么管」「工具怎么写」「提示词怎么写」上，
 所以那三块各自是独立模块。
 
-这个文件刻意不 import 任何具体的工具、厂商、数据库。它只依赖三个抽象：
-    LLMProvider（llm/base.py）
-    ToolRegistry（tools/registry.py）
+这个文件刻意不 import 任何具体的工具、厂商、数据库。它只依赖三个抽象，都在 core 里：
+    LLMProvider （core/provider.py）
+    ToolRegistry（core/tools.py）
     BaseContext （core/context/）
 """
 
@@ -23,8 +23,6 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-from ..llm.base import LLMProvider
-from ..tools.registry import ToolRegistry
 from .context import BaseContext, Context, Measure, Prompt
 from .errors import ContextOverflow, ModelRefused, OutputTruncated, UnexpectedStopReason
 from .events import (
@@ -39,7 +37,9 @@ from .events import (
     noop_sink,
 )
 from .messages import LLMResponse, Message, ToolCall, Usage
+from .provider import LLMProvider
 from .tokens import ContextEstimate, estimate_context, estimate_overhead
+from .tools import ToolRegistry
 
 # 执行工具前的审批钩子：返回 (是否放行, 拒绝理由)
 ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]

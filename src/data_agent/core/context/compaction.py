@@ -33,18 +33,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Callable, Protocol
+from typing import Callable, Protocol
 
 from ..errors import CompactionFailed
 from ..messages import Message, Usage
+from ..provider import LLMProvider
 from ..tokens import estimate_message
 from .base import ContextEdit, Entry, Marker, Prompt
 from .turns import turn_starts
-
-if TYPE_CHECKING:
-    # 只用来标类型。运行时导入会循环：llm.base → core.messages → core/__init__
-    # → context → 这里 → llm.base（还没加载完）。见 core/__init__.py 的说明。
-    from ...llm.base import LLMProvider
 
 
 @dataclass(frozen=True, slots=True)

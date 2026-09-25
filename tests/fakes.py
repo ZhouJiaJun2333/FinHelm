@@ -19,9 +19,9 @@ from pydantic import BaseModel, Field
 from data_agent.core.agent import Agent
 from data_agent.core.events import Event, collect_sink
 from data_agent.core.messages import LLMResponse, Message
-from data_agent.llm.base import LLMProvider
-from data_agent.tools.base import Tool
-from data_agent.tools.registry import ToolRegistry
+from data_agent.core.provider import LLMProvider
+from data_agent.core.tools import Tool
+from data_agent.core.tools import ToolRegistry
 
 
 class ScriptedProvider(LLMProvider):

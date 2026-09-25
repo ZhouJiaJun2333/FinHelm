@@ -1,4 +1,7 @@
-"""工具基类 —— 定义「一个工具需要提供什么」。
+"""工具框架：一个工具要提供什么（Tool、ToolOutput），以及 Agent 怎么找到它们（ToolRegistry）。
+
+具体的工具不在这里，在 tools/ 下面（tools/sql/…）。框架属于 core：Agent 只认这里的接口，
+不知道有哪些具体工具 —— 和 pi 一样，AgentTool 定义在 agent 核心包里，具体工具在 coding-agent 里。
 
 三个设计要点：
 
@@ -21,7 +24,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Iterable, Iterator
 
 from pydantic import BaseModel, ValidationError
 
@@ -100,3 +103,49 @@ class Tool(ABC):
             return out.capped()
         except Exception as exc:  # noqa: BLE001 —— 故意兜住所有异常喂回模型
             return ToolOutput(False, f"{type(exc).__name__}: {exc}").capped()
+
+
+# ================================================================ 注册表
+# Agent 本身不持有任何具体工具，只持有一个 registry。加工具 = 注册一个对象，主循环一行不用动。
+# 以后可以在这里加：按场景裁剪工具列表（工具一多，全塞给模型反而会降智）、调用统计、并发执行。
+class ToolRegistry:
+    def __init__(self, tools: Iterable[Tool] = ()) -> None:
+        self._tools: dict[str, Tool] = {}
+        for tool in tools:
+            self.register(tool)
+
+    def register(self, tool: Tool) -> "ToolRegistry":
+        if tool.name in self._tools:
+            raise ValueError(f"工具名重复：{tool.name}")
+        self._tools[tool.name] = tool
+        return self                      # 支持链式调用
+
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
+    def schemas(self) -> list[dict[str, Any]]:
+        """这一轮要告诉模型的工具表。
+
+        注意：模型是**无状态**的，每一轮请求都要把完整工具表重新发一遍，
+        它不会「记住」上次告诉过它有哪些工具。
+        """
+        return [t.schema() for t in self._tools.values()]
+
+    def invoke(self, name: str, raw_args: dict[str, Any]) -> ToolOutput:
+        tool = self._tools.get(name)
+        if tool is None:
+            # 模型偶尔会幻觉出不存在的工具名。告诉它有哪些，别抛异常。
+            return ToolOutput(
+                False,
+                f"不存在名为 '{name}' 的工具。可用工具：{', '.join(self._tools)}",
+            )
+        return tool.execute(raw_args)
+
+    def __len__(self) -> int:
+        return len(self._tools)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._tools
+
+    def __iter__(self) -> Iterator[Tool]:
+        return iter(self._tools.values())

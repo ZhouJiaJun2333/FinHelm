@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .llm.base import LLMProvider
+from .core.provider import LLMProvider
 
 
 class Settings(BaseSettings):

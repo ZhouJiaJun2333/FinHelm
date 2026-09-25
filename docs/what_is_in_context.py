@@ -19,9 +19,9 @@ from pydantic import BaseModel, Field  # noqa: E402
 
 from data_agent.core.agent import Agent  # noqa: E402
 from data_agent.core.messages import LLMResponse, Message, ToolCall  # noqa: E402
-from data_agent.llm.base import LLMProvider  # noqa: E402
-from data_agent.tools.base import Tool  # noqa: E402
-from data_agent.tools.registry import ToolRegistry  # noqa: E402
+from data_agent.core.provider import LLMProvider  # noqa: E402
+from data_agent.core.tools import Tool  # noqa: E402
+from data_agent.core.tools import ToolRegistry  # noqa: E402
 
 LINE = "=" * 76
 

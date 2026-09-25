@@ -18,7 +18,7 @@ import pytest
 from data_agent.core.errors import ContextOverflow
 from data_agent.core.messages import Message, ToolCall, Usage
 from data_agent.llm.anthropic_provider import AnthropicProvider
-from data_agent.llm.base import is_context_overflow
+from data_agent.llm.overflow import is_context_overflow
 from data_agent.llm.openai_provider import OpenAICompatibleProvider
 
 TOOLS = [{

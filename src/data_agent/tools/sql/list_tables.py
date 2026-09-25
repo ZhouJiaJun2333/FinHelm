@@ -9,7 +9,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from ...db.introspection import SchemaInspector
-from ..base import Tool, ToolOutput
+from ...core.tools import Tool, ToolOutput
 
 
 class ListTablesTool(Tool):

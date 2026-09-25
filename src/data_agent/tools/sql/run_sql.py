@@ -10,7 +10,7 @@
 第 1 道是可以被绕过的（注释、大小写、奇怪语法…），所以第 3 道才是真正的底线。
 **永远不要只靠关键字黑名单来做安全。**
 
-结果分两份（见 tools/base.py 的 details）：
+结果分两份（见 core/tools.py 的 details）：
     模型    20 行以内原样给；更多只给前 10 行 + 行列数 —— 它要的是够推理的信息，
             要看别的行就改 SQL 再查（只读查询重跑拿到的是同一份数据，还能顺手筛选、聚合）
     界面    完整结果（最多 1 万行），放在 details 里；用户要文件时再导出 CSV（export_csv）
@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
 from ...db.connection import Database, QueryResult
-from ..base import Tool, ToolOutput
+from ...core.tools import Tool, ToolOutput
 
 # 语句必须以这些开头
 ALLOWED_STARTS = ("select", "with")

@@ -19,7 +19,8 @@ import anthropic
 
 from ..core.errors import ContextOverflow
 from ..core.messages import LLMResponse, Message, ToolCall, Usage
-from .base import LLMProvider, is_context_overflow
+from ..core.provider import LLMProvider
+from .overflow import is_context_overflow
 
 
 class AnthropicProvider(LLMProvider):

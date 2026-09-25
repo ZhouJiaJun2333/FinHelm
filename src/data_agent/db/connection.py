@@ -10,6 +10,7 @@ tools/sql/ 下的工具只调用这里的方法，不自己写连接管理。
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,8 +64,6 @@ class Database:
         max_rows 是硬上限：多取一行用来判断「是不是还有更多」，
         但只返回 max_rows 行。不能让一条 SELECT * 把整个上下文撑爆。
         """
-        import time
-
         started = time.perf_counter()
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(sql, params)

@@ -16,7 +16,7 @@ from data_agent.core.errors import (
 from data_agent.core.events import TurnContinued
 from data_agent.core.messages import LLMResponse, ToolCall, Usage
 from data_agent.llm.anthropic_provider import AnthropicProvider
-from data_agent.llm.base import LLMProvider
+from data_agent.core.provider import LLMProvider
 
 from fakes import make_agent
 

@@ -21,7 +21,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ...db.connection import Database
-from ..base import Tool
+from ...core.tools import Tool
 
 EXPORT_ROWS = 100_000
 
