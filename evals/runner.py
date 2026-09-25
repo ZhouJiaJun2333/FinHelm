@@ -5,6 +5,11 @@
                   这里拿去存档 —— Agent 的代码一行不用改。
 
 多轮会话（run_session）反过来：一段会话**共用**一个 Agent，每一轮单独记一个 Trial、单独判分。
+
+提交轮（题库级 submit，BIRD 用）：答完之后评测再追问一句，让 Agent 交一条只含所问列的 SQL。
+BIRD 官方一题只收一条 SQL、结果要完全一样；Agent 回答真人时会多给几列上下文、把数 ROUND 好看 ——
+对人是更好的回答，对官方判分是错。适配评测格式的活放在评测里，Agent 本身不改。
+提交轮不影响主分数：主分数只看回答那一轮的 SQL，和以前的运行照样能比。
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ from data_agent.settings import Settings
 from data_agent.tools.sql.results import REF, ResultStore, markdown_table
 
 from .cases import Case, Session
-from .graders import AnswerCheck, ResultMatch, check_answer, compare_results
+from .graders import AnswerCheck, ResultMatch, check_answer, compare_results, said_scalar
 
 # 判分时重跑 SQL 最多取多少行。标准答案不会有这么多行；Agent 的查询超过这个数，肯定不对。
 GRADE_MAX_ROWS = 5000
@@ -52,6 +57,17 @@ class SqlCall:
 
 
 @dataclass(slots=True)
+class Submission:
+    """提交轮交上来的那条 SQL，按 BIRD 官方的规则判：只和 BIRD 原版标准答案比、列数也要一样。"""
+
+    sql: str = ""                         # 提交轮里最后一条执行成功的 SQL；空 = 这一轮没跑成 SQL
+    strict: bool = False
+    steps: int = 0
+    usage: Usage = field(default_factory=Usage)
+    error: str = ""                       # 提交轮出错只影响提交分，不算这题错
+
+
+@dataclass(slots=True)
 class Trial:
     """一道题跑一次的全部结果。存进 trials.jsonl，失败分析就看它。"""
 
@@ -67,6 +83,9 @@ class Trial:
     # 只看最后一条 SQL、列数也一样 —— BIRD 官方的判法。我们的主分数看「任何一条」，
     # 两个都报：和公开榜单比用这个，和自己的旧版本比用主分数
     final_strict: bool = False
+    submission: Submission | None = None  # 题库要求提交轮时才有
+    # SQL 没对上，但标准答案是单个数、回答里算对了（graders.said_scalar）。算回答对，报告里单独列
+    text_ok: bool = False
     steps: int = 0                        # 调了几次模型
     usage: Usage = field(default_factory=Usage)
     calls: list[Usage] = field(default_factory=list)   # 每次调模型的用量，按顺序（不含写摘要）
@@ -90,8 +109,15 @@ class Trial:
 
     @property
     def answer_ok(self) -> bool:
-        """回答也对了：结果对，而且回答里的数字对得上（没有数字可核对的题只看结果）。"""
-        return self.result_ok and (self.answer_check is None or self.answer_check.ok is not False)
+        """回答也对了：结果对，而且回答里的数字对得上（没有数字可核对的题只看结果）；
+        或者 SQL 没对上、但回答里把标准答案那个数算对了。"""
+        return (self.result_ok and (self.answer_check is None or self.answer_check.ok is not False)
+                or self.text_ok)
+
+    @property
+    def official_sql(self) -> str:
+        """交给 BIRD 官方判分的那条：有提交轮用提交的，提交轮没跑出 SQL 或者没有提交轮就用最后一条。"""
+        return (self.submission and self.submission.sql) or self.final_sql
 
     @property
     def failure(self) -> str:
@@ -102,6 +128,8 @@ class Trial:
             return "运行出错"
         if self.step_limit:
             return "步数耗尽"
+        if self.text_ok:
+            return ""
         if self.result is None:
             return "没有执行成功的 SQL"
         if not self.result.lenient:
@@ -112,7 +140,8 @@ class Trial:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        d.update(result_ok=self.result_ok, answer_ok=self.answer_ok, failure=self.failure)
+        d.update(result_ok=self.result_ok, answer_ok=self.answer_ok, failure=self.failure,
+                 official_sql=self.official_sql)
         return d
 
     @classmethod
@@ -127,13 +156,18 @@ class Trial:
             d["result"] = ResultMatch(**d["result"])
         if d.get("answer_check"):
             d["answer_check"] = AnswerCheck(**d["answer_check"])
+        if d.get("submission"):
+            d["submission"] = Submission(**{**d["submission"], "usage": Usage(**d["submission"]["usage"])})
         return cls(**d)
 
 
 # ================================================================ 跑一次
 def run_trial(case: Case, trial: int, settings: Settings, db: Database,
-              gold: Gold) -> Trial:
-    """让 Agent 回答一道题，然后判分。任何异常都记进结果，不往外抛 —— 一题出错不能拖垮整批。"""
+              gold: Gold, submit: str = "") -> Trial:
+    """让 Agent 回答一道题（题库要求的话再加一轮提交），然后判分。
+
+    任何异常都记进结果，不往外抛 —— 一题出错不能拖垮整批。
+    """
     events: list[Event] = []
     t = Trial(case.id, trial)
     results = ResultStore()
@@ -149,10 +183,29 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database,
         t.error = f"{type(exc).__name__}: {exc}"
         t.transcript.append({"error": traceback.format_exc(limit=5)})
     t.elapsed_s = round(time.perf_counter() - started, 1)
-    digest(t, events)
+    answered = list(events)               # 回答那一轮的事件；主分数、步数、token 只看这些
+    if submit and not t.error:
+        t.submission = submit_sql(app, submit, events)
+        t.transcript = _transcript(app.agent.context.history)   # 带上提交轮，失败分析要看
+    digest(t, answered)
     show(t, results)
     grade(t, case, db, gold)
     return t
+
+
+def submit_sql(app, prompt: str, events: list[Event]) -> Submission:
+    """追问一句，收下 Agent 这一轮里最后一条执行成功的 SQL。"""
+    s = Submission()
+    before, n = app.agent.session_usage, len(events)
+    try:
+        app.agent.run(prompt)
+    except Exception as exc:  # noqa: BLE001
+        s.error = f"{type(exc).__name__}: {exc}"
+    s.usage = _minus(app.agent.session_usage, before)
+    s.steps = sum(isinstance(e, LLMResponded) for e in events[n:])
+    ok = [c.sql for c in extract_sql_calls(events[n:]) if c.ok]
+    s.sql = ok[-1] if ok else ""
+    return s
 
 
 def digest(t: Trial, events: list[Event]) -> None:
@@ -310,7 +363,15 @@ def extract_sql_calls(events: list[Event]) -> list[SqlCall]:
 
 
 def grade(t: Trial, case: Case, db, gold: Gold) -> None:
-    """给一次 trial 判分，结果写回 t。db 只需要有 query(sql, max_rows=) 方法。"""
+    """给一次 trial 判分，结果写回 t。db 只需要有 query(sql, max_rows=) 方法。
+
+    判分只写下面这些字段，先清掉 —— 改了判分规则重判（--regrade）时不留上一次的结论。
+    """
+    t.result = t.answer_check = None
+    t.final_strict = t.text_ok = False
+    t.matched_sql = t.grade_error = ""
+    if t.submission is not None:
+        t.submission.strict = False
     if case.match == "answer":
         t.answer_check = check_answer(gold.answer or [], t.shown or t.answer)
         ok = t.answer_check.ok is True
@@ -331,19 +392,24 @@ def grade(t: Trial, case: Case, db, gold: Gold) -> None:
             continue
         for i, g in enumerate(gold.alternatives):
             m = compare_results(g, rows, case.match)
-            if n == 0:                   # reversed 之后第一条就是最后执行的那条
-                t.final_strict |= m.strict
+            # reversed 之后第一条就是最后执行的那条。BIRD 判法只认原版标准答案（第一条）
+            if n == 0 and i == 0:
+                t.final_strict = m.strict
             if best is None or _better(m, best[0]):
                 best = (m, i)
                 if m.lenient:
                     t.matched_sql = sql
         if best and best[0].strict:
             break
-    if best is None:
-        return
-    t.result, alt = best
-    t.answer_check = check_answer(gold.answer if gold.answer is not None else gold.alternatives[alt],
-                                  t.shown or t.answer)
+    if t.submission is not None:
+        rows = _rerun(t, db, t.official_sql) if t.official_sql else None
+        t.submission.strict = rows is not None and compare_results(gold.alternatives[0], rows, case.match).strict
+    if best is not None:
+        t.result, alt = best
+        t.answer_check = check_answer(gold.answer if gold.answer is not None else gold.alternatives[alt],
+                                      t.shown or t.answer)
+    if not t.result_ok:
+        t.text_ok = any(said_scalar(g, t.shown or t.answer) for g in gold.alternatives)
 
 
 NO_DATA_WORDS = ("没有", "无数据", "不存在", "为空", "暂无", "查不到")

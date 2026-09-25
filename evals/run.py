@@ -9,6 +9,8 @@
     --label 名字              给这次运行起个名，写进目录名和报告，比较几种配置时用
     --rebuild 目录            不跑模型，用存下的 trials/sessions.jsonl 重新出报告
                               （报告那一步崩了，或者改了报告格式想重出一遍）
+    --regrade 目录            不跑模型，用存下的 SQL 和回答按现在的判分规则重新判分、出报告
+                              （改了判分器 / 补了标准答案，不用再花钱跑一遍）。只支持单题库
 
 比较几种配置（几个进程可以同时跑）：
     python -m evals.run --cases shop_multi --trials 2 --label 现状
@@ -41,7 +43,7 @@ from data_agent.settings import Settings
 from .cases import CaseSet, load_cases
 from .graders import check_answer, compare_results
 from .report import compare, render, summarize, summarize_sessions
-from .runner import SessionTrial, Trial, run_gold, run_session, run_trial
+from .runner import SessionTrial, Trial, grade, run_gold, run_session, run_trial
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNS_DIR = Path(__file__).parent / "runs"
@@ -58,11 +60,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", dest="sets")
     ap.add_argument("--label", default="")
     ap.add_argument("--rebuild", type=Path, metavar="目录")
+    ap.add_argument("--regrade", type=Path, metavar="目录")
     args = ap.parse_args(argv)
 
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    if args.rebuild:
-        rebuild(args.rebuild, args.compare)
+    if args.rebuild or args.regrade:
+        load_dotenv(ROOT / ".env")
+        rebuild(args.rebuild or args.regrade, args.compare, regrade=bool(args.regrade))
         return
     load_dotenv(ROOT / ".env")
     only = set(args.only.split(",")) if args.only else None
@@ -133,7 +137,7 @@ def main(argv: list[str] | None = None) -> None:
             open(run_dir / ("sessions.jsonl" if multi else "trials.jsonl"), "w", encoding="utf-8") as f:
         futures = [
             pool.submit(run_session, u, i, settings, db, gold, forced) if multi
-            else pool.submit(run_trial, u, i, settings, db, gold[u.id])
+            else pool.submit(run_trial, u, i, settings, db, gold[u.id], case_set.submit)
             for u, i in jobs
         ]
         for done, fut in enumerate(as_completed(futures), 1):
@@ -172,7 +176,7 @@ def finish(run_dir: Path, meta: dict, case_set: CaseSet, results: list, compare_
     print("\n" + report)
 
 
-def rebuild(run_dir: Path, compare_spec: str) -> None:
+def rebuild(run_dir: Path, compare_spec: str, regrade: bool = False) -> None:
     meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
     only = set(meta["only"]) if meta.get("only") else None
     case_set = load_cases(meta["cases"], only)
@@ -184,8 +188,28 @@ def rebuild(run_dir: Path, compare_spec: str) -> None:
     else:
         rows = (run_dir / "trials.jsonl").read_text(encoding="utf-8").splitlines()
         results = [Trial.from_dict(json.loads(r)) for r in rows if r.strip()]
+    if regrade:
+        _regrade(run_dir, meta, case_set, results)
     meta.pop("compared_with", None)
     finish(run_dir, meta, case_set, results, compare_spec)
+
+
+def _regrade(run_dir: Path, meta: dict, case_set: CaseSet, trials: list[Trial]) -> None:
+    """按现在的判分规则和题库重判，覆盖 trials.jsonl。模型的输出（SQL、回答）一个字不动。"""
+    if case_set.sessions:
+        sys.exit("--regrade 只支持单题库：多轮会话的判分依赖每轮当时的上下文")
+    settings = Settings(**case_set.settings)
+    db = Database(settings.database_url, statement_timeout_ms=settings.db_statement_timeout_ms,
+                  search_path=get_domain(meta.get("domain", settings.domain)).schema)
+    cases = {c.id: c for c in case_set.cases}
+    gold = {cid: run_gold(c, db) for cid, c in cases.items()}
+    for t in trials:
+        grade(t, cases[t.case_id], db, gold[t.case_id])
+    with open(run_dir / "trials.jsonl", "w", encoding="utf-8") as f:
+        for t in trials:
+            f.write(json.dumps(t.to_dict(), ensure_ascii=False, default=str) + "\n")
+    meta["regraded"] = f"{datetime.now():%Y-%m-%d %H:%M:%S}（题库 {case_set.sha1}，判分器 {_git()['git']}）"
+    print(f"按现在的规则重判了 {len(trials)} 个 trial")
 
 
 def _write_json(path: Path, data: object) -> None:

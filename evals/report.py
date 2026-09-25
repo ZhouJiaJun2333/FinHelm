@@ -3,8 +3,13 @@
 几个准确率：
     结果对     Agent 跑过的某条 SQL 查出了标准答案（允许多几列）
     严格       而且列数也一样
-    回答对     结果对，而且最终回答里的数字对得上 —— 用户真正看到的是这个
-    最后一条   只看最后执行的那条 SQL、列数也一样 —— BIRD 官方的判法，和公开榜单比用它
+    回答对     结果对，而且最终回答里的数字对得上 —— 用户真正看到的是这个。
+               另外，SQL 没对上、但标准答案是单个数且回答里算对了，也算回答对（报告里单独列出来）
+    最后一条   只看最后执行的那条 SQL、列数也一样、只认 BIRD 原版标准答案 —— BIRD 的规则
+    提交       有提交轮的题库（BIRD）：提交轮交的那条 SQL，同样按 BIRD 的规则
+               这两个都是「按值比」。官方脚本连 Python 类型都比：标准 SQL 里 CAST(... AS REAL)
+               出来是 float，Agent 写 100.0 * ... 出来是 Decimal，前 15 位一样也算错。
+               对外说的分数以官方脚本为准（evals/bird/official.py），会比这两个低
 
 pass@1 = 跑一次答对的概率（所有 trial 的平均）
 pass^k = 连跑 k 次全对的比例（τ-bench 的指标）：时对时错的 Agent 比稳定答不上来的更坑人
@@ -72,6 +77,7 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
             "严格": sum(bool(t.result and t.result.strict) for t in ts) / n,
             "回答对": sum(t.answer_ok for t in ts) / n,
             "最后一条": sum(t.final_strict for t in ts) / n,
+            "提交": sum(bool(t.submission and t.submission.strict) for t in ts) / n,
         }
 
     per_case = {}
@@ -94,6 +100,7 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
             by_tag[tag].extend(by_case.get(c.id, []))
 
     n = len(trials) or 1
+    submitted = [t.submission for t in trials if t.submission is not None]
     return {
         "trials": len(trials),
         "cases": len(cases),
@@ -107,6 +114,13 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
         "步数耗尽": sum(t.step_limit for t in trials),
         "运行出错": sum(bool(t.error) for t in trials),
         "失败分类": dict(Counter(t.failure for t in trials if t.failure)),
+        "回答里算对": [f"{t.case_id} #{t.trial}" for t in trials if t.text_ok],
+        "提交轮": {
+            "次数": len(submitted),
+            "没交SQL": sum(not s.sql for s in submitted),
+            "平均步数": round(sum(s.steps for s in submitted) / (len(submitted) or 1), 2),
+            "平均输入token": round(sum(s.usage.prompt_tokens for s in submitted) / (len(submitted) or 1)),
+        },
         "按标签": {tag: {**rates(ts), "trials": len(ts)} for tag, ts in sorted(by_tag.items())},
         "逐题": per_case,
     }
@@ -178,6 +192,7 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         f"- 时间：{meta['started']}　版本：{meta['git']}{'（有未提交的改动）' if meta['dirty'] else ''}",
         f"- 题库指纹：{meta['cases_sha1']}　提示词指纹：{meta['prompt_sha1']}　每题 {meta['trials']} 次",
         *([f"- 标签：{meta['label']}"] if meta.get("label") else []),
+        *([f"- 按新规则重判过：{meta['regraded']}"] if meta.get("regraded") else []),
         *([f"- 临时配置（--set）：{meta['overrides']}"] if meta.get("overrides") else []),
         *([f"- 端点：{meta['base_url']}"] if meta.get("base_url") else []),
         "",
@@ -186,7 +201,10 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         f"| pass@1 结果对 | {pct(p1['结果对'])} |",
         f"| pass@1 严格（列数也一样） | {pct(p1['严格'])} |",
         f"| **pass@1 回答对** | **{pct(p1['回答对'])}** |",
-        f"| pass@1 只看最后一条 SQL（BIRD 官方判法） | {pct(p1['最后一条'])} |",
+        *([f"| 　其中 SQL 没对上、回答里把数算对了 | {len(s['回答里算对'])} 次 |"] if s.get("回答里算对") else []),
+        f"| pass@1 只看最后一条 SQL（BIRD 的规则，按值比） | {pct(p1['最后一条'])} |",
+        *([f"| **pass@1 提交轮交的 SQL（BIRD 的规则，按值比）** | **{pct(p1['提交'])}** |"]
+          if s.get("提交轮", {}).get("次数") else []),
         f"| pass^{meta['trials']}（每次都回答对的题） | {pct(s['pass^k'])} |",
         f"| 平均步数 | {s['平均步数']} |",
         f"| 平均 token（输入 / 输出） | {s['平均输入token']:,} / {s['平均输出token']:,} |",
@@ -220,6 +238,19 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
             for r in runs:
                 out.append(f"- {sid} #{r['trial']}：{'，'.join(r['整理']) or '没有整理'}")
         out.append("")
+
+    if sub := s.get("提交轮", {}):
+        if sub.get("次数"):
+            out += ["## 提交轮", "",
+                    f"- {sub['次数']} 次，平均 {sub['平均步数']} 步、{sub['平均输入token']:,} 输入 token"
+                    "（不算进上面的步数和 token）",
+                    f"- 没交出 SQL（按最后一条算）：{sub['没交SQL']} 次",
+                    "- 对外的分数用官方脚本算（python -m evals.bird.official <这个目录>）：官方连类型都比，"
+                    "float 和 Decimal 值一样也算错，会比上面的低", ""]
+    if s.get("回答里算对"):
+        out += ["## SQL 没对上、回答里算对了", "",
+                "标准答案是单个算出来的数（比例、平均数），回答里说到了：",
+                "", "，".join(s["回答里算对"]), ""]
 
     if s["失败分类"]:
         out += ["## 失败分类", ""]

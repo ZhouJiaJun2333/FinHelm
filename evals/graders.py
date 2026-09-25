@@ -84,9 +84,13 @@ def normalize(v: Any) -> Any:
 
 
 def _close(a: Any, b: Any) -> bool:
-    """两个数的差不超过双方的舍入误差之和，就算同一个数。"""
+    """两个数的差不超过写得更粗的那个的舍入误差，就算同一个数。
+
+    一个是另一个 ROUND 来的，差不会超过粗的那个的半个末位。第一版用的是两边相加，
+    两个整数就各容 0.5、加起来容下了差 1：年龄 90 和 91 被当成同一个数（BIRD q194）。
+    """
     if isinstance(a, Num) and isinstance(b, Num):
-        return abs(a.value - b.value) <= a.tol + b.tol + REL_TOL * abs(b.value)
+        return abs(a.value - b.value) <= max(a.tol, b.tol) + REL_TOL * abs(b.value)
     return a == b
 
 
@@ -277,3 +281,20 @@ def check_answer(gold: Sequence[Sequence[Any]], answer: str) -> AnswerCheck:
 
 def _said(target: Num, said: Num) -> bool:
     return any(_close(said, target.scaled(scale)) for scale in SCALES)
+
+
+def said_scalar(gold: Sequence[Sequence[Any]], answer: str) -> bool:
+    """标准答案只有一个算出来的数、回答里说到了它 —— SQL 没对上时的兜底。
+
+    BIRD 里常见：问增长率，Agent 查出两年的总额，在回答里自己算出 25.30%。用户拿到的答案是对的。
+    兜底宁缺毋滥，只认单个**非整数**（比例、平均数、增长率）：
+    - 多个数、文字在回答里「说到」太容易碰上
+    - 整数（ID、个数）也不认。第一版认 ≥ 100 的整数，真跑出了误判：问「最年轻的客户的账户」，
+      标准答案 2836，Agent 答的是 1372，只是在候选表里列过 2836。说到了 ≠ 答的是它
+    """
+    if len(gold) != 1 or len(gold[0]) != 1:
+        return False
+    v = normalize(gold[0][0])
+    if not isinstance(v, Num) or v.value == int(v.value):
+        return False
+    return check_answer(gold, answer).ok is True

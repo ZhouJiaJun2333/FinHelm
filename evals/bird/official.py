@@ -3,11 +3,15 @@
     python -m evals.bird.official evals/runs/<一次 bird_financial 的运行目录>
 
 报告里「只看最后一条 SQL」是我们照 BIRD 的规则自己算的，这里是真拿官方的 evaluation_ex.py 跑。
-两个数对不上，差别就是我们的判分器和官方的差别：官方要求去重后的结果集合完全相等，
-数值没有容差（我们按小数位数容差），列顺序也要一样。
+两个数对不上，差别就是我们的判分器和官方的差别：官方要求去重后的结果集合完全相等 ——
+数值没有容差（我们按小数位数容差），列顺序要一样，**连 Python 类型都要一样**：
+标准 SQL 里常写 CAST(... AS REAL)，查出来是 float；Agent 写 100.0 * ...，查出来是 Decimal。
+430.45454545454544 和 Decimal('430.4545454545454545') 前 15 位相同，set 比较照样不相等。
+提交轮那次运行里，我们判对、官方判错的 10 次有 9 次是这个（另 1 次是我们判分器的容差 bug，已修）。
 
 提交哪条 SQL：官方一道题只收一条，Agent 却会跑好几条（探查、查答案、核对）。
-我们交最后一条执行成功的（Trial.final_sql），每个 trial 各交一份，报每份的 EX 和平均。
+题库有提交轮的，交提交轮那条；没有的（或者提交轮没跑出 SQL）交最后一条执行成功的
+（Trial.official_sql）。每个 trial 各交一份，报每份的 EX 和平均。
 标准答案用题目里的第一条 gold_sql，也就是 BIRD 原版（以后补的替代写法排在后面，官方不认）。
 
 官方脚本要先下载到 data/bird/official/（见 README「BIRD」一节）。只改了一处：
@@ -63,7 +67,8 @@ def export(run_dir: Path) -> tuple[Path, list[int]]:
     by_case: dict[str, dict[int, str]] = {}
     for line in (run_dir / "trials.jsonl").read_text(encoding="utf-8").splitlines():
         t = json.loads(line)
-        by_case.setdefault(t["case_id"], {})[t["trial"]] = t["final_sql"]
+        # 早先的运行没有 official_sql 这个字段，那时也没有提交轮
+        by_case.setdefault(t["case_id"], {})[t["trial"]] = t.get("official_sql", t["final_sql"])
     trials = sorted({k for per_case in by_case.values() for k in per_case})
 
     out = run_dir / "bird_official"
@@ -145,7 +150,8 @@ def main(argv: list[str] | None = None) -> None:
         label = f"trial {k}" if isinstance(k, int) else k
         print(f"{label:10}" + "".join(f"{s[lv]:12.1f}%" for lv in LEVELS))
     ours = json.loads((args.run_dir / "summary.json").read_text(encoding="utf-8"))["pass@1"]
-    print(f"\n对照我们的判分器：只看最后一条 {ours['最后一条']:.1%}，主分数（结果对）{ours['结果对']:.1%}")
+    mine = f"提交 {ours['提交']:.1%}，" if "提交" in ours else ""
+    print(f"\n对照我们的判分器：{mine}只看最后一条 {ours['最后一条']:.1%}，主分数（结果对）{ours['结果对']:.1%}")
     print(f"文件在 {out}")
 
 

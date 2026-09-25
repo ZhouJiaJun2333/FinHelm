@@ -28,10 +28,11 @@
 
 每一轮的 id 是「会话 id/轮次」，比如 multi-001/3。答错了会话照样往下问 —— 真实用户也会接着问。
 
-题库级配置：没有 id、只有 settings 的一行，整个题库都用它（优先级：.env < 这里 < 命令行 --set）。
-BIRD 的题库靠它选场景包：
+题库级配置：没有 id 的一行，整个题库都用它。
+    settings   覆盖配置（优先级：.env < 这里 < 命令行 --set）。BIRD 的题库靠它选场景包
+    submit     提交轮：每题答完之后追问这句话，收一条 SQL 按 BIRD 官方规则判（见 runner.py）
 
-    {"settings": {"domain": "financial"}}
+    {"settings": {"domain": "financial"}, "submit": "请交一条……"}
 """
 
 from __future__ import annotations
@@ -79,6 +80,7 @@ class CaseSet:
     cases: list[Case] = field(default_factory=list)
     sessions: list[Session] = field(default_factory=list)   # 多轮题库；和 cases 二选一
     settings: dict[str, object] = field(default_factory=dict)  # 题库级配置（比如 domain）
+    submit: str = ""                   # 提交轮追问的话；空 = 不要提交轮
     sha1: str = ""                     # 题库文件的指纹，写进运行记录：题改过，分数就不能直接比
 
     @property
@@ -95,13 +97,17 @@ def load_cases(name: str, only: set[str] | None = None) -> CaseSet:
     cases: list[Case] = []
     sessions: list[Session] = []
     settings: dict[str, object] = {}
+    submit = ""
     for n, line in enumerate(raw.decode("utf-8").splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("//"):
             continue
         try:
             d = json.loads(line)
-            if "id" not in d and "settings" in d:
-                settings.update(d["settings"])
+            if "id" not in d:
+                if unknown := set(d) - {"settings", "submit"}:
+                    raise ValueError(f"题库级配置里有不认识的键：{sorted(unknown)}")
+                settings.update(d.get("settings", {}))
+                submit = d.get("submit", submit)
             elif "turns" in d:
                 s = Session(
                     id=d["id"],
@@ -124,7 +130,9 @@ def load_cases(name: str, only: set[str] | None = None) -> CaseSet:
     ids = [c.id for c in cases] + [s.id for s in sessions]
     if len(ids) != len(set(ids)):
         raise ValueError(f"{path.name} 里有重复的 id")
-    return CaseSet(name, cases, sessions, settings, hashlib.sha1(raw).hexdigest()[:12])
+    if submit and sessions:
+        raise ValueError(f"{path.name}：提交轮只给单题库用，多轮会话里每轮都追问会打乱会话")
+    return CaseSet(name, cases, sessions, settings, submit, hashlib.sha1(raw).hexdigest()[:12])
 
 
 def _case(d: dict, case_id: str) -> Case:

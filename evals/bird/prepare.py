@@ -131,28 +131,81 @@ def _describe(row: dict[str, str]) -> str:
 
 
 # ================================================================ 题库
+# 提交轮（见 evals/runner.py）：BIRD 官方一题只收一条 SQL、结果要和标准答案完全一样。
+# 这是评测的输出格式，不是银行业务知识，所以写在这里，不写进 financial 场景包
+SUBMIT = """评测要求（BIRD 官方判分）：请把刚才这道题的最终答案写成**一条** SQL，用 run_sql 执行一次作为提交。
+- 只返回题目问到的列，按题目里提到的顺序；不要加名称、ID、中间量这类辅助列
+- 数值保持原始精度，不要 ROUND 或格式化
+- 题目要「最高 / 最多的那个」，就只返回那一行
+- 就算前面已经有一条符合要求的 SQL，也再执行一次
+执行完直接结束，不用解释。"""
+
+# 标准答案确实错了的题：补上我们认为对的写法，排在 BIRD 原版后面 —— 主分数哪种都认，
+# 官方判分（evals/bird/official.py）和报告里的 BIRD 判法只认原版。每条都在库里跑过、核对过。
+# 只收「标准答案错了」的；题意有歧义的（账户所有人还是全部客户）不收，那是题目本身的难度。
+DISPUTED: dict[int, tuple[str, list[str]]] = {
+    115: ("A4（居民数）是文本列，原版按文本排序，选中的是 Jindrichuv Hradec（93931 人），"
+          "人口最多的是 Ceske Budejovice（177686 人）", [
+        "SELECT CAST(SUM(CASE WHEN T1.gender = 'M' THEN 1 ELSE 0 END) AS REAL) * 100 / NULLIF(COUNT(T1.client_id), 0) "
+        "FROM client AS T1 INNER JOIN district AS T2 ON T1.district_id = T2.district_id "
+        "WHERE T2.A3 = 'south Bohemia' GROUP BY T2.A4 ORDER BY CAST(T2.A4 AS INTEGER) DESC LIMIT 1",
+    ]),
+    129: ("原版按区名字母序取前十，和取现多少无关。另认两种读法：按区的取现总额排；取金额最大的十笔、列出所在区", [
+        "SELECT T1.A2 FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id "
+        "INNER JOIN trans AS T3 ON T2.account_id = T3.account_id "
+        "WHERE T3.type = 'VYDAJ' AND CAST(T3.date AS TEXT) LIKE '1996-01%' GROUP BY T1.A2 ORDER BY SUM(T3.amount) DESC LIMIT 10",
+        "SELECT T1.A2 FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id "
+        "INNER JOIN trans AS T3 ON T2.account_id = T3.account_id "
+        "WHERE T3.type = 'VYDAJ' AND CAST(T3.date AS TEXT) LIKE '1996-01%' ORDER BY T3.amount DESC LIMIT 10",
+    ]),
+    152: ("原版把区连上账户表再求平均，一个区有几个账户就被算几次（布拉格一个区就占了一大截）。每个区只算一次", [
+        "SELECT AVG(A15) FROM district WHERE A15 > 4000 AND district_id IN "
+        "(SELECT district_id FROM account WHERE TO_CHAR(CAST(date AS TIMESTAMP), 'YYYY') >= '1997')",
+    ]),
+    186: ("原版多连了一次 district，要求客户所在区 = 账户所在区，题目和提示里都没有这个条件", [
+        "SELECT CAST(SUM(CASE WHEN T1.gender = 'M' THEN 1 ELSE 0 END) AS REAL) * 100 / NULLIF(COUNT(T1.client_id), 0) "
+        "FROM client AS T1 INNER JOIN disp AS T4 ON T1.client_id = T4.client_id "
+        "INNER JOIN account AS T2 ON T2.account_id = T4.account_id WHERE T2.frequency = 'POPLATEK TYDNE'",
+    ]),
+    194: ("年龄用年份相减，生日还没过的人多算一岁（而且每年结果都变）。另认周岁", [
+        "SELECT T1.client_id, EXTRACT(YEAR FROM AGE(CURRENT_DATE, T3.birth_date)) AS age "
+        "FROM disp AS T1 INNER JOIN card AS T2 ON T2.disp_id = T1.disp_id "
+        "INNER JOIN client AS T3 ON T1.client_id = T3.client_id WHERE T2.type = 'gold' AND T1.type = 'OWNER'",
+    ]),
+}
+
+
 def write_cases() -> None:
     """BIRD 题目 → evals/cases/bird_financial.jsonl。
 
     evidence（专家标注的外部知识）拼在问题后面 —— BIRD 的标准设定就是「问题 + evidence」一起给模型。
     match 用 distinct：BIRD 比的是去重后的行集合（set(pred) == set(gold)），不管顺序和重复。
+    标准答案有错的题（DISPUTED）：gold_sql 写成列表，原版在第一条，打「标注存疑」标签，理由写进 note。
     """
     questions = [q for q in json.loads(QUESTIONS.read_text(encoding="utf-8")) if q["db_id"] == DB_ID]
-    lines = [json.dumps({"settings": {"domain": "financial"}}, ensure_ascii=False)]
+    lines = [json.dumps({"settings": {"domain": "financial"}, "submit": SUBMIT}, ensure_ascii=False)]
     for q in sorted(questions, key=lambda q: q["question_id"]):
         question = q["question"].strip()
         if q.get("evidence", "").strip():
             question += f"\n\n提示（外部知识）：{q['evidence'].strip()}"
-        lines.append(json.dumps({
+        case = {
             "id": f"bird-fin-{q['question_id']:04d}",
             "question": question,
             "gold_sql": q["SQL"],
             "match": "distinct",
             "tags": [f"难度:{q['difficulty']}"],
             "note": f"BIRD Mini-Dev question_id={q['question_id']}（{QUESTIONS.name}）",
-        }, ensure_ascii=False))
+        }
+        if q["question_id"] in DISPUTED:
+            reason, alternatives = DISPUTED[q["question_id"]]
+            case["gold_sql"] = [q["SQL"], *alternatives]
+            case["tags"].append("标注存疑")
+            case["note"] += f"。标注存疑：{reason}"
+        lines.append(json.dumps(case, ensure_ascii=False))
+    if missing := set(DISPUTED) - {q["question_id"] for q in questions}:
+        sys.exit(f"DISPUTED 里的题不在题目里：{sorted(missing)}")
     CASES.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"写了 {len(questions)} 道题 → {CASES.relative_to(ROOT)}")
+    print(f"写了 {len(questions)} 道题（{len(DISPUTED)} 道标注存疑）→ {CASES.relative_to(ROOT)}")
 
 
 def main() -> None:

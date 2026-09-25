@@ -42,6 +42,13 @@ def test_这些都算错(pred, reason):
     assert not m.lenient and reason in m.reason
 
 
+def test_两个整数差1就是不一样():
+    """年龄 91 和 90：Decimal 整数按「写到个位」各有 0.5 的舍入误差，但一个不会是另一个舍入来的。"""
+    gold = [(9, Decimal("91"))]
+    assert not compare_results(gold, [(9, Decimal("90"))]).lenient
+    assert compare_results([(Decimal("90.4"),)], [(Decimal("90"),)]).lenient, "ROUND 到个位照样算对"
+
+
 def test_容差只容得下ROUND到两位():
     gold = [(Decimal("0.3318"),)]
     assert compare_results(gold, [(0.33,)]).lenient
@@ -423,3 +430,134 @@ def test_多一行合计不算错_但只认文字标签():
     assert not compare_results(gold, gold + [(None, 200)], "set").lenient
     # 多出来的不是合计：照样算错
     assert not compare_results(gold, gold + [("其他", 5)], "set").lenient
+
+
+# ================================================================ BIRD：兜底、存疑题、提交轮
+def test_回答里把单个数算对了_兜底算回答对():
+    """q169：Agent 查出两年的总额，在回答里自己算出增长率 25.30%。"""
+    from evals.graders import said_scalar
+
+    gold = [(25.300191222790616,)]
+    assert said_scalar(gold, "增长率 = (12,635,988 − 10,084,572) / 10,084,572 ≈ **+25.30%**")
+    assert said_scalar(gold, "增长率大约 25%"), "写到整数，25.30 取整就是 25"
+    assert not said_scalar(gold, "增长率 26.1%")
+    assert not said_scalar([(13,)], "1. 共有 13 个账户"), "整数（个数、ID）不兜底"
+    assert not said_scalar([(2836,)], "答案是账户 1372。候选：| 3428 | 2836 |"), "真跑出来的误判：列过 ≠ 答的是它"
+    assert not said_scalar([(25.3, 1)], "25.30"), "多个数不兜底"
+    assert not said_scalar([("POPLATEK MESICNE",)], "POPLATEK MESICNE"), "文字不兜底"
+
+
+def test_兜底判对_不算失败_但结果对不变():
+    case = Case("c", "q", ("gold",), match="distinct")
+    db = FakeDB({"SELECT 两年": [(1996, 10084572), (1997, 12635988)]})
+    t = trial_with([("SELECT 两年", True)], "增长率 25.30%")
+    grade(t, case, db, Gold([[(25.300191222790616,)]]))
+    assert t.text_ok and t.answer_ok and t.failure == ""
+    assert not t.result_ok, "结果对只看 SQL"
+
+
+def test_BIRD判法只认原版标准答案_主分数哪种都认():
+    """标注存疑的题：Agent 按我们补的写法查对了 —— 主分数算对，BIRD 判法（最后一条、提交）算错。"""
+    from evals.runner import Submission
+
+    case = Case("c", "q", ("原版", "补的"), match="distinct")
+    db = FakeDB({"SELECT 对的": [(40.0,)]})
+    t = trial_with([("SELECT 对的", True)], "40.0%")
+    t.final_sql, t.submission = "SELECT 对的", Submission("SELECT 对的")
+    grade(t, case, db, Gold([[(44.26229508196721,)], [(40.0,)]]))
+    assert t.result_ok and t.answer_ok
+    assert not t.final_strict and not t.submission.strict
+
+
+def test_重判不留上一次的结论():
+    """--regrade：同一个 trial 按新规则再判一遍，上次判对的字段要清掉。"""
+    case = Case("c", "q", ("gold",), match="distinct")
+    t = trial_with([("SELECT 旧", True)], "增长率 25.30%")
+    grade(t, case, FakeDB({"SELECT 旧": [(25.300191222790616,)]}), Gold([[(25.300191222790616,)]]))
+    assert t.result_ok and t.final_strict
+    grade(t, case, FakeDB({"SELECT 旧": [(1,)]}), Gold([[(99.5,)]]))
+    assert not t.result_ok and not t.final_strict and not t.text_ok and not t.matched_sql
+
+
+def test_提交轮按交的那条判_没交就用最后一条():
+    from evals.runner import Submission
+
+    case = Case("c", "q", ("gold",), match="distinct")
+    db = FakeDB({"SELECT 明细": [(10451, 482940), (6034, 464520)], "SELECT 只要ID": [(10451,)]})
+    t = trial_with([("SELECT 明细", True)], "账户 10451")
+    t.final_sql, t.submission = "SELECT 明细", Submission("SELECT 只要ID")
+    grade(t, case, db, Gold([[(10451,)]]))
+    assert t.submission.strict and t.official_sql == "SELECT 只要ID"
+
+    t = trial_with([("SELECT 明细", True)], "账户 10451")
+    t.final_sql, t.submission = "SELECT 明细", Submission("")
+    grade(t, case, db, Gold([[(10451,)]]))
+    assert t.official_sql == "SELECT 明细" and not t.submission.strict
+
+
+def test_提交轮_收这一轮最后一条成功的SQL_出错不算这题错():
+    from data_agent.core.messages import Usage
+    from evals.runner import submit_sql
+
+    class FakeAgent:
+        def __init__(self, events, fail=False):
+            self.events, self.fail, self.session_usage = events, fail, Usage(100, 10)
+
+        def run(self, prompt):
+            self.events += [
+                LLMResponded(Usage(120, 5), "", ["run_sql"]),
+                ToolStarted("run_sql", {"sql": "SELECT 交的"}),
+                ToolFinished("run_sql", "| 1 |", is_error=False, elapsed_ms=1),
+                ToolStarted("run_sql", {"sql": "SELECT 写错"}),
+                ToolFinished("run_sql", "列不存在", is_error=True, elapsed_ms=1),
+            ]
+            self.session_usage = Usage(220, 15)
+            if self.fail:
+                raise RuntimeError("超时")
+
+    before = [ToolStarted("run_sql", {"sql": "SELECT 回答那轮"}),
+              ToolFinished("run_sql", "| 1 |", is_error=False, elapsed_ms=1)]
+    for fail in (False, True):
+        events = list(before)
+        app = type("App", (), {"agent": FakeAgent(events, fail)})()
+        s = submit_sql(app, "请交一条", events)
+        assert s.sql == "SELECT 交的", "只看提交轮，失败的那条不算"
+        assert s.steps == 1 and s.usage == Usage(120, 5)
+        assert bool(s.error) is fail
+
+
+def test_题库级配置_submit和不认识的键(tmp_path, monkeypatch):
+    import evals.cases as cases_mod
+
+    monkeypatch.setattr(cases_mod, "CASES_DIR", tmp_path)
+    (tmp_path / "x.jsonl").write_text(
+        '{"settings": {"domain": "financial"}, "submit": "交一条"}\n'
+        '{"id": "a", "question": "q", "gold_sql": "SELECT 1"}\n', encoding="utf-8")
+    cs = load_cases("x")
+    assert cs.settings == {"domain": "financial"} and cs.submit == "交一条"
+
+    (tmp_path / "y.jsonl").write_text('{"setting": {"domain": "financial"}}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="不认识的键"):
+        load_cases("y")
+
+
+def test_BIRD题库_有提交轮_存疑题原版在第一条():
+    cs = load_cases("bird_financial")
+    assert "run_sql" in cs.submit
+    disputed = [c for c in cs.cases if "标注存疑" in c.tags]
+    assert [c.id for c in disputed] == [f"bird-fin-0{n}" for n in (115, 129, 152, 186, 194)]
+    assert all(len(c.gold_sql) >= 2 and "标注存疑：" in c.note for c in disputed)
+    assert all(len(c.gold_sql) == 1 for c in cs.cases if c not in disputed)
+
+
+def test_带提交轮的运行记录存下再读回来一模一样():
+    import json
+
+    from data_agent.core.messages import Usage
+    from evals.runner import Submission
+
+    t = Trial("c", 1, final_sql="SELECT 1", text_ok=True,
+              submission=Submission("SELECT 2", True, 2, Usage(50, 3), ""))
+    d = json.loads(json.dumps(t.to_dict()))
+    assert d["official_sql"] == "SELECT 2"
+    assert Trial.from_dict(d) == t
