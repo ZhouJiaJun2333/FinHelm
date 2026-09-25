@@ -3,7 +3,7 @@
 主要用途：模型自己写代码画的图，交付前看一眼。文字重叠、被裁切、单位写错，不看图是发现不了的。
 主模型按需「拉」图，不另设审图员（Claude Code、pi、Codex 都是这样）。
 
-只能看会话工作目录（inputs/、figures/）下的文件。太大的图缩小后再发，原文件不动。
+只能看会话工作目录（inputs/、figures/）和场景包数据目录（/data/）下的文件。太大的图缩小后再发，原文件不动。
 rerunnable：只读，旧结果可以被上下文清理掉，要的话再看一次。
 模型不能看图时不注册这个工具（app.py），提示词里「交付前看一眼」那句也跟着消失。
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import base64
 import io
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
@@ -20,13 +20,12 @@ from pydantic import BaseModel, Field
 
 from ..core.messages import Image
 from ..core.tools import Tool, ToolOutput
+from .paths import SandboxPaths
 
 # 长边上限。Anthropic 建议不超过 1568，再大服务端也会缩，白花上传；R 出的 1600×1000 缩一点点
 MAX_EDGE = 1568
 # 能原样发的格式，其余（TIFF、BMP…）转成 PNG
 MEDIA_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "GIF": "image/gif", "WEBP": "image/webp"}
-# 沙箱里工作目录挂在 /work，模型从自己代码里抄来的路径可能带着它
-CONTAINER_WORK = PurePosixPath("/work")
 
 
 class ViewImageTool(Tool):
@@ -34,7 +33,7 @@ class ViewImageTool(Tool):
     description = (
         "查看一张图片（PNG、JPG 等），图片会直接发给你看。用来检查自己画的图：文字有没有重叠、被裁切，"
         "图例、坐标轴标签、单位、数字对不对；也能看用户上传的图片。"
-        "只能看工作目录下的文件，路径写工具返回的路径或相对路径（比如 figures/fig-1.png）。"
+        "只能看工作目录和 /data/ 下的文件，路径写工具返回的路径或相对路径（比如 figures/fig-1.png）。"
         "PDF、SVG 看不了：另存一份 PNG 再看。"
     )
     rerunnable = True
@@ -42,12 +41,16 @@ class ViewImageTool(Tool):
     class Args(BaseModel):
         path: str = Field(description="图片路径，比如 figures/fig-1.png")
 
-    def __init__(self, work_dir: Path) -> None:
-        self.work_dir = work_dir.resolve()
+    def __init__(self, paths: SandboxPaths) -> None:
+        self.paths = paths
+        self.work_dir = paths.work_dir
 
     def run(self, args: Args) -> ToolOutput:
-        path = self._resolve(args.path)
-        name = path.relative_to(self.work_dir).as_posix()
+        try:
+            path = self.paths.resolve(args.path)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"{exc}{self._listing()}") from None
+        name = self.paths.display(path)
         raw = path.read_bytes()
         try:
             with PILImage.open(io.BytesIO(raw)) as img:
@@ -55,19 +58,6 @@ class ViewImageTool(Tool):
         except UnidentifiedImageError:
             raise ValueError(f"{name} 不是能看的图片格式。PDF、SVG 请另存一份 PNG 再看。") from None
         return ToolOutput(f"{name}（{note}）", summary=f"看了 {name}", images=(image,))
-
-    def _resolve(self, raw: str) -> Path:
-        raw = raw.strip()
-        posix = PurePosixPath(raw)
-        if posix.is_relative_to(CONTAINER_WORK):
-            raw = str(posix.relative_to(CONTAINER_WORK))
-        path = Path(raw)
-        path = (path if path.is_absolute() else self.work_dir / path).resolve()
-        if not path.is_relative_to(self.work_dir):
-            raise ValueError("只能看工作目录（figures/、inputs/）下的文件。")
-        if not path.is_file():
-            raise FileNotFoundError(f"找不到 {raw}。{self._listing()}")
-        return path
 
     def _listing(self) -> str:
         """找不到时告诉模型有哪些图，它多半是把文件名记错了。"""

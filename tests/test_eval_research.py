@@ -48,7 +48,7 @@ def test_没有标准值就不核对():
 def test_research题库能加载_文件都在():
     cs = load_cases("research")
     assert cs.settings["domain"] == "research"
-    assert len(cs.cases) >= 10 and all(c.uses_files for c in cs.cases)
+    assert len(cs.cases) >= 10 and all(c.no_sql for c in cs.cases)
     for c in cs.cases:
         assert all((CASES_DIR / f).is_file() for f in c.files)
         assert c.gold_values or c.expect_code or c.expect_text or c.expect_figure, c.id
@@ -82,7 +82,7 @@ def run(name: str, code: str = "", figures=(), path: str = "") -> list:
 
 
 def test_自己画图之后看了图():
-    t = Trial("rs-11", 1, uses_files=True)
+    t = Trial("rs-11", 1, no_sql=True)
     digest_sandbox(t, [*run("run_r", "m <- fh_meta_bin(d)\nfh_forest(m)", ["forest.png"]),
                        *run("run_python", "plt.scatter(x, y)", ["fig-1.png"]),
                        *run("view_image", path="figures/fig-1.png")])
@@ -92,7 +92,7 @@ def test_自己画图之后看了图():
 
 
 def test_画了两次只看了一次():
-    t = Trial("rs-11", 1, uses_files=True)
+    t = Trial("rs-11", 1, no_sql=True)
     digest_sandbox(t, [*run("run_python", "plt.plot(x)", ["fig-1.png"]),
                        *run("run_python", "plt.plot(y)", ["fig-2.png"]),
                        *run("view_image", path="figures/fig-2.png"),
@@ -106,7 +106,7 @@ def case(**kw) -> Case:
 
 
 def graded(c: Case, answer: str = "", code: str = "", figures=()) -> Trial:
-    t = Trial(c.id, 1, uses_files=True, answer=answer, code=[code], figures=list(figures))
+    t = Trial(c.id, 1, no_sql=True, answer=answer, code=[code], figures=list(figures))
     grade(t, c, None, None)
     return t
 

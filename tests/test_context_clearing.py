@@ -101,7 +101,7 @@ def test_白名单来自工具自己的声明():
 
     app = build_application(Settings(provider="openai", openai_api_key="x"), llm=ScriptedProvider())
     clear = next(e for e in app.agent.context.edits if isinstance(e, ClearOldToolResults))
-    assert clear.tools == {"list_tables", "describe_table", "run_sql"}
+    assert clear.tools == {"list_tables", "describe_table", "run_sql", "read_file"}
 
 
 def test_失败的结果不清():

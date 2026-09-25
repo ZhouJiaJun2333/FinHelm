@@ -20,6 +20,10 @@ _FILES_STEP = """\
    一行是一项研究还是一个人。**看不懂的列先问用户，不要猜。**
    `inputs/` 是空的就是用户还没上传：请用户用 `/attach 文件路径` 上传，不要去别的目录找。"""
 
+# 场景包自带数据（挂在 /data/）
+_DATA_STEP = """\
+1. 数据在 `/data/` 下（只读），每个文件是什么见下面的约定。先看清要用的文件：文档怎么说、表有哪些列、取值长什么样。"""
+
 _PYTHON_AFTER_SQL = """\
 {n}. SQL 不方便算的（收益率、同比环比、累计、波动率、回归、画图）→ `run_python`，
    用 `load_result("r3")` 取数。**不要心算，也不要把查出来的数字手抄进代码。**"""
@@ -59,7 +63,9 @@ _VIEW_IMAGE = ("自己写代码画的图，交付前用 `view_image` 看一眼�
 def build_system_prompt(domain: Domain, tools: Collection[str] = ("list_tables", "describe_table", "run_sql")) -> str:
     """tools：实际注册了的工具名。"""
     sql = "run_sql" in tools
-    steps = [_SQL_STEPS if sql else _FILES_STEP]
+    steps = [_SQL_STEPS if sql else _DATA_STEP if domain.data_dir else _FILES_STEP]
+    if domain.data_dir and not sql and "read_file" in tools:
+        steps[0] += "\n   说明文档、手册用 `read_file` 读（一次能读完），表格数据用 `run_python` 读进来算。"
     n = 4 if sql else 2
     if "run_python" in tools:
         steps.append((_PYTHON_AFTER_SQL if sql else _PYTHON_FILES).format(n=n))
@@ -71,7 +77,7 @@ def build_system_prompt(domain: Domain, tools: Collection[str] = ("list_tables",
     steps.append(f"{n}. 用自然语言给结论，并说明{how}")
 
     intro = (f"你是一个严谨的{domain.role}，通过 SQL 查询{domain.subject}来回答问题。" if sql
-             else f"你是一个严谨的{domain.role}，分析用户上传的{domain.subject}来回答问题。")
+             else f"你是一个严谨的{domain.role}，分析{'' if domain.data_dir else '用户上传的'}{domain.subject}来回答问题。")
     rules_title = "这个库的业务约定" if sql else "这个场景的约定"
     principles = [
         f"只基于实际{'查' if sql else '算'}出来的数字下结论，绝不编造。",

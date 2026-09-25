@@ -25,6 +25,8 @@ from .tools.sql.export_csv import ExportCsvTool
 from .tools.sql.list_tables import ListTablesTool
 from .tools.sql.results import ResultStore, result_resolver, result_saver
 from .tools.sql.run_sql import RunSqlTool
+from .tools.paths import SandboxPaths
+from .tools.read_file import ReadFileTool
 from .tools.view_image import ViewImageTool
 
 
@@ -125,6 +127,9 @@ def build_application(
             tools.register(tool)
     # 沙箱：场景包要、.env 里也开着才有。第一次调用才启动容器；两个容器挂同一个工作目录
     sandboxes: dict[str, Sandbox] = {}
+    data_dir = Path(domain.data_dir) if domain.data_dir else None
+    if data_dir is not None and not data_dir.is_dir():
+        raise FileNotFoundError(f"场景包 {domain.name} 的数据目录 {data_dir} 不存在（在项目根目录下运行？数据下载了吗？）")
     for kind, enabled, image, kernel, tool_class in (
         ("python", settings.python_sandbox, settings.sandbox_image, PYTHON_KERNEL, RunPythonTool),
         ("r", settings.r_sandbox, settings.sandbox_r_image, R_KERNEL, RunRTool),
@@ -133,11 +138,15 @@ def build_application(
             sandboxes[kind] = Sandbox.docker(
                 image, kernel, work_dir, result_resolver(results), timeout_s=settings.sandbox_timeout_s,
                 memory=settings.sandbox_memory, cpus=settings.sandbox_cpus, save=result_saver(results, kind),
+                data_dir=data_dir,
             )
             tools.register(tool_class(sandboxes[kind]))
-    # 看自己画的图。模型不能看图就不注册：提示词按注册的工具拼，「交付前看一眼」那句也就没了
-    if sandboxes and llm.vision:
-        tools.register(ViewImageTool(work_dir))
+    # 读文档、看图：有沙箱才有文件可读。看图要模型能看：不注册的话，提示词里「交付前看一眼」那句也就没了
+    if sandboxes:
+        paths = SandboxPaths(work_dir, data_dir)
+        tools.register(ReadFileTool(paths))
+        if llm.vision:
+            tools.register(ViewImageTool(paths))
 
     # --- 上下文 ---
     # 触发线不超过「窗口 - 余量」：换成小窗口的模型时不能等到 10 万才动手

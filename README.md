@@ -124,12 +124,15 @@ pytest
 │   │   │   ├── run_r.py            在沙箱里跑 R
 │   │   │   ├── kernel.R            R 版内核，协议和 Python 的一样
 │   │   │   └── templates.R         meta 分析模板 fh_*：算法和版式对齐 RevMan 5（见「医学科研」一节）
-│   │   └── view_image.py       把 work/ 下的一张图发给模型看（模型能看图时才注册）
+│   │   ├── paths.py            模型写的路径（/data/…、/work/…、相对路径）→ 宿主机路径，只放行两个目录
+│   │   ├── read_file.py        按行读文本文件、带行号（学 Claude Code 的 Read），一次能读完一份手册
+│   │   └── view_image.py       把一张图发给模型看（模型能看图时才注册）
 │   │
 │   ├── domains/                ★ 场景包：数据在哪、业务约定、要哪些工具，.env 里 DOMAIN= 选
 │   │   ├── shop.py               自己造的电商库
 │   │   ├── financial.py          BIRD 的捷克银行库
-│   │   └── research.py           医学科研（系统评价 / meta 分析）：不连数据库，分析上传的文件
+│   │   ├── research.py           医学科研（系统评价 / meta 分析）：不连数据库，分析上传的文件
+│   │   └── payments.py           支付数据（DABstep）：数据文件只读挂进沙箱的 /data/
 │   │
 │   ├── session/                ★ 会话落盘（学 pi / Claude Code 的 JSONL 日志）
 │   │   ├── store.py              会话目录；每轮成功之后追加日志；读回历史（--resume）
@@ -526,6 +529,32 @@ BCG 那题的 RR 0.49（0.34–0.70）、I² 92% 和教科书一致。
 一次已经指出了 Heard 1998 的错，又去手算 τ² = 0 时 M-H 固定效应和随机效应为什么不一样（RevMan 的随机效应用倒方差权重，本来就不一样）。
 自己画图的 4 个 trial 里 3 个交付前看了图。标准误陷阱 3/3 都换算对了，还发现了源数据里一个方差异常小的研究。
 
+### DABstep：支付数据多步分析（公开评测）
+
+[DABstep](https://huggingface.co/spaces/adyen/DABstep) 是 Adyen 出的数据分析 Agent 评测：13.8 万笔支付交易、
+1000 条手续费规则、商户资料和一份业务手册，考「读懂文档里的规则，再用代码逐笔算」—— SQL 做不了，考的是 Python 沙箱。
+
+```bash
+python -m evals.dabstep.prepare                         # 下载数据到 data/dabstep/（不进 git），生成两个题库
+python -m evals.run --cases dabstep_dev --trials 3      # 10 道有答案的题，本地判分
+python -m evals.run --cases dabstep --trials 1          # 450 道正式题，答案不公开
+python -m evals.dabstep.submission <运行目录>            # 导出排行榜要的 submission.jsonl，去排行榜网页手动提交
+```
+
+- **场景包 `payments`**：不连数据库，只有 Python 沙箱。数据文件只读挂进容器的 `/data/`（`Domain.data_dir`），不往每个 trial 复制。
+  约定里只写文件是什么、先读手册，不写任何题的口径。
+- **答题格式**：题目原文后面附官方的格式要求，让模型最后一行写「最终答案：…」，评测只看这一行。
+- **判分**：官方的 `question_scorer` 原样拷贝在 `evals/dabstep/scorer.py`（官方的测试也一起搬了过来，保证和排行榜一致）。
+- 450 道正式题的答案不公开。数据集里有别人的提交和逐题得分，理论上能反推出答案，但那等于绕过它故意隐藏的测试集，不这么做。
+
+**首个基线**（2026-09-26，deepseek-flash，dev 10 题 × 3 次，max_steps 25）：回答对 **30%**，pass^3 10%，
+平均 16 步、97 秒、25 万输入 token（缓存 95%）。**30 次里 10 次步数耗尽**：手册有 2.2 万字符，工具结果上限 6000，
+模型得分段读，每道题开头光读文档、逛数据就花掉约 10 步。答错的两类：算出了手册定义的指标却按常识下结论
+（「欺诈最多」手册定义是金额占比，它按笔数选了）；手册里没有的概念（「高欺诈罚款」）不答 Not Applicable，自己编一个解释。
+
+**加 `read_file` 之后**（同一天，同样配置）：回答对 **47%**、pass^3 30%，步数耗尽 10 → 2 次，平均 12.6 步。
+同时试了 40 步：50%（多对 1 次，噪声范围内），输入 token 却多 60%，剩下的步数耗尽 40 步也做不完 —— 维持 25 步。
+
 ### BIRD Mini-Dev：financial 库（公开评测）
 
 自建题库都满分了，量不出改进。[BIRD Mini-Dev](https://github.com/bird-bench/mini_dev) 是公开的 text-to-SQL 评测，
@@ -607,7 +636,7 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 | 想加的东西 | 动哪里 | 大致做法 |
 |---|---|---|
 | **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 两层都已实现：10 万时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）；清理后还超 15 万，把较早的回合交给模型写成滚动摘要，保留最近约 2 万 token 原文（`CompactHistory`）。API 报上下文超长时强制整理一次再重试（写摘要的请求自己也超长，就丢掉最老的一半回合再写，最多 3 次）；自动压缩失败不中断这一轮，连续失败 3 次熔断（只清理不压缩，`/compact` 成功后恢复）；`/compact` 手动压缩 |
-| **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，配一个按位置读的工具（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，会话目录已经有了（`Session.root`），放在它下面的 `tool-results/` |
+| **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，用 `read_file` 按行号分页读（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，会话目录已经有了（`Session.root`），放在它下面的 `tool-results/` |
 | **长期记忆** | 新包 `memory/`；索引走 `Agent(session_context=...)`，召回的正文走一道 `ContextEdit` | 索引在会话开始时拼进系统提示词、会话中不变（变了缓存全废）；每次提问挑几条相关的，作为标记并进这条用户消息。设计见 refs 里的对比笔记 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
 | **画图、统计** | 已实现：`tools/python/`、`tools/r/` | `run_python` / `run_r` 在沙箱里跑，图存进 `work/figures/`；meta 分析有 RevMan 5 模板 |

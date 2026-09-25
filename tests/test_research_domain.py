@@ -24,7 +24,7 @@ def test_不连数据库_只有沙箱工具(tmp_path):
     app = research_app(tmp_path)
     try:
         assert app.db is None and app.inspector is None
-        assert [t.name for t in app.tools] == ["run_python", "run_r"]
+        assert [t.name for t in app.tools] == ["run_python", "run_r", "read_file"]
         assert set(app.sandboxes) == {"python", "r"}
         assert not any(s.running for s in app.sandboxes.values()), "第一次调用才启动容器"
         assert app.agent.session_context is None
@@ -34,7 +34,7 @@ def test_不连数据库_只有沙箱工具(tmp_path):
 
 def test_沙箱关掉的就不注册(tmp_path):
     app = research_app(tmp_path, r_sandbox=False)
-    assert [t.name for t in app.tools] == ["run_python"]
+    assert [t.name for t in app.tools] == ["run_python", "read_file"]
     assert "run_r" not in app.agent.system_prompt
 
 

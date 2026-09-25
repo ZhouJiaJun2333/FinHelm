@@ -38,6 +38,11 @@
      "expect_text": ["Heard"],                     回答里必须出现（正则）：该指出的问题指出了没有
      "expect_figure": true}                        至少画出一张图
 
+DABstep（payments 场景，数据挂在 /data/，不上传文件）：回答最后一行写「最终答案：…」，按官方规则判。
+
+    {"id": "dab-1273", "question": "...", "official_answer": "0.120132"}
+    {"id": "dab-1274", "question": "...", "answer_hidden": true}    正式题答案不公开：不判分，只导出提交文件
+
 题库级配置：没有 id 的一行，整个题库都用它。
     settings   覆盖配置（优先级：.env < 这里 < 命令行 --set）。BIRD 的题库靠它选场景包
     submit     提交轮：每题答完之后追问这句话，收一条 SQL 按 BIRD 官方规则判（见 runner.py）
@@ -73,15 +78,19 @@ class Case:
     expect_code: tuple[str, ...] = ()
     expect_text: tuple[str, ...] = ()
     expect_figure: bool = False
+    # DABstep（见开头）
+    official_answer: str | None = None
+    answer_hidden: bool = False
 
     @property
     def graded(self) -> bool:
-        return not self.filler
+        return not self.filler and not self.answer_hidden
 
     @property
-    def uses_files(self) -> bool:
-        """上传文件的题：没有 SQL 可比，按回答、代码、图判。"""
-        return bool(self.files)
+    def no_sql(self) -> bool:
+        """没有 SQL 可比的题（上传文件、DABstep）：按回答、代码、图判，每个 trial 一个工作目录。"""
+        return bool(self.files or self.gold_values or self.expect_code or self.expect_text or self.expect_figure
+                    or self.official_answer is not None or self.answer_hidden)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,12 +181,15 @@ def _case(d: dict, case_id: str) -> Case:
         expect_code=tuple(d.get("expect_code", ())),
         expect_text=tuple(d.get("expect_text", ())),
         expect_figure=d.get("expect_figure", False),
+        official_answer=d.get("official_answer"),
+        answer_hidden=d.get("answer_hidden", False),
     )
-    if case.uses_files:
+    if case.files or case.no_sql:
         if missing := [f for f in case.files if not (CASES_DIR / f).is_file()]:
             raise ValueError(f"{case_id}：找不到文件 {missing}")
-        if not (case.gold_values or case.expect_code or case.expect_text or case.expect_figure):
-            raise ValueError(f"{case_id}：上传文件的题至少要有一项判分依据（gold_values / expect_*）")
+        if not (case.gold_values or case.expect_code or case.expect_text or case.expect_figure
+                or case.official_answer is not None or case.answer_hidden):
+            raise ValueError(f"{case_id}：上传文件的题至少要有一项判分依据（gold_values / expect_* / official_answer）")
         return case
     if case.match == "answer" and not case.answer_sql:
         raise ValueError(f"{case_id}：match=answer 的题要写 answer_sql")

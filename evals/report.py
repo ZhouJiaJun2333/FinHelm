@@ -123,7 +123,8 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
         },
         "按标签": {tag: {**rates(ts), "trials": len(ts)} for tag, ts in sorted(by_tag.items())},
         "逐题": per_case,
-        **({"上传文件": file_stats(files)} if (files := [t for t in trials if t.uses_files]) else {}),
+        **({"上传文件": file_stats(files)} if (files := [t for t in trials if t.no_sql]) else {}),
+        "只看最终答案": bool(trials) and all(t.official for t in trials),
     }
 
 
@@ -212,7 +213,8 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         "",
         "| 指标 | 值 |",
         "|:--|--:|",
-        *([f"| pass@1 要求的步骤都做了（模板、图、指出数据问题） | {pct(p1['结果对'])} |"] if files else [
+        *([] if s.get("只看最终答案") else
+          [f"| pass@1 要求的步骤都做了（模板、图、指出数据问题） | {pct(p1['结果对'])} |"] if files else [
             f"| pass@1 结果对 | {pct(p1['结果对'])} |",
             f"| pass@1 严格（列数也一样） | {pct(p1['严格'])} |"]),
         f"| **pass@1 回答对** | **{pct(p1['回答对'])}** |",
@@ -262,7 +264,7 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
                     f"- 没交出 SQL（按最后一条算）：{sub['没交SQL']} 次",
                     "- 对外的分数用官方脚本算（python -m evals.bird.official <这个目录>）：官方连类型都比，"
                     "float 和 Decimal 值一样也算错，会比上面的低", ""]
-    if files:
+    if files and files["自己画图的trial"]:
         out += ["## 看图", "",
                 f"- 自己写代码画了图（没用 fh_ 模板）的 trial：{files['自己画图的trial']} 个，"
                 f"其中交付前用 view_image 看了图的 {files['画完看了图的trial']} 个",
@@ -284,7 +286,7 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
     out += ["", "## 逐题", "", "| 题 | 问题 | 回答对 | 缓存命中 | 失败 |", "|:--|:--|--:|--:|:--|"]
     for cid, c in s["逐题"].items():
         fails = "，".join(f"{k}×{v}" for k, v in c["失败"].items())
-        out.append(f"| {cid} | {c['question']} | {c['回答对']}/{c['trials']} | {pct(c['缓存命中率'])} | {fails} |")
+        out.append(f"| {cid} | {c['question'].splitlines()[0]} | {c['回答对']}/{c['trials']} | {pct(c['缓存命中率'])} | {fails} |")
 
     if diff is not None:
         out += ["", f"## 和上一次比（{meta.get('compared_with', '')}）", ""]

@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None) -> None:
     gold = {c.id: run_gold(c, db) for c in graded}
     # 自检：标准答案和它自己比必须算对。不对说明判分器或者题目的 match 写错了
     for c in graded:
-        if c.uses_files:
+        if c.no_sql:
             # 标准值写进回答里必须判对（容差、正负号的处理有问题的话这里就能发现）
             if c.gold_values and not check_values(c.gold_values, " ".join(map(str, c.gold_values))).ok:
                 sys.exit(f"{c.id} 的 gold_values 原样写进回答都判不对，先检查判分器")

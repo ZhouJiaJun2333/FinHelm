@@ -89,7 +89,9 @@ class Sandbox:
     def docker(
         cls, image: str, kernel: KernelSpec, work_dir: Path, resolve: Resolve, *,
         timeout_s: float = 60, memory: str = "2g", cpus: float = 2, save: Save | None = None,
+        data_dir: Path | None = None,
     ) -> "Sandbox":
+        """data_dir：场景包自带的数据，只读挂到容器的 /data/。"""
         work_dir = work_dir.resolve()
         name = f"finhelm-sandbox-{secrets.token_hex(4)}"
         mounts = [arg for f in kernel.files for arg in
@@ -102,6 +104,7 @@ class Sandbox:
             "--memory", memory, "--memory-swap", memory, "--cpus", str(cpus), "--pids-limit", "128",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000",
             "--mount", f"type=bind,source={work_dir},target=/work", *mounts,
+            *(("--mount", f"type=bind,source={data_dir.resolve()},target=/data,readonly") if data_dir else ()),
             "-w", "/work", *env,
             image, *kernel.command, f"{MOUNT}/{kernel.files[0].name}",
         ]

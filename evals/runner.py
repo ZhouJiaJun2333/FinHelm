@@ -42,6 +42,7 @@ from data_agent.tools.sandbox import Execution
 from data_agent.tools.sql.results import REF, ResultStore, markdown_table
 
 from .cases import CASES_DIR, Case, Session
+from .dabstep.scorer import question_scorer
 from .graders import AnswerCheck, ResultMatch, check_answer, check_values, compare_results, said_scalar
 
 # 判分时重跑 SQL 最多取多少行。标准答案不会有这么多行；Agent 的查询超过这个数，肯定不对。
@@ -109,12 +110,14 @@ class Trial:
     transcript: list[dict[str, Any]] = field(default_factory=list)
     graded: bool = True                   # 多轮会话里的填充轮不判分
     # 上传文件的题（research）
-    uses_files: bool = False
+    no_sql: bool = False
     code: list[str] = field(default_factory=list)        # run_python / run_r 执行过的代码
     figures: list[str] = field(default_factory=list)     # 出过的图（相对工作目录）
     # 自己写代码画的图（不是 fh_ 模板画的）有几次，其中几次之后调了 view_image
     custom_plots: int = 0
     viewed_after: int = 0
+    final_answer: str = ""                # DABstep：回答最后「最终答案：」那一行，提交文件用它
+    official: bool = False                # DABstep 的题：只按「最终答案」判
 
     # ------------------------------------------------------------ 结论
     @property
@@ -148,7 +151,9 @@ class Trial:
             return "步数耗尽"
         if self.text_ok:
             return ""
-        if self.uses_files:
+        if self.official:
+            return "" if self.answer_ok else "最终答案不对"
+        if self.no_sql:
             if not self.result_ok:
                 return "要求的步骤没做"
             return "" if self.answer_ok else "回答里的数字不对"
@@ -169,6 +174,8 @@ class Trial:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Trial":
         """to_dict 的反操作，给 --rebuild 用。to_dict 多写的几个结论字段（result_ok 等）丢掉，现算。"""
+        if "uses_files" in d:                    # 2026-09-26 改名前的运行记录
+            d["no_sql"] = d.pop("uses_files")
         d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         d["sql_calls"] = [SqlCall(**c) for c in d.get("sql_calls", [])]
         d["usage"] = Usage(**d["usage"])
@@ -189,18 +196,19 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database | None,
     """让 Agent 回答一道题（题库要求的话再加一轮提交），然后判分。
 
     任何异常都记进结果，不往外抛 —— 一题出错不能拖垮整批。
-    work_root：上传文件的题每个 trial 在它下面建自己的工作目录（并发的 trial 不能共用 figures/）。
+    work_root：没有 SQL 的题每个 trial 在它下面建自己的工作目录（并发的 trial 不能共用 figures/）。
     """
     events: list[Event] = []
-    t = Trial(case.id, trial, uses_files=case.uses_files)
+    t = Trial(case.id, trial, no_sql=case.no_sql, graded=case.graded,
+              official=case.official_answer is not None or case.answer_hidden)
     results = ResultStore()
     started = time.perf_counter()
     app = None
-    work_dir = (work_root / f"{case.id}-{trial}") if case.uses_files and work_root else None
+    work_dir = (work_root / f"{case.id}-{trial}") if case.no_sql and work_root else None
     try:
         app = build_application(settings, on_event=collect_sink(events), results=results, work_dir=work_dir)
         question = case.question
-        if case.uses_files:
+        if case.files:
             app.attach([CASES_DIR / f for f in case.files])
             question = app.with_uploads(question)
         try:
@@ -441,7 +449,7 @@ def grade(t: Trial, case: Case, db, gold: Gold) -> None:
     t.matched_sql = t.grade_error = ""
     if t.submission is not None:
         t.submission.strict = False
-    if case.uses_files:
+    if case.no_sql:
         grade_files(t, case)
         return
     if case.match == "answer":
@@ -487,8 +495,25 @@ def grade(t: Trial, case: Case, db, gold: Gold) -> None:
 NO_DATA_WORDS = ("没有", "无数据", "不存在", "为空", "暂无", "查不到")
 
 
+FINAL = re.compile(r"最终答案\s*[:：]\s*(.+)")
+
+
+def extract_final(answer: str) -> str:
+    """回答里最后一个「最终答案：」后面的内容，去掉 Markdown 的加粗、反引号。"""
+    found = FINAL.findall(answer)
+    return found[-1].strip().strip("*`").strip() if found else ""
+
+
 def grade_files(t: Trial, case: Case) -> None:
-    """上传文件的题：该做的做了没有（代码、图、回答里该指出的问题）记在 result，数字记在 answer_check。"""
+    """没有 SQL 的题：该做的做了没有（代码、图、回答里该指出的问题）记在 result，数字记在 answer_check。
+    DABstep 的题只看「最终答案」那一行，按官方规则比。"""
+    t.final_answer = extract_final(t.answer)
+    if case.official_answer is not None:
+        ok = bool(t.final_answer) and question_scorer(t.final_answer, case.official_answer)
+        reason = "" if ok else (f"最终答案 {t.final_answer!r}，标准答案 {case.official_answer!r}" if t.final_answer
+                                else "回答里没有「最终答案：」那一行")
+        t.result = ResultMatch(ok, ok, reason)
+        return
     code = "\n".join(t.code)
     problems = [f"代码里没有 {p}" for p in case.expect_code if not re.search(p, code, re.DOTALL)]
     answer = t.shown or t.answer          # {{r5}} 展开成整张表之后：表里的数用户看得到，就算说过了

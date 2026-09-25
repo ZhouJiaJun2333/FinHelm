@@ -55,12 +55,14 @@ class Tool(ABC):
     """工具基类：name、description（本质上是提示词）、Args、run()。
 
     rerunnable：只读、没副作用、同样参数给同样结果。只有这种工具的旧结果会被上下文清理。
+    max_output_chars：结果的字符上限。读文档的工具要大一些（一次读完一份手册，省得分好几步）。
     """
 
     name: ClassVar[str]
     description: ClassVar[str]
     Args: ClassVar[type[BaseModel]]
     rerunnable: ClassVar[bool] = False
+    max_output_chars: ClassVar[int] = MAX_OUTPUT_CHARS
 
     def schema(self) -> dict[str, Any]:
         """中立格式的工具描述，provider 再翻译成自家格式。"""
@@ -82,14 +84,14 @@ class Tool(ABC):
             args = self.Args(**raw_args)
         except ValidationError as exc:
             # 校验错误原样告诉模型，它通常下一轮就能改对
-            return ToolOutput.error(f"参数不合法：{exc}").capped()
+            return ToolOutput.error(f"参数不合法：{exc}").capped(self.max_output_chars)
         try:
             out = self.run(args)
             if not isinstance(out, ToolOutput):
                 out = ToolOutput(str(out))
-            return out.capped()
+            return out.capped(self.max_output_chars)
         except Exception as exc:  # noqa: BLE001 —— 故意兜住所有异常喂回模型
-            return ToolOutput.error(f"{type(exc).__name__}: {exc}").capped()
+            return ToolOutput.error(f"{type(exc).__name__}: {exc}").capped(self.max_output_chars)
 
 
 # ================================================================ 注册表

@@ -28,6 +28,7 @@ from data_agent.llm.openai_provider import (
 )
 from data_agent.session.codec import decode, encode
 from data_agent.settings import Settings, build_provider
+from data_agent.tools.paths import SandboxPaths
 from data_agent.tools.view_image import MAX_EDGE, ViewImageTool
 
 from fakes import ScriptedProvider, make_agent
@@ -49,7 +50,7 @@ def decoded(image: Image) -> PILImage.Image:
 # ============================================================ 工具
 @pytest.fixture
 def tool(tmp_path):
-    return ViewImageTool(tmp_path)
+    return ViewImageTool(SandboxPaths(tmp_path))
 
 
 def test_相对路径_小图原样发(tool, tmp_path):
@@ -89,7 +90,7 @@ def test_工作目录外的文件不给看(tool, tmp_path):
     save(tmp_path.parent / "secret.png")
     for path in ("../secret.png", str(tmp_path.parent / "secret.png"), "/work/../secret.png"):
         out = tool.execute({"path": path})
-        assert out.is_error and "只能看工作目录" in out.content, path
+        assert out.is_error and "只能读工作目录" in out.content, path
 
 
 def test_找不到时列出有哪些图(tool, tmp_path):
@@ -118,7 +119,7 @@ def test_工具结果的图片进了历史():
     agent, _ = make_agent([
         _reply(tool_calls=[ToolCall("c1", "view_image", {"path": "figures/a.png"})]),
         _reply("图没问题"),
-    ], tools=[OneImage(Path("."))])
+    ], tools=[OneImage(SandboxPaths(Path(".")))])
     agent.run("看看图")
     tool_msg = agent.context.render()[2]
     assert tool_msg.role == "tool" and tool_msg.images == (PNG,)
@@ -252,7 +253,7 @@ def research_app(tmp_path, vision: bool, **settings):
 
 def test_能看图_注册view_image_提示词叫它交付前看一眼(tmp_path):
     app = research_app(tmp_path, vision=True)
-    assert [t.name for t in app.tools] == ["run_python", "run_r", "view_image"]
+    assert [t.name for t in app.tools] == ["run_python", "run_r", "read_file", "view_image"]
     prompt = app.agent.system_prompt
     assert "交付前用 `view_image` 看一眼" in prompt and "`fh_` 模板画的图不用看" in prompt
     assert app.agent.context.edits[0].tools >= {"view_image"}, "旧图可以清理"
