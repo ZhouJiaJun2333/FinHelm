@@ -177,7 +177,10 @@ def test_run_sql的摘要_大结果给形状_小结果直接给值():
     assert _summarize(agg) == "1 行：total=200, null_region=NULL"
 
     truncated = QueryResult(["id"], [(1,), (2,)], truncated=True, elapsed_ms=1)
-    assert _summarize(truncated).endswith("当时已被截断")
+    assert _summarize(truncated).endswith("行被截断")
+
+    # 带上编号：结果被清掉以后，模型还能用编号指认它
+    assert _summarize(table, "r3").startswith("结果 r3：42 行")
 
 
 def test_输出过长被截断时摘要还在():

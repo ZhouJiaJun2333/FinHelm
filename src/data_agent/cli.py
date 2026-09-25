@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import csv
 import sys
+from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -25,6 +28,7 @@ from .core.events import (
 )
 from .core.messages import Usage
 from .settings import Settings
+from .tools.sql.run_sql import FULL_ROWS, SqlResult, markdown_table
 
 BANNER = """
 ┌──────────────────────────────────────────────────┐
@@ -36,8 +40,8 @@ BANNER = """
 └──────────────────────────────────────────────────┘"""
 
 
-def make_console_sink(verbose: bool):
-    """把 Agent 事件打印到终端。"""
+def make_console_sink(verbose: bool, out_dir: Path):
+    """把 Agent 事件打印到终端。大结果的完整数据存成 CSV 放在 out_dir。"""
 
     def sink(event: Event) -> None:
         match event:
@@ -53,6 +57,10 @@ def make_console_sink(verbose: bool):
             case ToolStarted(name=name, arguments=args):
                 shown = _preview(args, 400 if verbose else 200)
                 print(f"\n🔧 {name}  {shown}")
+
+            case ToolFinished(ok=True, details=SqlResult() as table, elapsed_ms=ms):
+                # 用户看的是完整结果，不是模型看到的预览
+                print(f"✅ ({ms}ms)\n{_show_table(table, out_dir)}")
 
             case ToolFinished(ok=ok, content=content, elapsed_ms=ms):
                 mark = "✅" if ok else "❌"
@@ -77,6 +85,30 @@ def make_console_sink(verbose: bool):
                 print(f"\n🧹 {what}：上下文 {_k(before)} → {_k(after)}（估算）{cost}")
 
     return sink
+
+
+def _show_table(table: SqlResult, out_dir: Path) -> str:
+    """终端里放前 FULL_ROWS 行；更多的整张存成 CSV（Excel 能直接打开）。"""
+    r = table.result
+    text = f"结果 {table.ref}：{r.row_count} 行 × {len(r.columns)} 列\n"
+    text += markdown_table(r.columns, r.rows[:FULL_ROWS])
+    if r.row_count > FULL_ROWS:
+        path = save_csv(table, out_dir)
+        text += f"\n…终端只显示前 {FULL_ROWS} 行，完整结果：{path}"
+    if r.truncated:
+        text += f"\n⚠️ 结果超过 {r.row_count} 行，只取了前 {r.row_count} 行"
+    return text
+
+
+def save_csv(table: SqlResult, out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{table.ref}.csv"
+    # utf-8-sig：带 BOM，Excel 打开中文不乱码
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(table.result.columns)
+        writer.writerows(table.result.rows)
+    return path
 
 
 def _k(n: int) -> str:
@@ -167,10 +199,12 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     verbose = "--verbose" in sys.argv
+    # 每次启动一个目录：编号从 r1 重新数，放一起会互相覆盖
+    out_dir = Path("outputs") / f"{datetime.now():%Y%m%d-%H%M%S}"
 
     settings = Settings()
     try:
-        app = build_application(settings, on_event=make_console_sink(verbose))
+        app = build_application(settings, on_event=make_console_sink(verbose, out_dir))
     except Exception as exc:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")
