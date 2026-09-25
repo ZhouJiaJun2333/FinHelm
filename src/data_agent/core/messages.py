@@ -111,6 +111,9 @@ class Message:
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_call_id: str | None = None   # role="tool" 时，对应哪次调用
+    # role="tool" 时：这次调用失败了（报错、被拒绝）。Anthropic 翻译成 tool_result 的 is_error；
+    # OpenAI 系没有这个字段，靠 content 里的报错文字。上下文清理不清失败的结果。
+    is_error: bool = False
 
     # provider 的原生 content（比如 Anthropic 的 content blocks 列表）。
     # 回传历史时优先用它 —— 自己拼 text 回去会丢掉 thinking 块等信息。
@@ -131,9 +134,10 @@ class Message:
         return Message(role="assistant", content=text)
 
     @staticmethod
-    def tool_result(tool_call_id: str, content: str, summary: str = "") -> "Message":
+    def tool_result(tool_call_id: str, content: str, *, is_error: bool = False,
+                    summary: str = "") -> "Message":
         return Message(role="tool", content=content, tool_call_id=tool_call_id,
-                       meta=MessageMeta(summary=summary))
+                       is_error=is_error, meta=MessageMeta(summary=summary))
 
 
 # 「话说到一半被 max_tokens 砍断」的 stop_reason。Anthropic 叫 max_tokens，OpenAI 系叫 length。

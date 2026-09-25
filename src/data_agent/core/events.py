@@ -37,8 +37,8 @@ class ToolStarted:
 @dataclass(slots=True)
 class ToolFinished:
     name: str
-    ok: bool
     content: str             # 模型看到的那份
+    is_error: bool
     elapsed_ms: int
     # 工具给界面的数据（ToolOutput.details），模型看不到。界面想展示完整结果就用它
     details: Any = None

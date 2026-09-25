@@ -26,11 +26,20 @@ class ClearOldToolResults(ContextEdit):
         trigger_tokens  请求估算超过它才动手
         keep_recent     最近几条工具结果不动（模型多半正在用）
         clear_at_least  一次至少要省下这么多，否则不清 —— 见下面「缓存」
-        exclude_tools   这些工具的结果永远不清
+        tools           只清这些工具的结果；None = 不限（测试里方便）。
+                        app.py 传的是「rerunnable 的工具」—— 见下面「只清能重拿的」
 
     为什么先清工具结果：它是上下文里最大的一块（SQL 结果表格），而且
     **能重新拿到** —— 调用参数（那条 SQL）还留在 assistant 消息里，占位里
     还留着线索。用户的原话、模型的结论清掉就找不回来了，那是摘要的事。
+
+    ── 只清能重拿的、成功的结果 ──────────────────────────────────────
+    占位对模型说「重新调用一次即可」，这句话只对只读工具成立：导出文件的工具重跑一次
+    就多写一个文件。能不能重拿只有工具自己知道（Tool.rerunnable），所以是白名单，
+    由组装层从工具上读出来传进来 —— Claude Code 的 microcompact 也是白名单
+    （读文件、搜索、bash 这几种），不是按大小一刀切。
+    失败的结果（报错、被拒绝）不清：它们记着「这条路走不通、为什么」，换成
+    「重新调用一次即可」等于鼓励模型再撞一次墙。
 
     ── 原件不删，只改视图 ────────────────────────────────────────────
     历史里的工具结果一个字不动。决定清理时往历史追加一个 ToolResultsCleared
@@ -60,12 +69,12 @@ class ClearOldToolResults(ContextEdit):
         trigger_tokens: int = 100_000,
         keep_recent: int = 3,
         clear_at_least: int = 10_000,
-        exclude_tools: Iterable[str] = (),
+        tools: Iterable[str] | None = None,
     ) -> None:
         self.trigger_tokens = trigger_tokens
         self.keep_recent = keep_recent
         self.clear_at_least = clear_at_least
-        self.exclude_tools = frozenset(exclude_tools)
+        self.tools = None if tools is None else frozenset(tools)
 
     @classmethod
     def placeholder(cls, m: Message) -> str:
@@ -112,7 +121,7 @@ class ClearOldToolResults(ContextEdit):
         return ToolResultsCleared(frozenset(m.tool_call_id for m in targets))
 
     def _clearable(self, entries: list[Entry]) -> list[Message]:
-        """能清的工具结果：还没清过、不在排除名单里、不是最近 keep_recent 条，而且换成占位确实更短。"""
+        """能清的工具结果：还没清过、成功的、白名单里的工具、不是最近 keep_recent 条，而且换成占位确实更短。"""
         messages = [e for e in entries if isinstance(e, Message)]
         cleared = _cleared_ids(entries)
         tool_names = {c.id: c.name for m in messages for c in m.tool_calls}
@@ -121,19 +130,11 @@ class ClearOldToolResults(ContextEdit):
         return [
             m for m in older
             if m.tool_call_id not in cleared
-            and tool_names.get(m.tool_call_id) not in self.exclude_tools
-            and self._saves_space(m)
+            and not m.is_error
+            and (self.tools is None or tool_names.get(m.tool_call_id) in self.tools)
+            # 占位本身有七八十个字，「1 行：total=4242」这种小结果换了反而更长
+            and estimate_message(m) > estimate_text(self.placeholder(m))
         ]
-
-    def _saves_space(self, m: Message) -> bool:
-        """占位比原文短才值得换。
-
-        占位本身有七八十个字，短结果换了反而更长：审批拒绝的「用户拒绝执行：xxx」、
-        「1 行：total=4242」这种。拒绝消息被换掉还会**改变意思** —— 占位说「重新调用一次即可」，
-        等于鼓励模型再去试一次被拒绝的操作。按长度一刀切，这两个问题一起没了，不用给拒绝消息
-        单独打标记（Claude Code 的 microcompact 也只清大结果）。
-        """
-        return estimate_message(m) > estimate_text(self.placeholder(m))
 
     def status(self, entries: list[Entry]) -> str | None:
         n = len(_cleared_ids(entries))

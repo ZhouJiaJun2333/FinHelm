@@ -14,6 +14,7 @@ from ...core.tools import Tool, ToolOutput
 
 class ListTablesTool(Tool):
     name = "list_tables"
+    rerunnable = True          # 只读查询：旧结果被清理后，再调一次就能拿回来
     description = (
         "列出数据库里所有可查询的表，返回表名、大致行数和表注释（业务含义）。"
         "当你不确定有哪些数据、或者用户问『我们有什么数据』时，先用这个。"
@@ -39,4 +40,4 @@ class ListTablesTool(Tool):
         lines.append("注：行数是 PG 的统计估算值，不是精确值；要精确数字请用 run_sql 查 count(*)。")
         lines.append("需要列名和类型，用 describe_table。")
         summary = f"共 {len(tables)} 张表：" + ", ".join(t.qualified_name for t in tables)
-        return ToolOutput(True, "\n".join(lines), summary)
+        return ToolOutput("\n".join(lines), summary)

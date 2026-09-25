@@ -144,11 +144,11 @@ def test_从事件里取出每条SQL和成败():
     events = [
         LLMResponded(1, "", ["run_sql"]),
         ToolStarted("run_sql", {"sql": "SELECT bad", "purpose": "试试"}),
-        ToolFinished("run_sql", False, "列不存在", 3),
+        ToolFinished("run_sql", "列不存在", is_error=True, elapsed_ms=3),
         ToolStarted("describe_table", {"table": "orders"}),
-        ToolFinished("describe_table", True, "…", 2),
+        ToolFinished("describe_table", "…", is_error=False, elapsed_ms=2),
         ToolStarted("run_sql", {"sql": "SELECT good"}),
-        ToolFinished("run_sql", True, "| 1 |", 5),
+        ToolFinished("run_sql", "| 1 |", is_error=False, elapsed_ms=5),
     ]
     calls = extract_sql_calls(events)
     assert [(c.sql, c.ok) for c in calls] == [("SELECT bad", False), ("SELECT good", True)]
@@ -373,7 +373,7 @@ def test_回答引用了结果_按用户看到的整张表判分():
 
     rows = [("华东", 61), ("华北", 42)]
     table = SqlResult("r1", "SELECT", QueryResult(["region", "n"], rows, False, 1))
-    events = [ToolStarted("run_sql", {"sql": "SELECT"}), ToolFinished("run_sql", True, "预览", 1, table)]
+    events = [ToolStarted("run_sql", {"sql": "SELECT"}), ToolFinished("run_sql", "预览", is_error=False, elapsed_ms=1, details=table)]
     case = Case("x", "各区域多少单？", ("gold",), match="set")
 
     t = Trial("x", 1, answer="各区域订单数如下：\n{{r1}}")

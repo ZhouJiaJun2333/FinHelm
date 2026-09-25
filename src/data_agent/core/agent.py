@@ -341,7 +341,7 @@ class Agent:
             allowed, reason = self.approval_hook(call)
             if not allowed:
                 # 被拒绝也要给模型一条结果，否则它不知道发生了什么，会一直重试
-                self.context.add(Message.tool_result(call.id, f"用户拒绝执行：{reason}"))
+                self.context.add(Message.tool_result(call.id, f"用户拒绝执行：{reason}", is_error=True))
                 self.on_event(ToolDenied(name=call.name, reason=reason))
                 return
 
@@ -349,10 +349,11 @@ class Agent:
         result = self.tools.invoke(call.name, call.arguments)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-        self.context.add(Message.tool_result(call.id, result.content, result.summary))
+        self.context.add(Message.tool_result(call.id, result.content, is_error=result.is_error,
+                                             summary=result.summary))
         self.on_event(ToolFinished(
-            name=call.name, ok=result.ok, content=result.content, elapsed_ms=elapsed_ms,
-            details=result.details,
+            name=call.name, content=result.content, is_error=result.is_error,
+            elapsed_ms=elapsed_ms, details=result.details,
         ))
 
     def _render_system_prompt(self) -> str:

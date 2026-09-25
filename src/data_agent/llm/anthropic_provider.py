@@ -80,6 +80,8 @@ class AnthropicProvider(LLMProvider):
                     "tool_use_id": msg.tool_call_id,
                     "content": msg.content,
                 }
+                if msg.is_error:
+                    block["is_error"] = True
                 # 连续的工具结果要合并进同一条 user 消息。
                 # 拆开发会让模型以后不敢再并行调用工具。
                 if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):

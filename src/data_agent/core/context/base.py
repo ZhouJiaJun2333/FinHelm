@@ -287,7 +287,7 @@ def _fingerprint(view: list[Message]) -> str:
 def _wire_bytes(m: Message) -> bytes:
     """一条消息里**会发给模型**的部分。meta 不算 —— 它不影响请求内容。"""
     return json.dumps(
-        [m.role, m.content, m.tool_call_id,
+        [m.role, m.content, m.tool_call_id, m.is_error,
          [[c.id, c.name, c.arguments] for c in m.tool_calls],
          repr(m.raw)],
         ensure_ascii=False, sort_keys=True, default=str,

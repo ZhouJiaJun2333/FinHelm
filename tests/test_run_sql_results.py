@@ -47,7 +47,7 @@ def test_一次取够界面要的行数():
 def test_编号只增不减_空结果和出错不占号():
     tool = RunSqlTool(FakeDb(3))
     assert tool.execute({"sql": "SELECT 1"}).details.ref == "r1"
-    assert tool.execute({"sql": "DELETE FROM t"}).ok is False
+    assert tool.execute({"sql": "DELETE FROM t"}).is_error is True
     tool.db = FakeDb(0)
     assert tool.execute({"sql": "SELECT 1"}).details is None
     tool.db = FakeDb(3)
@@ -83,14 +83,14 @@ def test_导出按编号重跑当时的SQL_不认识的编号报错并列出已�
     export = ExportCsvTool(db, sql_tool.queries, tmp_path)
 
     out = export.execute({"ref": "r1"})
-    assert out.ok and "347 行 × 2 列" in out.content
+    assert not out.is_error and "347 行 × 2 列" in out.content
     assert db.max_rows_seen[-1] > FETCH_ROWS           # 导出可以比界面多拿
     text = (tmp_path / "r1.csv").read_text(encoding="utf-8-sig")
     assert text.splitlines()[:2] == ["name,amount", "客户0,0"]
     assert (tmp_path / "r1.csv").read_bytes().startswith(b"\xef\xbb\xbf")   # 带 BOM，Excel 不乱码
 
     bad = export.execute({"ref": "r9"})
-    assert not bad.ok and "r1" in bad.content
+    assert bad.is_error and "r1" in bad.content
 
 
 def test_导出文件名不能带路径_重名不覆盖(tmp_path):

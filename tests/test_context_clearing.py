@@ -1,7 +1,7 @@
 """第 2 步：清理较早的工具结果。
 
 守五件事：
-1. 什么时候清（阈值、保留最近几条、排除名单、省得不够就不清）
+1. 什么时候清（阈值、保留最近几条、只清白名单里的工具和成功的结果、省得不够就不清）
 2. 清的是视图不是原件，而且 tool_call / tool_result 仍然配对
 3. 锚点：清理之前量的作废，清理之后量的有效
 4. 缓存友好：除了清理那一步，每次请求都是上一次请求的纯追加
@@ -35,11 +35,11 @@ def measure(msgs: list[Message]) -> int:
 
 
 def add_tool_round(ctx, call_id: str, name: str = "run_sql", result: str = BIG_RESULT,
-                   usage: Usage | None = None) -> None:
+                   usage: Usage | None = None, is_error: bool = False) -> None:
     ctx.add(Message(role="assistant", content="查一下",
                     tool_calls=[ToolCall(call_id, name, {"sql": f"SELECT {call_id}"})],
                     meta=MessageMeta(usage=usage)))
-    ctx.add(Message.tool_result(call_id, result))
+    ctx.add(Message.tool_result(call_id, result, is_error=is_error))
 
 
 def make_ctx(n_calls: int, **kw) -> Context:
@@ -80,11 +80,12 @@ def test_超阈值时清掉较早的_保留最近keep条():
     assert contents[3:] == [BIG_RESULT, BIG_RESULT]
 
 
-def test_排除名单里的工具永远不清():
+def test_只清白名单里的工具():
+    """白名单 = 结果能重拿的工具。导出文件这类重跑一次就多写一个文件，不能叫模型「重新调用」。"""
     ctx = Context([ClearOldToolResults(trigger_tokens=3_000, keep_recent=0,
-                                       clear_at_least=500, exclude_tools=["describe_table"])])
+                                       clear_at_least=500, tools=["run_sql"])])
     ctx.add(Message.user("q"))
-    add_tool_round(ctx, "d1", name="describe_table")
+    add_tool_round(ctx, "e1", name="export_csv")
     for i in range(3):
         add_tool_round(ctx, f"c{i}")
 
@@ -92,6 +93,28 @@ def test_排除名单里的工具永远不清():
     contents = tool_contents(ctx.render())
     assert contents[0] == BIG_RESULT
     assert [cleared(c) for c in contents] == [False, True, True, True]
+
+
+def test_白名单来自工具自己的声明():
+    """能不能重拿只有工具知道。组装层从 rerunnable 读出来，上下文层不认识具体工具。"""
+    from data_agent.app import build_application
+    from data_agent.settings import Settings
+
+    app = build_application(Settings(provider="openai", openai_api_key="x"), llm=ScriptedProvider())
+    clear = next(e for e in app.agent.context.edits if isinstance(e, ClearOldToolResults))
+    assert clear.tools == {"list_tables", "describe_table", "run_sql"}
+
+
+def test_失败的结果不清():
+    """报错记着「这条路走不通、为什么」。换成「重新调用一次即可」等于叫模型再撞一次墙。"""
+    ctx = Context([ClearOldToolResults(trigger_tokens=3_000, keep_recent=0, clear_at_least=500)])
+    ctx.add(Message.user("q"))
+    add_tool_round(ctx, "bad", result="UndefinedColumn: " + "x" * 5_000, is_error=True)
+    for i in range(3):
+        add_tool_round(ctx, f"c{i}")
+
+    ctx.maintain(measure)
+    assert [cleared(c) for c in tool_contents(ctx.render())] == [False, True, True, True]
 
 
 def test_省得不够clear_at_least就不清():
@@ -184,8 +207,22 @@ def test_run_sql的摘要_大结果给形状_小结果直接给值():
 
 
 def test_输出过长被截断时摘要还在():
-    out = ToolOutput(True, "x" * 10_000, summary="线索").capped(100)
+    out = ToolOutput("x" * 10_000, summary="线索").capped(100)
     assert out.summary == "线索"
+
+
+def test_截断按整行截_不留半行():
+    """表格截在一行中间，模型会读到一个残缺的数，还当真。"""
+    table = "".join(f"| r{i} | 8100531.47 |\n" for i in range(100))
+    out = ToolOutput(table).capped(200)
+    body, note = out.content.rsplit("\n…", 1)
+    assert all(line.endswith("|") for line in body.splitlines())
+    assert "共 101 行" in note and len(body) <= 200
+
+
+def test_只有一行也超长时按字符截():
+    out = ToolOutput("x" * 500).capped(100)
+    assert out.content.startswith("x" * 100) and "前 100 个字符" in out.content
 
 
 def test_同一条消息每次生成的占位完全一样():
@@ -234,7 +271,7 @@ class BigTool(Tool):
         sql: str = "SELECT 1"
 
     def run(self, args: Args) -> ToolOutput:
-        return ToolOutput(True, BIG_RESULT, summary=f"60 行 × 3 列（{args.sql}）")
+        return ToolOutput(BIG_RESULT, summary=f"60 行 × 3 列（{args.sql}）")
 
 
 def calls(n: int) -> list[LLMResponse]:
@@ -336,11 +373,19 @@ def _history_with(result: str) -> Context:
 
 
 def test_审批拒绝的结果不会被换成_重新调用即可():
-    """拒绝消息只有一句话，换成占位反而更长；更糟的是占位会说「重新调用一次即可」，
-    等于鼓励模型再试一次被拒绝的操作。"""
-    ctx = _history_with("用户拒绝执行：这张表有敏感字段")
-    assert ctx.maintain(measure, force=True) == []
-    assert ctx.render()[-1].content == "用户拒绝执行：这张表有敏感字段"
+    """拒绝理由再长也不清：它标着 is_error。占位会说「重新调用一次即可」，
+    等于鼓励模型再试一次被拒绝的操作。以前靠「拒绝消息短」躲过去，理由一长就露馅。"""
+    reason = "用户拒绝执行：" + "这张表有敏感字段，" * 100
+    agent, _ = make_agent(
+        [LLMResponse(text="", tool_calls=[ToolCall("c1", "echo", {"text": "hi"})]),
+         LLMResponse(text="好的")],
+        approval_hook=lambda call: (False, reason.removeprefix("用户拒绝执行：")),
+        context=Context([ClearOldToolResults(trigger_tokens=1, keep_recent=0, clear_at_least=1)]),
+    )
+    agent.run("q")
+    assert agent.compact() == []
+    [denied] = [m for m in agent.context.render() if m.role == "tool"]
+    assert denied.is_error and denied.content == reason
 
 
 def test_很小的结果不换_大结果照常换():

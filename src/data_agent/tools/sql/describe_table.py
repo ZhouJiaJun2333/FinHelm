@@ -17,6 +17,7 @@ from ...core.tools import Tool, ToolOutput
 
 class DescribeTableTool(Tool):
     name = "describe_table"
+    rerunnable = True          # 只读查询：旧结果被清理后，再调一次就能拿回来
     description = (
         "查看一张表的详细结构：列名、类型、是否可空、列注释、主键外键约束，"
         "以及几行样例数据。**写任何 SQL 之前都应该先查这个**，不要凭空猜列名。"
@@ -68,7 +69,7 @@ class DescribeTableTool(Tool):
         summary = f"{schema}.{table} 的表结构，{len(columns)} 列：" + ", ".join(
             c.name for c in columns
         )
-        return ToolOutput(True, "\n".join(lines), summary)
+        return ToolOutput("\n".join(lines), summary)
 
     def _split(self, raw: str) -> tuple[str, str]:
         raw = raw.strip().strip('"')

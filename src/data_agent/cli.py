@@ -66,13 +66,13 @@ def make_console_sink(verbose: bool, tables: dict[str, SqlResult]):
                 shown = _preview(args, 400 if verbose else 200)
                 print(f"\n🔧 {name}  {shown}")
 
-            case ToolFinished(ok=True, details=SqlResult() as table, elapsed_ms=ms):
+            case ToolFinished(is_error=False, details=SqlResult() as table, elapsed_ms=ms):
                 # 用户看的是完整结果，不是模型看到的预览
                 tables[table.ref] = table
                 print(f"✅ ({ms}ms)\n{_show_table(table)}")
 
-            case ToolFinished(ok=ok, content=content, elapsed_ms=ms):
-                mark = "✅" if ok else "❌"
+            case ToolFinished(is_error=is_error, content=content, elapsed_ms=ms):
+                mark = "❌" if is_error else "✅"
                 body = content if verbose else _preview(content, 800)
                 print(f"{mark} ({ms}ms)\n{body}")
 

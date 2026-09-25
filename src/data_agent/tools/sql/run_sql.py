@@ -58,6 +58,7 @@ class SqlResult:
 
 class RunSqlTool(Tool):
     name = "run_sql"
+    rerunnable = True          # 只读查询：旧结果被清理后，再调一次就能拿回来
     description = (
         "在分析库上执行一条只读 SQL（只能是 SELECT 或 WITH 开头的单条语句），返回结果表。"
         "执行前请先用 describe_table 确认列名和外键。"
@@ -84,10 +85,10 @@ class RunSqlTool(Tool):
         sql = _validate(args.sql)
         result = self.db.query(sql, max_rows=FETCH_ROWS)
         if not result.columns or not result.rows:
-            return ToolOutput(True, _format_empty(result), _summarize(result))
+            return ToolOutput(_format_empty(result), _summarize(result))
         ref = f"r{next(self._refs)}"
         self.queries[ref] = sql
-        return ToolOutput(True, _format(ref, result), _summarize(result, ref),
+        return ToolOutput(_format(ref, result), _summarize(result, ref),
                           details=SqlResult(ref, sql, result))
 
 

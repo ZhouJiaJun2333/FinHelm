@@ -52,6 +52,19 @@ def test_anthropic_并行工具结果合并进一条user消息():
     assert len(tool_result_msgs[0]["content"]) == 2
 
 
+def test_anthropic_失败的工具结果带is_error():
+    """模型据此知道这次调用没成功。成功的不带这个字段，请求体和以前一模一样（缓存不受影响）。"""
+    msgs = [
+        Message.user("q"),
+        Message(role="assistant", tool_calls=[ToolCall("c1", "run_sql", {}), ToolCall("c2", "run_sql", {})]),
+        Message.tool_result("c1", "UndefinedColumn: xxx", is_error=True),
+        Message.tool_result("c2", "结果"),
+    ]
+    bad, good = AnthropicProvider.convert_messages(msgs)[-1]["content"]
+    assert bad["is_error"] is True
+    assert "is_error" not in good
+
+
 def test_anthropic_system不进messages():
     out = AnthropicProvider.convert_messages([
         Message(role="system", content="我是系统提示"),

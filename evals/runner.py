@@ -303,7 +303,7 @@ def extract_sql_calls(events: list[Event]) -> list[SqlCall]:
         elif isinstance(e, ToolFinished) and pending is not None:
             if pending.name == "run_sql":
                 args = pending.arguments
-                calls.append(SqlCall(str(args.get("sql", "")), e.ok, str(args.get("purpose", ""))))
+                calls.append(SqlCall(str(args.get("sql", "")), not e.is_error, str(args.get("purpose", ""))))
             pending = None
     return calls
 

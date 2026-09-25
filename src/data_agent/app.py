@@ -95,6 +95,8 @@ def build_application(
             trigger_tokens=cap(settings.context_clear_trigger_tokens),
             keep_recent=settings.context_keep_tool_results,
             clear_at_least=settings.context_clear_at_least,
+            # 只清结果能重拿的工具（只读查询）。能不能重拿由工具自己声明
+            tools=[t.name for t in tools if t.rerunnable],
         ),
         CompactHistory(
             summarize=llm_summarizer(llm, max_tokens=settings.context_compact_max_tokens),

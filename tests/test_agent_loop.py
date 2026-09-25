@@ -55,7 +55,7 @@ def test_调用工具后再回答(registry):
 
     finished = [e for e in events if isinstance(e, ToolFinished)]
     assert len(finished) == 1
-    assert finished[0].ok is True
+    assert finished[0].is_error is False
     assert finished[0].content == "echo: hi"
 
 
@@ -67,7 +67,7 @@ class TableTool(Tool):
         pass
 
     def run(self, args: Args) -> ToolOutput:
-        return ToolOutput(True, "共 3 行，看前 1 行：a", details={"rows": ["a", "b", "c"]})
+        return ToolOutput("共 3 行，看前 1 行：a", details={"rows": ["a", "b", "c"]})
 
 
 def test_details只给界面_不进历史():
@@ -84,7 +84,7 @@ def test_details只给界面_不进历史():
 
 
 def test_截断只截content_不动details():
-    out = ToolOutput(True, "x" * 100, details=[1, 2, 3]).capped(10)
+    out = ToolOutput("x" * 100, details=[1, 2, 3]).capped(10)
     assert out.content.startswith("x" * 10) and out.details == [1, 2, 3]
 
 
@@ -99,7 +99,7 @@ def test_工具抛异常不会中断Agent(registry):
     assert agent.run("跑一下") == "知道了，换个方式"
 
     finished = [e for e in events if isinstance(e, ToolFinished)]
-    assert finished[0].ok is False
+    assert finished[0].is_error is True
     assert "故意炸的" in finished[0].content
 
 
@@ -112,7 +112,7 @@ def test_参数不合法时返回错误而不是抛异常(registry):
     agent.run("x")
 
     finished = [e for e in events if isinstance(e, ToolFinished)]
-    assert finished[0].ok is False
+    assert finished[0].is_error is True
     assert "参数不合法" in finished[0].content
 
 
@@ -125,7 +125,7 @@ def test_调用不存在的工具(registry):
     agent.run("x")
 
     finished = [e for e in events if isinstance(e, ToolFinished)]
-    assert finished[0].ok is False
+    assert finished[0].is_error is True
     assert "不存在" in finished[0].content
 
 
@@ -144,6 +144,18 @@ def test_审批钩子拒绝时模型仍能收到结果(registry):
     tool_msgs = [m for m in history if m.role == "tool"]
     assert len(tool_msgs) == 1
     assert "用户不同意" in tool_msgs[0].content
+    assert tool_msgs[0].is_error, "被拒绝也是失败，要让模型知道"
+
+
+def test_工具失败的标记一路带进历史(registry):
+    script = [
+        LLMResponse(text="试试", tool_calls=[ToolCall("c1", "boom", {})]),
+        LLMResponse(text="知道了"),
+    ]
+    agent, _ = make_agent(script, tools=registry)
+    agent.run("x")
+    [result] = [m for m in agent.llm.seen[-1] if m.role == "tool"]
+    assert result.is_error
 
 
 def test_达到步数上限会停下(registry):

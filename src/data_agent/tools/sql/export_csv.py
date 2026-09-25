@@ -67,6 +67,7 @@ def _free_path(out_dir: Path, filename: str) -> Path:
 
 class ExportCsvTool(Tool):
     name = "export_csv"
+    # rerunnable 保持默认 False：重跑一次会再写一个文件，它的结果不能清理成「重新调用即可」
     description = (
         "把 run_sql 的某个结果（按编号，比如 r3）导出成 CSV 文件，交给用户。"
         "只在用户要导出、下载、保存成文件时用；只是想让用户看到整张表，在回答里写 {{r3}} 就行。"
