@@ -10,13 +10,18 @@
 BIRD 官方一题只收一条 SQL、结果要完全一样；Agent 回答真人时会多给几列上下文、把数 ROUND 好看 ——
 对人是更好的回答，对官方判分是错。适配评测格式的活放在评测里，Agent 本身不改。
 提交轮不影响主分数：主分数只看回答那一轮的 SQL，和以前的运行照样能比。
+
+上传文件的题（research）：每个 trial 一个自己的工作目录（留在运行目录的 work/ 下，失败时能看图），
+先 /attach 再提问；按回答里的数、沙箱代码、有没有出图判分（grade_files）。
 """
 
 from __future__ import annotations
 
+import re
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from data_agent.app import build_application
@@ -33,10 +38,11 @@ from data_agent.core.events import (
 from data_agent.core.messages import Message, Usage
 from data_agent.db.connection import Database
 from data_agent.settings import Settings
+from data_agent.tools.sandbox import Execution
 from data_agent.tools.sql.results import REF, ResultStore, markdown_table
 
-from .cases import Case, Session
-from .graders import AnswerCheck, ResultMatch, check_answer, compare_results, said_scalar
+from .cases import CASES_DIR, Case, Session
+from .graders import AnswerCheck, ResultMatch, check_answer, check_values, compare_results, said_scalar
 
 # 判分时重跑 SQL 最多取多少行。标准答案不会有这么多行；Agent 的查询超过这个数，肯定不对。
 GRADE_MAX_ROWS = 5000
@@ -102,6 +108,13 @@ class Trial:
     grade_error: str = ""                 # 重跑 Agent 的 SQL 时出错
     transcript: list[dict[str, Any]] = field(default_factory=list)
     graded: bool = True                   # 多轮会话里的填充轮不判分
+    # 上传文件的题（research）
+    uses_files: bool = False
+    code: list[str] = field(default_factory=list)        # run_python / run_r 执行过的代码
+    figures: list[str] = field(default_factory=list)     # 出过的图（相对工作目录）
+    # 自己写代码画的图（不是 fh_ 模板画的）有几次，其中几次之后调了 view_image
+    custom_plots: int = 0
+    viewed_after: int = 0
 
     # ------------------------------------------------------------ 结论
     @property
@@ -112,7 +125,10 @@ class Trial:
     @property
     def answer_ok(self) -> bool:
         """回答也对了：结果对，而且回答里的数字对得上（没有数字可核对的题只看结果）；
-        或者 SQL 没对上、但回答里把标准答案那个数算对了。"""
+        或者 SQL 没对上、但回答里把标准答案那个数算对了。
+        步数耗尽、出错的不算：只查「有没有出图」的题，图画出来了、回答却是兜底的那句话。"""
+        if self.error or self.step_limit:
+            return False
         return (self.result_ok and (self.answer_check is None or self.answer_check.ok is not False)
                 or self.text_ok)
 
@@ -132,6 +148,10 @@ class Trial:
             return "步数耗尽"
         if self.text_ok:
             return ""
+        if self.uses_files:
+            if not self.result_ok:
+                return "要求的步骤没做"
+            return "" if self.answer_ok else "回答里的数字不对"
         if self.result is None:
             return "没有执行成功的 SQL"
         if not self.result.lenient:
@@ -164,21 +184,27 @@ class Trial:
 
 
 # ================================================================ 跑一次
-def run_trial(case: Case, trial: int, settings: Settings, db: Database,
-              gold: Gold, submit: str = "") -> Trial:
+def run_trial(case: Case, trial: int, settings: Settings, db: Database | None,
+              gold: Gold, submit: str = "", work_root: Path | None = None) -> Trial:
     """让 Agent 回答一道题（题库要求的话再加一轮提交），然后判分。
 
     任何异常都记进结果，不往外抛 —— 一题出错不能拖垮整批。
+    work_root：上传文件的题每个 trial 在它下面建自己的工作目录（并发的 trial 不能共用 figures/）。
     """
     events: list[Event] = []
-    t = Trial(case.id, trial)
+    t = Trial(case.id, trial, uses_files=case.uses_files)
     results = ResultStore()
     started = time.perf_counter()
     app = None
+    work_dir = (work_root / f"{case.id}-{trial}") if case.uses_files and work_root else None
     try:
-        app = build_application(settings, on_event=collect_sink(events), results=results)
+        app = build_application(settings, on_event=collect_sink(events), results=results, work_dir=work_dir)
+        question = case.question
+        if case.uses_files:
+            app.attach([CASES_DIR / f for f in case.files])
+            question = app.with_uploads(question)
         try:
-            t.answer = app.agent.run(case.question)
+            t.answer = app.agent.run(question)
         finally:
             t.usage = app.agent.session_usage
             t.transcript = _transcript(app.agent.context.history)
@@ -240,6 +266,39 @@ def digest(t: Trial, events: list[Event]) -> None:
     t.step_limit = any(isinstance(e, StepLimitReached) for e in events)
     succeeded = [c for c in t.sql_calls if c.ok]
     t.final_sql = succeeded[-1].sql if succeeded else ""
+    digest_sandbox(t, events)
+
+
+SANDBOX_TOOLS = ("run_python", "run_r")
+
+
+def digest_sandbox(t: Trial, events: list[Event]) -> None:
+    """沙箱代码、出的图、看图：自己画了图（代码里没调 fh_ 模板）之后，有没有 view_image 看一眼。"""
+    pending: ToolStarted | None = None
+    unviewed = False                      # 最近一次自己画的图还没看过
+    for e in events:
+        if isinstance(e, ToolStarted):
+            pending = e
+            continue
+        if not isinstance(e, ToolFinished) or pending is None:
+            continue
+        if pending.name in SANDBOX_TOOLS:
+            code = str(pending.arguments.get("code", ""))
+            t.code.append(code)
+            figures = e.details.figures if isinstance(e.details, Execution) else []
+            t.figures += [_relative_figure(f) for f in figures]
+            if figures and "fh_" not in code:
+                t.custom_plots += 1
+                unviewed = True
+        elif pending.name == "view_image" and not e.is_error and unviewed:
+            t.viewed_after += 1
+            unviewed = False
+        pending = None
+
+
+def _relative_figure(path: Path) -> str:
+    parts = path.parts
+    return "/".join(parts[parts.index("figures"):]) if "figures" in parts else path.name
 
 
 # ================================================================ 多轮会话
@@ -382,6 +441,9 @@ def grade(t: Trial, case: Case, db, gold: Gold) -> None:
     t.matched_sql = t.grade_error = ""
     if t.submission is not None:
         t.submission.strict = False
+    if case.uses_files:
+        grade_files(t, case)
+        return
     if case.match == "answer":
         t.answer_check = check_answer(gold.answer or [], t.shown or t.answer)
         ok = t.answer_check.ok is True
@@ -425,6 +487,18 @@ def grade(t: Trial, case: Case, db, gold: Gold) -> None:
 NO_DATA_WORDS = ("没有", "无数据", "不存在", "为空", "暂无", "查不到")
 
 
+def grade_files(t: Trial, case: Case) -> None:
+    """上传文件的题：该做的做了没有（代码、图、回答里该指出的问题）记在 result，数字记在 answer_check。"""
+    code = "\n".join(t.code)
+    problems = [f"代码里没有 {p}" for p in case.expect_code if not re.search(p, code, re.DOTALL)]
+    answer = t.shown or t.answer          # {{r5}} 展开成整张表之后：表里的数用户看得到，就算说过了
+    problems += [f"回答里没有 {p}" for p in case.expect_text if not re.search(p, answer)]
+    if case.expect_figure and not t.figures:
+        problems.append("没有画出图")
+    t.result = ResultMatch(not problems, not problems, "；".join(problems))
+    t.answer_check = check_values(case.gold_values, answer) if case.gold_values else None
+
+
 def _better(a: ResultMatch, b: ResultMatch) -> bool:
     return (a.lenient, a.strict) > (b.lenient, b.strict)
 
@@ -438,8 +512,8 @@ def _rerun(t: Trial, db, sql: str) -> list[tuple] | None:
         return None
 
 
-def run_gold(case: Case, db: Database) -> Gold:
-    """跑标准答案。每道题只跑一次，所有 trial 共用。"""
+def run_gold(case: Case, db: Database | None) -> Gold:
+    """跑标准答案。每道题只跑一次，所有 trial 共用。上传文件的题没有 SQL，标准值写在题里。"""
     return Gold(
         [db.query(sql, max_rows=GRADE_MAX_ROWS).rows for sql in case.gold_sql],
         db.query(case.answer_sql, max_rows=GRADE_MAX_ROWS).rows if case.answer_sql else None,

@@ -293,3 +293,16 @@ def said_scalar(gold: Sequence[Sequence[Any]], answer: str) -> bool:
     if not isinstance(v, Num) or v.value == int(v.value):
         return False
     return check_answer(gold, answer).ok is True
+
+
+def check_values(values: Sequence[float], answer: str) -> AnswerCheck:
+    """上传文件的题：标准答案里的每个数，回答里都要说到。
+
+    和 check_answer 的区别：标准值是算出来的精确值（容差只看回答写到几位）；不看正负号 ——
+    「卒中单元少住 13.98 天」、「MD −13.98」（Unicode 减号）、「−24.03 至 −3.93」都算说到了 -13.98。
+    """
+    if not values:
+        return AnswerCheck(None)
+    said = [Num(abs(s.value), s.tol) for s in answer_numbers(answer.replace("−", "-"))]
+    missing = [v for v in values if not any(_said(Num(abs(v)), s) for s in said)]
+    return AnswerCheck(not missing, missing, len(values))

@@ -28,6 +28,16 @@
 
 每一轮的 id 是「会话 id/轮次」，比如 multi-001/3。答错了会话照样往下问 —— 真实用户也会接着问。
 
+上传文件的题（research 场景，不连数据库）：先把文件传上去再提问，按回答和做了什么判分。
+
+    {"id": "rs-01",
+     "files": ["research/files/xx.xlsx"],        相对 evals/cases/，每个 trial 复制进自己的工作目录
+     "question": "帮我做个 meta 分析",
+     "gold_values": [0.4896, 0.3448, 0.6952],     回答里必须说到的数（不看正负号：「少住 14 天」也算说到了 -14）
+     "expect_code": ["fh_meta_gen"],       沙箱代码里必须出现（正则）：该用的模板用了没有
+     "expect_text": ["Heard"],                     回答里必须出现（正则）：该指出的问题指出了没有
+     "expect_figure": true}                        至少画出一张图
+
 题库级配置：没有 id 的一行，整个题库都用它。
     settings   覆盖配置（优先级：.env < 这里 < 命令行 --set）。BIRD 的题库靠它选场景包
     submit     提交轮：每题答完之后追问这句话，收一条 SQL 按 BIRD 官方规则判（见 runner.py）
@@ -57,10 +67,21 @@ class Case:
     tags: tuple[str, ...] = ()
     note: str = ""
     filler: bool = False               # 多轮会话里的填充轮：不判分
+    # 上传文件的题（见开头）
+    files: tuple[str, ...] = ()
+    gold_values: tuple[float, ...] = ()
+    expect_code: tuple[str, ...] = ()
+    expect_text: tuple[str, ...] = ()
+    expect_figure: bool = False
 
     @property
     def graded(self) -> bool:
         return not self.filler
+
+    @property
+    def uses_files(self) -> bool:
+        """上传文件的题：没有 SQL 可比，按回答、代码、图判。"""
+        return bool(self.files)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +167,18 @@ def _case(d: dict, case_id: str) -> Case:
         tags=tuple(d.get("tags", ())),
         note=d.get("note", ""),
         filler=d.get("filler", False),
+        files=tuple(d.get("files", ())),
+        gold_values=tuple(float(v) for v in d.get("gold_values", ())),
+        expect_code=tuple(d.get("expect_code", ())),
+        expect_text=tuple(d.get("expect_text", ())),
+        expect_figure=d.get("expect_figure", False),
     )
+    if case.uses_files:
+        if missing := [f for f in case.files if not (CASES_DIR / f).is_file()]:
+            raise ValueError(f"{case_id}：找不到文件 {missing}")
+        if not (case.gold_values or case.expect_code or case.expect_text or case.expect_figure):
+            raise ValueError(f"{case_id}：上传文件的题至少要有一项判分依据（gold_values / expect_*）")
+        return case
     if case.match == "answer" and not case.answer_sql:
         raise ValueError(f"{case_id}：match=answer 的题要写 answer_sql")
     if case.graded and case.match != "answer" and not case.gold_sql:

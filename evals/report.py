@@ -123,6 +123,18 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
         },
         "按标签": {tag: {**rates(ts), "trials": len(ts)} for tag, ts in sorted(by_tag.items())},
         "逐题": per_case,
+        **({"上传文件": file_stats(files)} if (files := [t for t in trials if t.uses_files]) else {}),
+    }
+
+
+def file_stats(trials: list[Trial]) -> dict[str, Any]:
+    """上传文件的题（research）：自己写代码画了图的 trial 里，交付前看了图的占多少。"""
+    plotted = [t for t in trials if t.custom_plots]
+    return {
+        "自己画图的trial": len(plotted),
+        "画完看了图的trial": sum(t.viewed_after > 0 for t in plotted),
+        "自己画图次数": sum(t.custom_plots for t in plotted),
+        "画完看图次数": sum(t.viewed_after for t in plotted),
     }
 
 
@@ -187,6 +199,7 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
     pct = lambda x: "—" if x is None else f"{x:.0%}"  # noqa: E731
     p1 = s["pass@1"]
     cache = s["缓存"]
+    files = s.get("上传文件")
     out = [
         f"# 评测报告：{meta['cases']}（{meta['model']}）",
         "",
@@ -199,11 +212,12 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         "",
         "| 指标 | 值 |",
         "|:--|--:|",
-        f"| pass@1 结果对 | {pct(p1['结果对'])} |",
-        f"| pass@1 严格（列数也一样） | {pct(p1['严格'])} |",
+        *([f"| pass@1 要求的步骤都做了（模板、图、指出数据问题） | {pct(p1['结果对'])} |"] if files else [
+            f"| pass@1 结果对 | {pct(p1['结果对'])} |",
+            f"| pass@1 严格（列数也一样） | {pct(p1['严格'])} |"]),
         f"| **pass@1 回答对** | **{pct(p1['回答对'])}** |",
         *([f"| 　其中 SQL 没对上、回答里把数算对了 | {len(s['回答里算对'])} 次 |"] if s.get("回答里算对") else []),
-        f"| pass@1 只看最后一条 SQL（BIRD 的规则，按值比） | {pct(p1['最后一条'])} |",
+        *([] if files else [f"| pass@1 只看最后一条 SQL（BIRD 的规则，按值比） | {pct(p1['最后一条'])} |"]),
         *([f"| **pass@1 提交轮交的 SQL（BIRD 的规则，按值比）** | **{pct(p1['提交'])}** |"]
           if s.get("提交轮", {}).get("次数") else []),
         f"| pass^{meta['trials']}（每次都回答对的题） | {pct(s['pass^k'])} |",
@@ -248,6 +262,11 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
                     f"- 没交出 SQL（按最后一条算）：{sub['没交SQL']} 次",
                     "- 对外的分数用官方脚本算（python -m evals.bird.official <这个目录>）：官方连类型都比，"
                     "float 和 Decimal 值一样也算错，会比上面的低", ""]
+    if files:
+        out += ["## 看图", "",
+                f"- 自己写代码画了图（没用 fh_ 模板）的 trial：{files['自己画图的trial']} 个，"
+                f"其中交付前用 view_image 看了图的 {files['画完看了图的trial']} 个",
+                f"- 按次数：自己画图 {files['自己画图次数']} 次，画完看了的 {files['画完看图次数']} 次", ""]
     if s.get("回答里算对"):
         out += ["## SQL 没对上、回答里算对了", "",
                 "标准答案是单个算出来的数（比例、平均数），回答里说到了：",

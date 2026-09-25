@@ -41,7 +41,7 @@ from data_agent.prompts import build_system_prompt
 from data_agent.settings import Settings
 
 from .cases import CaseSet, load_cases
-from .graders import check_answer, compare_results
+from .graders import check_answer, check_values, compare_results
 from .report import compare, render, summarize, summarize_sessions
 from .runner import SessionTrial, Trial, grade, run_gold, run_session, run_trial
 
@@ -89,11 +89,15 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(f"{s.id} 的 settings 里有不认识的配置：{sorted(unknown)}")
 
     # 标准答案先全跑一遍：标准 SQL 本身有错，要在花钱跑 Agent 之前就发现
-    db = Database(settings.database_url, statement_timeout_ms=settings.db_statement_timeout_ms,
-                  search_path=domain.schema)
+    db = _database(settings, domain.schema, graded)
     gold = {c.id: run_gold(c, db) for c in graded}
     # 自检：标准答案和它自己比必须算对。不对说明判分器或者题目的 match 写错了
     for c in graded:
+        if c.uses_files:
+            # 标准值写进回答里必须判对（容差、正负号的处理有问题的话这里就能发现）
+            if c.gold_values and not check_values(c.gold_values, " ".join(map(str, c.gold_values))).ok:
+                sys.exit(f"{c.id} 的 gold_values 原样写进回答都判不对，先检查判分器")
+            continue
         for rows in gold[c.id].alternatives:
             if c.match != "empty" and not compare_results(rows, rows, c.match).strict:
                 sys.exit(f"{c.id} 的标准答案和它自己比都对不上，先检查判分器或 match 设置")
@@ -137,7 +141,7 @@ def main(argv: list[str] | None = None) -> None:
             open(run_dir / ("sessions.jsonl" if multi else "trials.jsonl"), "w", encoding="utf-8") as f:
         futures = [
             pool.submit(run_session, u, i, settings, db, gold, forced) if multi
-            else pool.submit(run_trial, u, i, settings, db, gold[u.id], case_set.submit)
+            else pool.submit(run_trial, u, i, settings, db, gold[u.id], case_set.submit, run_dir / "work")
             for u, i in jobs
         ]
         for done, fut in enumerate(as_completed(futures), 1):
@@ -199,8 +203,7 @@ def _regrade(run_dir: Path, meta: dict, case_set: CaseSet, trials: list[Trial]) 
     if case_set.sessions:
         sys.exit("--regrade 只支持单题库：多轮会话的判分依赖每轮当时的上下文")
     settings = Settings(**case_set.settings)
-    db = Database(settings.database_url, statement_timeout_ms=settings.db_statement_timeout_ms,
-                  search_path=get_domain(meta.get("domain", settings.domain)).schema)
+    db = _database(settings, get_domain(meta.get("domain", settings.domain)).schema, case_set.cases)
     cases = {c.id: c for c in case_set.cases}
     gold = {cid: run_gold(c, db) for cid, c in cases.items()}
     for t in trials:
@@ -210,6 +213,14 @@ def _regrade(run_dir: Path, meta: dict, case_set: CaseSet, trials: list[Trial]) 
             f.write(json.dumps(t.to_dict(), ensure_ascii=False, default=str) + "\n")
     meta["regraded"] = f"{datetime.now():%Y-%m-%d %H:%M:%S}（题库 {case_set.sha1}，判分器 {_git()['git']}）"
     print(f"按现在的规则重判了 {len(trials)} 个 trial")
+
+
+def _database(settings: Settings, schema: str | None, cases: list) -> Database | None:
+    """有 SQL 题才连库：research 场景不连数据库，数据库没开也能跑。"""
+    if not any(c.gold_sql or c.answer_sql for c in cases):
+        return None
+    return Database(settings.database_url, statement_timeout_ms=settings.db_statement_timeout_ms,
+                    search_path=schema)
 
 
 def _write_json(path: Path, data: object) -> None:
