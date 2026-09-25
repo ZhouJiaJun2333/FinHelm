@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from .messages import Message
+from .messages import Image, Message
 
 
 # ------------------------------------------------------------------ 粗估
@@ -38,9 +38,21 @@ def estimate_text(text: str) -> int:
     return round(total)
 
 
+# 图片按面积估（Anthropic 的公式：宽×高/750，1568×980 约 2000）。DeepSeek 实测一张 350~1100，
+# 这里偏高一倍，宁可早点清理。不知道尺寸就按 2000（Claude Code 的做法；pi 按 4800 字符 ≈ 1200）
+_PIXELS_PER_TOKEN = 750
+_IMAGE_TOKENS_UNKNOWN = 2000
+
+
+def estimate_image(image: Image) -> int:
+    if image.width and image.height:
+        return -(-image.width * image.height // _PIXELS_PER_TOKEN)
+    return _IMAGE_TOKENS_UNKNOWN
+
+
 def estimate_message(message: Message) -> int:
     """估一条消息。不看 raw：要估的是锚点之后的消息，带 raw 的 assistant 自己就有 usage。"""
-    tokens = estimate_text(message.content)
+    tokens = estimate_text(message.content) + sum(estimate_image(i) for i in message.images)
     for call in message.tool_calls:
         tokens += estimate_text(call.name)
         tokens += estimate_text(json.dumps(call.arguments, ensure_ascii=False))

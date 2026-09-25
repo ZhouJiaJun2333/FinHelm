@@ -49,6 +49,20 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class Image:
+    """消息里的一张图。数据直接存 base64：会话日志要能原样读回，文件之后被覆盖了也不影响。"""
+
+    media_type: str              # image/png、image/jpeg…
+    data: str                    # base64，不带 data: 前缀
+    width: int = 0               # 估 token 用，0 = 不知道
+    height: int = 0
+
+    @property
+    def data_url(self) -> str:
+        return f"data:{self.media_type};base64,{self.data}"
+
+
+@dataclass(frozen=True, slots=True)
 class MessageMeta:
     """只在本地用、不发给模型的信息。要给消息加本地信息就加在这里，别加在 Message 上。"""
 
@@ -75,6 +89,8 @@ class Message:
     tool_call_id: str | None = None   # role="tool" 时，对应哪次调用
     # role="tool" 时这次调用失败了。上下文清理不清失败的结果
     is_error: bool = False
+    # 附带的图片（user 消息、工具结果）。放在 content 后面发，各家怎么放由 provider 决定
+    images: tuple[Image, ...] = ()
 
     # provider 的原生 content（thinking 块、reasoning_content 等），回传时优先用它。
     # 必须是纯 JSON 数据：会话日志要原样存盘、读回
@@ -96,9 +112,9 @@ class Message:
 
     @staticmethod
     def tool_result(tool_call_id: str, content: str, *, is_error: bool = False,
-                    summary: str = "") -> "Message":
+                    summary: str = "", images: tuple[Image, ...] = ()) -> "Message":
         return Message(role="tool", content=content, tool_call_id=tool_call_id,
-                       is_error=is_error, meta=MessageMeta(summary=summary))
+                       is_error=is_error, images=images, meta=MessageMeta(summary=summary))
 
 
 # stop_reason 的分类，各家叫法不同。没见过的值 Agent 会直接报错，不当成「完成」

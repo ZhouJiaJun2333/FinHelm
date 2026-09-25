@@ -19,6 +19,10 @@ class LLMProvider(ABC):
     # 模型会不会自己先思考。不会的话，写摘要时让它先打草稿
     native_thinking: bool = False
 
+    # 能不能看图。不能的话不注册 view_image，历史里已有的图片发送时换成一句说明
+    #（有的模型收到图片不报错，只在回答里说看不了，运行时发现不了，只能配置）
+    vision: bool = False
+
     @abstractmethod
     def chat(
         self,

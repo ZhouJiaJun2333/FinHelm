@@ -214,10 +214,10 @@ def _fingerprint(view: list[Message]) -> str:
 
 
 def _wire_bytes(m: Message) -> bytes:
-    """一条消息里会发给模型的部分（不含 meta）。"""
-    return json.dumps(
-        [m.role, m.content, m.tool_call_id, m.is_error,
-         [[c.id, c.name, c.arguments] for c in m.tool_calls],
-         repr(m.raw)],
-        ensure_ascii=False, sort_keys=True, default=str,
-    ).encode("utf-8") + b"\x00"
+    """一条消息里会发给模型的部分（不含 meta）。图片只取摘要；没图时和加图片之前的指纹一样。"""
+    fields = [m.role, m.content, m.tool_call_id, m.is_error,
+              [[c.id, c.name, c.arguments] for c in m.tool_calls],
+              repr(m.raw)]
+    if m.images:
+        fields.append([hashlib.sha1(i.data.encode()).hexdigest() for i in m.images])
+    return json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8") + b"\x00"

@@ -121,10 +121,22 @@ class CompactHistory(ContextEdit):
             return None                     # 只有当前这一轮，没有可压的
         cut = starts[-kept]
 
-        old = [e for e in view[:cut] if isinstance(e, Message)]
+        old = [self._without_images(e) for e in view[:cut] if isinstance(e, Message)]
         summary, dropped = self._summarize_fitting(old, prompt)
         return HistoryCompacted(summary=summary.text, kept_turns=kept, compacted_turns=len(starts) - kept,
                                 usage=summary.usage, dropped_turns=dropped)
+
+    IMAGE_PLACEHOLDER = "[图片]"
+
+    @classmethod
+    def _without_images(cls, m: Message) -> Message:
+        """摘要只记文字，图片换成占位（学 Claude Code）：一张图上千 token，写摘要用不上。
+        较早的图多半已经被清理掉了，这里通常什么都不用换，不影响缓存。
+        """
+        if not m.images:
+            return m
+        marks = "\n".join([cls.IMAGE_PLACEHOLDER] * len(m.images))
+        return replace(m, content=f"{m.content}\n{marks}" if m.content else marks, images=())
 
     def _summarize_fitting(self, old: list[Message], prompt: Prompt | None) -> tuple[Summary, int]:
         """写摘要的请求自己也超长时，丢掉最老的一半回合再试（学 Claude Code），上一份摘要留着。

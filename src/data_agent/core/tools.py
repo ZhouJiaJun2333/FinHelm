@@ -14,6 +14,8 @@ from typing import Any, ClassVar, Iterable, Iterator
 
 from pydantic import BaseModel, ValidationError
 
+from .messages import Image
+
 MAX_OUTPUT_CHARS = 6000  # 单个工具结果的上限，防止一条结果吃掉半个上下文
 
 
@@ -25,6 +27,8 @@ class ToolOutput:
     # 只给界面、不发给模型。截断只截 content
     details: Any = None
     is_error: bool = False
+    # 发给模型的图片（view_image）。不算进 MAX_OUTPUT_CHARS
+    images: tuple[Image, ...] = ()
 
     @staticmethod
     def error(text: str) -> "ToolOutput":

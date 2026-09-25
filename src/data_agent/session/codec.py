@@ -10,7 +10,7 @@ from dataclasses import fields
 from typing import Any, get_origin, get_type_hints
 
 from ..core.context import Entry, Marker
-from ..core.messages import Message, MessageMeta, ToolCall, Usage
+from ..core.messages import Image, Message, MessageMeta, ToolCall, Usage
 
 
 def encode(entry: Entry) -> dict[str, Any]:
@@ -44,6 +44,8 @@ def _encode_message(m: Message) -> dict[str, Any]:
         d["tool_call_id"] = m.tool_call_id
     if m.is_error:
         d["is_error"] = True
+    if m.images:
+        d["images"] = [{f.name: getattr(i, f.name) for f in fields(Image)} for i in m.images]
     if m.raw is not None:
         d["raw"] = m.raw
     meta = {f.name: _to_json(getattr(m.meta, f.name)) for f in fields(MessageMeta)
@@ -62,6 +64,7 @@ def _decode_message(d: dict[str, Any]) -> Message:
         tool_calls=[ToolCall(c["id"], c["name"], c["arguments"]) for c in d.get("tool_calls", [])],
         tool_call_id=d.get("tool_call_id"),
         is_error=d.get("is_error", False),
+        images=tuple(Image(**i) for i in d.get("images", ())),
         raw=d.get("raw"),
         meta=meta,
     )

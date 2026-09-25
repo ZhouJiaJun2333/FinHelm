@@ -2,6 +2,7 @@
 
 和 Anthropic 的差异：system 是 messages 第一条；工具参数是 JSON 字符串（可能不合法，要兜住）；
 思考模型的 reasoning_content 回传时必须原样带上，否则 400 —— 所以原生 message 存进 Message.raw。
+tool 消息只能放文字：工具结果里的图片挪到这批工具结果后面的一条 user 消息里（学 pi）。
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from typing import Any
 from openai import BadRequestError, OpenAI
 
 from ..core.errors import ContextOverflow
-from ..core.messages import LLMResponse, Message, ToolCall, Usage
+from ..core.messages import Image, LLMResponse, Message, ToolCall, Usage
 from ..core.provider import LLMProvider
 from .overflow import is_context_overflow
 
@@ -26,12 +27,14 @@ class OpenAICompatibleProvider(LLMProvider):
         max_tokens: int = 8192,
         context_window: int | None = None,
         native_thinking: bool = False,
+        vision: bool = False,
     ) -> None:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.max_tokens = max_tokens
         self.context_window = context_window
         self.native_thinking = native_thinking
+        self.vision = vision
 
     # ------------------------------------------------ 中立格式 -> 厂商格式
     @staticmethod
@@ -49,17 +52,31 @@ class OpenAICompatibleProvider(LLMProvider):
         ]
 
     @staticmethod
-    def convert_messages(messages: list[Message], system: str | None) -> list[dict[str, Any]]:
+    def convert_messages(messages: list[Message], system: str | None,
+                         vision: bool = True) -> list[dict[str, Any]]:
+        """vision=False：图片换成一句说明（换了个不能看图的模型接着聊时，历史里可能有图）。"""
         out: list[dict[str, Any]] = []
         if system:
             out.append({"role": "system", "content": system})
+        # 一批工具结果里的图片：tool 消息之间不能插别的消息，等这批结束再发
+        pending: list[Image] = []
 
         for msg in messages:
+            if msg.role != "tool" and pending:
+                out.append(_tool_images_message(pending))
+                pending = []
+
             if msg.role == "system":
                 out.append({"role": "system", "content": msg.content})
 
             elif msg.role == "user":
-                out.append({"role": "user", "content": msg.content})
+                if msg.images and vision:
+                    out.append({"role": "user", "content": [
+                        *([{"type": "text", "text": msg.content}] if msg.content else []),
+                        *(_image_part(i) for i in msg.images),
+                    ]})
+                else:
+                    out.append({"role": "user", "content": _with_omitted(msg)})
 
             elif msg.role == "assistant":
                 if msg.raw is not None:
@@ -85,11 +102,19 @@ class OpenAICompatibleProvider(LLMProvider):
                     out.append(item)
 
             elif msg.role == "tool":
+                content = msg.content
+                if msg.images and vision:
+                    content += f"\n\n{TOOL_IMAGES_NOTE}"
+                    pending += msg.images
+                elif msg.images:
+                    content = _with_omitted(msg)
                 out.append({
                     "role": "tool",
                     "tool_call_id": msg.tool_call_id,
-                    "content": msg.content,
+                    "content": content,
                 })
+        if pending:
+            out.append(_tool_images_message(pending))
         return out
 
     # ------------------------------------------------------------- 调用
@@ -103,7 +128,7 @@ class OpenAICompatibleProvider(LLMProvider):
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens or self.max_tokens,
-            "messages": self.convert_messages(messages, system),
+            "messages": self.convert_messages(messages, system, vision=self.vision),
         }
         if tools:
             kwargs["tools"] = self.convert_tools(tools)
@@ -158,3 +183,26 @@ class OpenAICompatibleProvider(LLMProvider):
             cache_read=cache_read,
             cache_write=cache_write,
         )
+
+
+# ------------------------------------------------------------------ 图片
+TOOL_IMAGES_NOTE = "（图片见下一条消息）"
+TOOL_IMAGES_HEADER = "[上面工具结果里的图片，按顺序：]"
+IMAGE_OMITTED = "[这里有 {n} 张图片，当前模型不能看图，已省略]"
+
+
+def _image_part(image: Image) -> dict[str, Any]:
+    return {"type": "image_url", "image_url": {"url": image.data_url}}
+
+
+def _tool_images_message(images: list[Image]) -> dict[str, Any]:
+    """不是用户说的话，只是把图片带过去。开头一句说明来源，免得模型当成用户新发的图。"""
+    return {"role": "user", "content": [{"type": "text", "text": TOOL_IMAGES_HEADER},
+                                        *(_image_part(i) for i in images)]}
+
+
+def _with_omitted(msg: Message) -> str:
+    if not msg.images:
+        return msg.content
+    note = IMAGE_OMITTED.format(n=len(msg.images))
+    return f"{msg.content}\n\n{note}" if msg.content else note

@@ -120,10 +120,11 @@ pytest
 │   │   ├── python/
 │   │   │   ├── run_python.py       在沙箱里跑 Python；load_result("r3") 直接拿 SQL 结果
 │   │   │   └── kernel.py           容器里那头：常驻内核，变量跨调用保留（运行时只读挂进容器）
-│   │   └── r/
-│   │       ├── run_r.py            在沙箱里跑 R
-│   │       ├── kernel.R            R 版内核，协议和 Python 的一样
-│   │       └── templates.R         meta 分析模板 fh_*：算法和版式对齐 RevMan 5（见「医学科研」一节）
+│   │   ├── r/
+│   │   │   ├── run_r.py            在沙箱里跑 R
+│   │   │   ├── kernel.R            R 版内核，协议和 Python 的一样
+│   │   │   └── templates.R         meta 分析模板 fh_*：算法和版式对齐 RevMan 5（见「医学科研」一节）
+│   │   └── view_image.py       把 work/ 下的一张图发给模型看（模型能看图时才注册）
 │   │
 │   ├── domains/                ★ 场景包：数据在哪、业务约定、要哪些工具，.env 里 DOMAIN= 选
 │   │   ├── shop.py               自己造的电商库
@@ -316,6 +317,18 @@ Python 和 R 能做的事比 SQL 多得多，所以不在代码层面拦（拦�
 数据只从两个口子进去：`load_result("r3")` 从结果仓库取 SQL 的完整结果，数字不经过模型的手；
 用户 `/attach` 的文件复制进 `work/inputs/`（原件沙箱碰不到）。沙箱不能连数据库，取数只能走 `run_sql` 的三道防线。
 
+### view_image：模型看自己画的图
+
+文字重叠、标题被裁、单位写错，光看代码和输出是发现不了的。学 Claude Code / pi / Codex：
+不另设审图员，主模型按需调 `view_image(path)` 把图「拉」进上下文，提示词叫它交付前看一眼（`fh_` 模板画的不用看）。
+
+| 环节 | 怎么做 |
+|---|---|
+| 工具 | 只能看 `work/` 下的文件；长边缩到 1568 以内再发；PDF / SVG 看不了（叫模型另存 PNG）；只读，旧结果能被清理 |
+| 消息 | `Message.images`。Anthropic 原生放进 `tool_result`；OpenAI 兼容的 tool 消息只能是文字，图片挪到这批工具结果后面的一条 user 消息里（学 pi） |
+| 能力开关 | `OPENAI_VISION`：deepseek-flash 能看，deepseek-v4-pro 不能 —— 它收到图片不报错，只在回答里说 Unsupported Image，只能靠配置。关掉就不注册工具，提示词里那句也跟着没了；历史里已有的图发送时换成一句说明 |
+| 上下文 | 按面积估 token（宽×高/750，1568×980 ≈ 2000；DeepSeek 实测约 1000，宁可高估）；清理旧结果时图片一起换成占位；写摘要前换成 `[图片]` |
+
 ---
 
 ## 数据库里有什么
@@ -365,7 +378,7 @@ Python 和 R 能做的事比 SQL 多得多，所以不在代码层面拦（拦�
 | `fh_funnel` / `fh_sensitivity` | 漏斗图（10 项以上才做 Egger 检验）、逐一剔除的敏感性分析 |
 
 为什么这样分工：统计代码错了往往不报错（statsmodels 收到不认识的方法名照样算出负权重），
-R 包的参数名还在改，模型又看不见自己画的图。模板把「算得对、版式对、能复现」固定下来，
+R 包的参数名还在改，自己写的画图代码还得靠看图才能发现毛病。模板把「算得对、版式对、能复现」固定下来，
 模型负责读懂杂乱的 Excel（标题行、「12/100」写在一格里）、把用户的话翻译成参数、解释结果。
 
 **数字对齐 RevMan 5**：meta 包的 `settings.meta("RevMan5")`（τ² 用 DerSimonian-Laird、

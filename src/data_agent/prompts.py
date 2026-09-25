@@ -1,7 +1,7 @@
 """系统提示词。迭代最频繁的部分，单独成文件。
 
 按实际注册了哪些工具拼：连数据库的场景讲 SQL 的流程和结果引用，只有文件的场景讲怎么看懂用户的文件；
-有 run_python / run_r 就各多一步。场景包只填身份、数据是什么、业务约定。
+有 run_python / run_r 就各多一步，有 view_image 就多一条「交付前看图」。场景包只填身份、数据是什么、业务约定。
 """
 
 from __future__ import annotations
@@ -41,6 +41,9 @@ _RESULT_REFS = """
 - 只引用本次对话里真实返回过的编号。
 """
 
+_VIEW_IMAGE = ("自己写代码画的图，交付前用 `view_image` 看一眼：文字有没有重叠、被裁切，图例、坐标轴、单位、"
+               "数字对不对，有问题改好再交付。{templates}")
+
 
 def build_system_prompt(domain: Domain, tools: Collection[str] = ("list_tables", "describe_table", "run_sql")) -> str:
     """tools：实际注册了的工具名。"""
@@ -67,6 +70,8 @@ def build_system_prompt(domain: Domain, tools: Collection[str] = ("list_tables",
         f"一步只做一件事。需要多个角度就多查几次，不要把十件事堆进{'一条 SQL' if sql else '一段代码'}。",
         f"用户的问题有歧义时（{domain.ambiguity_example}），\n  先按最常见的口径算，然后说明你用了什么口径、还有什么别的算法。",
         "用户明确定过的口径、目标，之后直接沿用，不用每次再请用户确认。",
+        *([_VIEW_IMAGE.format(templates="`fh_` 模板画的图不用看。" if "run_r" in tools else "")]
+          if "view_image" in tools else []),
     ]
     return (
         f"{intro}\n\n## 工作流程\n" + "\n".join(steps)

@@ -5,6 +5,9 @@ openai>=1.60
 # 数据库
 psycopg[binary]>=3.2
 
+# 看图时缩放图片（view_image）
+pillow>=10
+
 # 配置
 pydantic>=2.0
 pydantic-settings>=2.0

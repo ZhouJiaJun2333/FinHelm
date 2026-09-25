@@ -2,6 +2,7 @@
 
 和 OpenAI 的差异：system 是顶层参数；回复是 content blocks（可能有 thinking），回传时原样带上；
 prompt 缓存要自己打 cache_control（DeepSeek、百炼是自动前缀缓存）。
+图片原生支持：工具结果里的图直接放进 tool_result 的 content。
 """
 
 from __future__ import annotations
@@ -11,12 +12,14 @@ from typing import Any
 import anthropic
 
 from ..core.errors import ContextOverflow
-from ..core.messages import LLMResponse, Message, ToolCall, Usage
+from ..core.messages import Image, LLMResponse, Message, ToolCall, Usage
 from ..core.provider import LLMProvider
 from .overflow import is_context_overflow
 
 
 class AnthropicProvider(LLMProvider):
+    vision = True
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -49,7 +52,7 @@ class AnthropicProvider(LLMProvider):
                 continue                       # system 走顶层参数
 
             if msg.role == "user":
-                out.append({"role": "user", "content": msg.content})
+                out.append({"role": "user", "content": _with_images(msg)})
 
             elif msg.role == "assistant":
                 if msg.raw is not None:
@@ -71,7 +74,7 @@ class AnthropicProvider(LLMProvider):
                 block = {
                     "type": "tool_result",
                     "tool_use_id": msg.tool_call_id,
-                    "content": msg.content,
+                    "content": _with_images(msg),
                 }
                 if msg.is_error:
                     block["is_error"] = True
@@ -148,3 +151,15 @@ class AnthropicProvider(LLMProvider):
             cache_read=u.cache_read_input_tokens or 0,
             cache_write=u.cache_creation_input_tokens or 0,
         )
+
+
+def _with_images(msg: Message) -> str | list[dict[str, Any]]:
+    """没图就还是字符串：请求体和以前一模一样，缓存不受影响。"""
+    if not msg.images:
+        return msg.content
+    return [*([{"type": "text", "text": msg.content}] if msg.content else []),
+            *(_image_block(i) for i in msg.images)]
+
+
+def _image_block(image: Image) -> dict[str, Any]:
+    return {"type": "image", "source": {"type": "base64", "media_type": image.media_type, "data": image.data}}

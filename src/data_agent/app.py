@@ -25,6 +25,7 @@ from .tools.sql.export_csv import ExportCsvTool
 from .tools.sql.list_tables import ListTablesTool
 from .tools.sql.results import ResultStore, result_resolver
 from .tools.sql.run_sql import RunSqlTool
+from .tools.view_image import ViewImageTool
 
 
 @dataclass(slots=True)
@@ -109,6 +110,9 @@ def build_application(
         )
         inspector = SchemaInspector(db, schemas=(domain.schema,))
 
+    # --- 模型层 --- 放在工具前面：注册哪些工具要看模型能力（能不能看图）
+    llm = llm or build_provider(settings)
+
     # --- 工具层 ---
     # run_sql 往里存、export_csv 按编号取、界面、评测和沙箱读：只有这一份
     results = results if results is not None else ResultStore()
@@ -131,9 +135,9 @@ def build_application(
                 memory=settings.sandbox_memory, cpus=settings.sandbox_cpus,
             )
             tools.register(tool_class(sandboxes[kind]))
-
-    # --- 模型层 ---
-    llm = llm or build_provider(settings)
+    # 看自己画的图。模型不能看图就不注册：提示词按注册的工具拼，「交付前看一眼」那句也就没了
+    if sandboxes and llm.vision:
+        tools.register(ViewImageTool(work_dir))
 
     # --- 上下文 ---
     # 触发线不超过「窗口 - 余量」：换成小窗口的模型时不能等到 10 万才动手

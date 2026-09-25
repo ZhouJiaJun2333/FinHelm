@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     openai_context_window: int = 1_000_000
     # 模型会不会自己思考（deepseek-flash 会）。不会的要改成 false，写摘要时让它先打草稿
     openai_native_thinking: bool = True
+    # 模型能不能看图（deepseek-flash 能，deepseek-v4-pro 不能）。不能的要改成 false：
+    # v4-pro 收到图片不报错，只在回答里说 Unsupported Image。关掉就不注册 view_image
+    openai_vision: bool = True
 
     # ---------------- 数据库 ----------------
     # docker/docker-compose.yml 起的库，只读账号
@@ -101,6 +104,7 @@ def build_provider(settings: Settings) -> LLMProvider:
             max_tokens=settings.max_tokens,
             context_window=settings.openai_context_window,
             native_thinking=settings.openai_native_thinking,
+            vision=settings.openai_vision,
         )
 
     raise ValueError(f"未知的 provider：{settings.provider}")

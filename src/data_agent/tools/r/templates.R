@@ -283,6 +283,13 @@ fh_rob <- function(data, tool, study = "study", domains = NULL, overall = NULL, 
   invisible(out)
 }
 
+# 图例的圆圈里也画上 + ? −：默认图例只有颜色，色盲读者、黑白打印分不出来
+.rob_key <- function(data, params, size) {
+  symbol <- .ROB_SYMBOLS[match(toupper(data$fill), toupper(.ROB_COLOURS))]
+  grid::grobTree(draw_key_point(data, params, size),
+                 grid::textGrob(symbol, gp = grid::gpar(fontsize = 5.5 * .pt, fontface = "bold")))
+}
+
 # RevMan 5 的 Risk of bias summary：每项研究 × 每个领域一个带符号的圆
 .rob_summary_plot <- function(r, cols, labs, cats) {
   long <- data.frame(study = rep(r$study, times = length(cols)), domain = rep(labs, each = nrow(r)),
@@ -291,7 +298,7 @@ fh_rob <- function(data, tool, study = "study", domains = NULL, overall = NULL, 
   long$domain <- factor(long$domain, levels = labs)
   long$value <- factor(long$value, levels = cats)
   ggplot(long, aes(domain, study)) +
-    geom_point(aes(fill = value), shape = 21, size = 8, colour = "grey25") +
+    geom_point(aes(fill = value), shape = 21, size = 8, colour = "grey25", key_glyph = .rob_key) +
     geom_text(aes(label = .ROB_SYMBOLS[as.integer(value)]), size = 5.5, fontface = "bold") +
     scale_fill_manual(values = setNames(.ROB_COLOURS, cats), drop = FALSE, name = NULL) +
     scale_x_discrete(position = "top") +
