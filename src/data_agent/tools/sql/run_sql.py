@@ -63,7 +63,7 @@ class RunSqlTool(Tool):
         "执行前请先用 describe_table 确认列名和外键。"
         f"每个结果有编号（r1、r2…）。超过 {FULL_ROWS} 行的结果你只能看到前 {PREVIEW_ROWS} 行，"
         "你要看别的行，就在 SQL 里筛选、排序或聚合后再查。"
-        "回答里单独一行写 {{r3}}，用户会在那个位置看到 r3 的完整结果表。"
+        f"超过 {FULL_ROWS} 行的长清单，回答里单独一行写 {{{{r3}}}}，用户会在那个位置看到 r3 的完整结果表。"
     )
 
     class Args(BaseModel):

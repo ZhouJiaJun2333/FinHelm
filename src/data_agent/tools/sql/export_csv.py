@@ -34,7 +34,8 @@ class Exported:
     truncated: bool          # 超过 EXPORT_ROWS，只导了前面这些
 
     def describe(self, ref: str) -> str:
-        text = f"已把 {ref} 导出到 {self.path}（{self.rows} 行 × {self.columns} 列，按导出时的数据重新查询）"
+        # 写绝对路径：相对路径是相对「启动程序时所在的目录」，用户未必知道是哪
+        text = f"已把 {ref} 导出到 {self.path.resolve()}（{self.rows} 行 × {self.columns} 列，按导出时的数据重新查询）"
         if self.truncated:
             text += f"。⚠️ 结果超过 {EXPORT_ROWS} 行，只导出了前 {EXPORT_ROWS} 行"
         return text

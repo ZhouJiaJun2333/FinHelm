@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -29,14 +30,16 @@ from .settings import Settings
 from .tools.sql.export_csv import export_query
 from .tools.sql.run_sql import FULL_ROWS, SqlResult, expand_refs, markdown_table
 
+REF_NAME = re.compile(r"r\d+")
+
 BANNER = """
 ┌─────────────────────────────────────────────────────┐
 │  SQL 数据分析 Agent                                 │
 │                                                     │
 │  /tables  看库里有哪些表      /tools   看有哪些工具 │
 │  /context 看上下文用量        /compact 压缩上下文   │
-│  /save r3 把结果存成 CSV      /reset   清空对话     │
-│  /exit    退出                                      │
+│  /save    把最近的结果存成 CSV（/save r3 指定编号） │
+│  /reset   清空对话            /exit    退出         │
 └─────────────────────────────────────────────────────┘"""
 
 
@@ -54,7 +57,8 @@ def make_console_sink(verbose: bool, tables: dict[str, SqlResult]):
                 # 否则同一段话会出现两遍。
                 if calls:
                     if text:
-                        print(f"\n🤖 {text}")
+                        # 过渡的话里也可能引用结果，和最终回答一样展开 —— 别让用户看到 {{r8}} 原文
+                        print(f"\n🤖 {expand_refs(text, tables, _show_table)}")
                     print(f"   ↳ 调用：{', '.join(calls)}")
                 print(f"   📊 {_usage_line(usage, window)}")
 
@@ -104,13 +108,31 @@ def _show_table(table: SqlResult) -> str:
     return text
 
 
+def parse_save(arg: str, tables: dict[str, SqlResult]) -> tuple[str | None, str]:
+    """/save 的参数 → (编号, 文件名)。编号可以省：
+
+        /save                 最近一个结果
+        /save r3              r3
+        /save r3 华东订单     r3，文件名叫 华东订单.csv
+        /save 华东订单        第一个词不像编号，就当文件名，存最近一个结果
+
+    编号不存在返回 None。
+    """
+    first, _, rest = arg.strip().partition(" ")
+    if REF_NAME.fullmatch(first):
+        return (first if first in tables else None), rest.strip()
+    latest = next(reversed(tables), None)      # dict 按插入顺序，最后一个就是最近的
+    return latest, arg.strip()
+
+
 def _save(arg: str, app: Application, tables: dict[str, SqlResult]) -> None:
-    """/save r3 [文件名]：和 export_csv 工具走同一个函数（按当时的 SQL 重跑再写）。"""
-    ref, _, filename = arg.strip().partition(" ")
-    table = tables.get(ref)
-    if table is None:
-        print(f"用法：/save r3 [文件名]。本次对话里的编号：{'、'.join(tables) or '还没有'}")
+    """/save [r3] [文件名]：和 export_csv 工具走同一个函数（按当时的 SQL 重跑再写）。"""
+    ref, filename = parse_save(arg, tables)
+    if ref is None:
+        print(f"用法：/save [r3] [文件名]，不写编号就存最近一个结果。"
+              f"本次对话里的编号：{'、'.join(tables) or '还没有'}")
         return
+    table = tables[ref]
     try:
         done = export_query(app.db, table.sql, Path(app.settings.export_dir), filename or f"{ref}.csv")
         print(done.describe(ref))
