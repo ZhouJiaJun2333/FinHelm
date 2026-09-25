@@ -27,6 +27,7 @@ from data_agent.core.events import (
 from data_agent.core.messages import Message, Usage
 from data_agent.db.connection import Database
 from data_agent.settings import Settings
+from data_agent.tools.sql.run_sql import REF, SqlResult, expand_refs, markdown_table
 
 from .cases import Case, Session
 from .graders import AnswerCheck, ResultMatch, check_answer, compare_results
@@ -56,7 +57,9 @@ class Trial:
 
     case_id: str
     trial: int
-    answer: str = ""
+    answer: str = ""                      # 模型写的原文，{{r3}} 这类引用没展开
+    shown: str = ""                       # 用户看到的（引用展开成整张表）；没有引用时为空
+    refs: int = 0                         # 回答里引用了几次结果
     error: str = ""                       # 运行时抛了异常（API 错、截断……）
     sql_calls: list[SqlCall] = field(default_factory=list)
     final_sql: str = ""                   # 最后一条执行成功的 run_sql（报告里展示用）
@@ -143,6 +146,7 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database,
         t.transcript.append({"error": traceback.format_exc(limit=5)})
     t.elapsed_s = round(time.perf_counter() - started, 1)
     digest(t, events)
+    show(t, events)
     grade(t, case, db, gold)
     return t
 
@@ -150,6 +154,7 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database,
 def digest(t: Trial, events: list[Event]) -> None:
     """从一轮的事件流里取出判分和统计要用的东西，写回 t。"""
     t.sql_calls = extract_sql_calls(events)
+    t.refs = len(REF.findall(t.answer))
     edited = compacted = False
     for e in events:
         if isinstance(e, ContextEdited):
@@ -255,6 +260,8 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
         t.usage = _minus(app.agent.session_usage, before)
         turn_events = events[start:]
         digest(t, turn_events)
+        if case.graded:
+            show(t, events)          # 整段会话的事件：回答可以引用前面几轮的结果
         st.edits += [{"turn": n, "kind": e.kind, "before": e.tokens_before, "after": e.tokens_after}
                      for e in turn_events if isinstance(e, ContextEdited)]
         if case.graded:
@@ -264,6 +271,18 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
     st.elapsed_s = round(time.perf_counter() - started, 1)
     st.transcript = _transcript(app.agent.context.history)
     return st
+
+
+def show(t: Trial, events: list[Event]) -> None:
+    """算出用户看到的回答：{{r3}} 展开成整张表。判分按它来 —— 表里的数用户看得到，就算说过了。
+
+    只给判分的轮次算：填充轮的清单动辄几百行，展开了只会撑大存档。
+    """
+    if not t.refs:
+        return
+    tables = {e.details.ref: e.details for e in events
+              if isinstance(e, ToolFinished) and isinstance(e.details, SqlResult)}
+    t.shown = expand_refs(t.answer, tables, lambda r: markdown_table(r.result.columns, r.result.rows))
 
 
 def _minus(a: Usage, b: Usage) -> Usage:
@@ -292,14 +311,14 @@ def extract_sql_calls(events: list[Event]) -> list[SqlCall]:
 def grade(t: Trial, case: Case, db, gold: Gold) -> None:
     """给一次 trial 判分，结果写回 t。db 只需要有 query(sql, max_rows=) 方法。"""
     if case.match == "answer":
-        t.answer_check = check_answer(gold.answer or [], t.answer)
+        t.answer_check = check_answer(gold.answer or [], t.shown or t.answer)
         ok = t.answer_check.ok is True
         t.result = ResultMatch(ok, ok, "" if ok else "回答里没说到标准答案的数")
         return
     if case.match == "empty":
         # 该查不到东西的题按回答判：说了「没有」就算对。Agent 常常先查数据覆盖哪几年
         # 来证明没有（冒烟测试里就是这样），这比硬跑一条返回空的 SQL 更好。
-        says_none = any(w in t.answer for w in NO_DATA_WORDS)
+        says_none = any(w in (t.shown or t.answer) for w in NO_DATA_WORDS)
         t.result = ResultMatch(says_none, says_none, "" if says_none else "回答里没说查不到数据")
         return
 
@@ -321,7 +340,7 @@ def grade(t: Trial, case: Case, db, gold: Gold) -> None:
         return
     t.result, alt = best
     t.answer_check = check_answer(gold.answer if gold.answer is not None else gold.alternatives[alt],
-                                  t.answer)
+                                  t.shown or t.answer)
 
 
 NO_DATA_WORDS = ("没有", "无数据", "不存在", "为空", "暂无", "查不到")

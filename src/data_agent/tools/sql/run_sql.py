@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import itertools
 import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
@@ -61,7 +62,8 @@ class RunSqlTool(Tool):
         "在分析库上执行一条只读 SQL（只能是 SELECT 或 WITH 开头的单条语句），返回结果表。"
         "执行前请先用 describe_table 确认列名和外键。"
         f"每个结果有编号（r1、r2…）。超过 {FULL_ROWS} 行的结果你只能看到前 {PREVIEW_ROWS} 行，"
-        "完整结果用户那边能看到；你要看别的行，就在 SQL 里筛选、排序或聚合后再查。"
+        "你要看别的行，就在 SQL 里筛选、排序或聚合后再查。"
+        "回答里单独一行写 {{r3}}，用户会在那个位置看到 r3 的完整结果表。"
     )
 
     class Args(BaseModel):
@@ -151,10 +153,23 @@ def _format(ref: str, result: QueryResult) -> str:
     more = f"超过 {FETCH_ROWS} 行，只取了前 {n} 行" if result.truncated else f"共 {n} 行"
     return (
         f"结果 {ref}（{more} × {cols} 列，耗时 {result.elapsed_ms}ms）。"
-        f"下面只给你看前 {PREVIEW_ROWS} 行，完整结果用户那边能看到：\n\n"
+        f"下面只给你看前 {PREVIEW_ROWS} 行。要给用户看整张表，在回答里单独一行写 {{{{{ref}}}}}：\n\n"
         + markdown_table(result.columns, result.rows[:PREVIEW_ROWS])
         + f"\n\n…还有 {n - PREVIEW_ROWS} 行没给你看。要用到其中的数，在 SQL 里筛选、排序或聚合后再查，不要猜。"
     )
+
+
+# 回答里的结果引用：模型写 {{r3}}，界面在这个位置展示整张表，模型就不用逐行抄写
+REF = re.compile(r"\{\{\s*(r\d+)\s*\}\}")
+
+
+def expand_refs(text: str, tables: Mapping[str, SqlResult],
+                render: Callable[[SqlResult], str]) -> str:
+    """把回答里的 {{r3}} 换成 render(结果)。怎么画由界面定：终端放前几行 + CSV，评测展开整张。"""
+    def one(m: re.Match) -> str:
+        table = tables.get(m.group(1))
+        return render(table) if table else f"（找不到结果 {m.group(1)}）"
+    return REF.sub(one, text)
 
 
 def markdown_table(columns: list[str], rows: list[tuple]) -> str:

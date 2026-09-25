@@ -57,3 +57,17 @@ def test_编号只增不减_空结果和出错不占号():
 def test_超过取数上限时告诉模型():
     out = run(FakeDb(50, truncated=True))
     assert f"超过 {FETCH_ROWS} 行" in out.content
+
+
+def test_回答里的引用展开成结果_找不到的编号照实说():
+    from data_agent.tools.sql.run_sql import expand_refs
+
+    tables = {"r1": run(FakeDb(3)).details}
+    text = expand_refs("见下表：\n{{r1}}\n还有 {{ r9 }}", tables, lambda t: f"<{t.ref} 共 {t.result.row_count} 行>")
+    assert text == "见下表：\n<r1 共 3 行>\n还有 （找不到结果 r9）"
+
+
+def test_摘要要求里的引用写法没被format吃掉():
+    from data_agent.core.context.compaction import DIRECT_OUTPUT, SUMMARY_PROMPT
+
+    assert "{{r3}}" in SUMMARY_PROMPT.format(output_format=DIRECT_OUTPUT)

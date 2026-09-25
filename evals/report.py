@@ -118,6 +118,7 @@ def summarize_sessions(case_set: CaseSet, sessions: list[SessionTrial]) -> dict[
     recall_ids = {c.id for c in case_set.graded_cases if c.match == "answer"}
     recalls = [t for t in turns if t.case_id in recall_ids]
     n = len(sessions) or 1
+    fillers = [t for st in sessions for t in st.turns if not t.graded]
     s["会话"] = {
         "会话数": len(sessions),
         "平均清理次数": round(sum(st.edit_count("ToolResultsCleared") for st in sessions) / n, 2),
@@ -131,6 +132,10 @@ def summarize_sessions(case_set: CaseSet, sessions: list[SessionTrial]) -> dict[
         # 填充轮不判分，出错不进「运行出错」—— 但它会让这一轮回滚、上下文没按预期变大，得单独看
         "填充轮出错": dict(Counter(t.error.split(":")[0] for st in sessions for t in st.turns
                                     if not t.graded and t.error)),
+        # 填充轮就是「列清单」：用引用让界面展示整张表，模型就不用把几十行抄一遍
+        "填充轮": len(fillers),
+        "填充轮用引用": sum(t.refs > 0 for t in fillers),
+        "填充轮平均输出token": round(sum(t.usage.output for t in fillers) / (len(fillers) or 1)),
         "平均会话输入token": round(sum(st.usage.prompt_tokens for st in sessions) / n),
         "平均会话耗时s": round(sum(st.elapsed_s for st in sessions) / n, 1),
         "逐段": {
@@ -202,6 +207,8 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
             f"- 回忆轮 {ss['回忆轮']} 次：答对 {ss['回忆轮答对']}，其中重新查了 {ss['回忆轮重查']} 次"
             "（标签「回忆:查不到」的只能靠上下文 / 摘要，见按标签一节）",
             f"- 一轮里整理 ≥ 2 次：{ss.get('一轮多次整理', 0)} / {ss.get('总轮数', 0)} 轮",
+            f"- 填充轮（列清单）：回答里引用结果 {ss.get('填充轮用引用', 0)} / {ss.get('填充轮', 0)} 轮，"
+            f"平均输出 {ss.get('填充轮平均输出token', 0):,} token",
             *([f"- ⚠️ 填充轮出错（这一轮回滚，没撑大上下文）："
                + "，".join(f"{k} × {v}" for k, v in ss["填充轮出错"].items())] if ss.get("填充轮出错") else []),
             "",

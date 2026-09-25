@@ -28,7 +28,7 @@ from .core.events import (
 )
 from .core.messages import Usage
 from .settings import Settings
-from .tools.sql.run_sql import FULL_ROWS, SqlResult, markdown_table
+from .tools.sql.run_sql import FULL_ROWS, SqlResult, expand_refs, markdown_table
 
 BANNER = """
 ┌──────────────────────────────────────────────────┐
@@ -40,8 +40,12 @@ BANNER = """
 └──────────────────────────────────────────────────┘"""
 
 
-def make_console_sink(verbose: bool, out_dir: Path):
-    """把 Agent 事件打印到终端。大结果的完整数据存成 CSV 放在 out_dir。"""
+def make_console_sink(verbose: bool, out_dir: Path, tables: dict[str, SqlResult]):
+    """把 Agent 事件打印到终端。大结果的完整数据存成 CSV 放在 out_dir。
+
+    查出来的结果按编号收进 tables：回答里的 {{r3}} 要靠它展开。只增不减 ——
+    回滚、压缩之后模型可能还会引用之前的编号，界面上的数据不跟着历史变。
+    """
 
     def sink(event: Event) -> None:
         match event:
@@ -60,6 +64,7 @@ def make_console_sink(verbose: bool, out_dir: Path):
 
             case ToolFinished(ok=True, details=SqlResult() as table, elapsed_ms=ms):
                 # 用户看的是完整结果，不是模型看到的预览
+                tables[table.ref] = table
                 print(f"✅ ({ms}ms)\n{_show_table(table, out_dir)}")
 
             case ToolFinished(ok=ok, content=content, elapsed_ms=ms):
@@ -201,10 +206,11 @@ def main() -> None:
     verbose = "--verbose" in sys.argv
     # 每次启动一个目录：编号从 r1 重新数，放一起会互相覆盖
     out_dir = Path("outputs") / f"{datetime.now():%Y%m%d-%H%M%S}"
+    tables: dict[str, SqlResult] = {}
 
     settings = Settings()
     try:
-        app = build_application(settings, on_event=make_console_sink(verbose, out_dir))
+        app = build_application(settings, on_event=make_console_sink(verbose, out_dir, tables))
     except Exception as exc:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")
@@ -239,7 +245,7 @@ def main() -> None:
 
         try:
             answer = app.agent.run(user_input)
-            print(f"\n💬 {answer}")
+            print(f"\n💬 {expand_refs(answer, tables, lambda t: _show_table(t, out_dir))}")
         except KeyboardInterrupt:
             print("\n已中断本轮。")
         except AgentError as exc:
