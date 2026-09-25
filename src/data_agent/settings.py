@@ -36,7 +36,8 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql://agent_ro:agent_ro_pwd@localhost:5433/analytics"
     )
-    db_schema: str = "shop"
+    # 场景包（domains/）：用哪个业务库、带哪套业务约定。shop = 自己造的电商库，financial = BIRD 的银行库
+    domain: str = "shop"
     db_statement_timeout_ms: int = 30_000
     # 会话目录的根：每次对话一个子目录，放对话日志、查询结果、导出的 CSV（见 session/store.py）
     sessions_dir: str = "sessions"

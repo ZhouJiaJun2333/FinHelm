@@ -64,6 +64,9 @@ class Trial:
     sql_calls: list[SqlCall] = field(default_factory=list)
     final_sql: str = ""                   # 最后一条执行成功的 run_sql（报告里展示用）
     matched_sql: str = ""                 # 查出了标准答案的那条；空 = 没有一条对上
+    # 只看最后一条 SQL、列数也一样 —— BIRD 官方的判法。我们的主分数看「任何一条」，
+    # 两个都报：和公开榜单比用这个，和自己的旧版本比用主分数
+    final_strict: bool = False
     steps: int = 0                        # 调了几次模型
     usage: Usage = field(default_factory=Usage)
     calls: list[Usage] = field(default_factory=list)   # 每次调模型的用量，按顺序（不含写摘要）
@@ -322,12 +325,14 @@ def grade(t: Trial, case: Case, db, gold: Gold) -> None:
 
     # Agent 跑过的每一条成功的 SQL 都拿来比，有一条查出了标准答案就算对（去重，先比后面的）
     best: tuple[ResultMatch, int] | None = None
-    for sql in dict.fromkeys(c.sql for c in reversed(t.sql_calls) if c.ok):
+    for n, sql in enumerate(dict.fromkeys(c.sql for c in reversed(t.sql_calls) if c.ok)):
         rows = _rerun(t, db, sql)
         if rows is None:
             continue
         for i, g in enumerate(gold.alternatives):
             m = compare_results(g, rows, case.match)
+            if n == 0:                   # reversed 之后第一条就是最后执行的那条
+                t.final_strict |= m.strict
             if best is None or _better(m, best[0]):
                 best = (m, i)
                 if m.lenient:

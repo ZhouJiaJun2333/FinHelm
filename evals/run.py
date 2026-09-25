@@ -34,7 +34,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from data_agent.db.connection import Database
-from data_agent.prompts import SYSTEM_PROMPT
+from data_agent.domains import get_domain
+from data_agent.prompts import build_system_prompt
 from data_agent.settings import Settings
 
 from .cases import CaseSet, load_cases
@@ -64,15 +65,19 @@ def main(argv: list[str] | None = None) -> None:
         rebuild(args.rebuild, args.compare)
         return
     load_dotenv(ROOT / ".env")
-    forced = _parse_sets(args.sets)
-    overrides = {"openai_model": args.model} if args.model else {}
-    settings = Settings(**overrides, **forced)
-    model = settings.openai_model if settings.provider == "openai" else settings.anthropic_model
-
     only = set(args.only.split(",")) if args.only else None
     case_set = load_cases(args.cases, only)
     if not case_set.cases and not case_set.sessions:
         sys.exit(f"题库 {args.cases} 里没有要跑的题")
+    if unknown := set(case_set.settings) - set(Settings.model_fields):
+        sys.exit(f"题库 {args.cases} 的 settings 里有不认识的配置：{sorted(unknown)}")
+
+    forced = _parse_sets(args.sets)
+    overrides = {"openai_model": args.model} if args.model else {}
+    # 优先级：.env < 题库级配置（比如 BIRD 用 financial 场景包）< --model / --set
+    settings = Settings(**{**case_set.settings, **overrides, **forced})
+    domain = get_domain(settings.domain)
+    model = settings.openai_model if settings.provider == "openai" else settings.anthropic_model
     graded = case_set.graded_cases
     # 会话覆盖的配置名写错了，model_copy 会悄悄忽略 —— 门槛没调低，整段会话就白跑了
     for s in case_set.sessions:
@@ -80,7 +85,8 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(f"{s.id} 的 settings 里有不认识的配置：{sorted(unknown)}")
 
     # 标准答案先全跑一遍：标准 SQL 本身有错，要在花钱跑 Agent 之前就发现
-    db = Database(settings.database_url, statement_timeout_ms=settings.db_statement_timeout_ms)
+    db = Database(settings.database_url, statement_timeout_ms=settings.db_statement_timeout_ms,
+                  search_path=domain.schema)
     gold = {c.id: run_gold(c, db) for c in graded}
     # 自检：标准答案和它自己比必须算对。不对说明判分器或者题目的 match 写错了
     for c in graded:
@@ -107,7 +113,8 @@ def main(argv: list[str] | None = None) -> None:
         "overrides": forced,
         "trials": args.trials,
         "started": f"{started:%Y-%m-%d %H:%M:%S}",
-        "prompt_sha1": hashlib.sha1(SYSTEM_PROMPT.encode()).hexdigest()[:12],
+        "domain": domain.name,
+        "prompt_sha1": hashlib.sha1(build_system_prompt(domain).encode()).hexdigest()[:12],
         "max_steps": settings.max_steps,
         **_git(),
     }

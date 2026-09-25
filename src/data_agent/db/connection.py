@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
+from psycopg import sql as pgsql
 from psycopg.rows import dict_row
 
 
@@ -37,9 +38,13 @@ class Database:
     直连 psycopg 代码更少、更透明，出了问题一眼能看到 SQL。
     """
 
-    def __init__(self, dsn: str, *, statement_timeout_ms: int = 30_000) -> None:
+    def __init__(self, dsn: str, *, statement_timeout_ms: int = 30_000,
+                 search_path: str | None = None) -> None:
         self._dsn = dsn
         self._statement_timeout_ms = statement_timeout_ms
+        # SQL 里不写 schema 前缀时去哪找表。BIRD 的标准 SQL 都不带前缀（FROM account），
+        # 设成场景包的 schema，Agent 的 SQL 和标准 SQL 就都能跑
+        self._search_path = search_path
 
     # ------------------------------------------------------------------
     def _connect(self) -> psycopg.Connection:
@@ -48,6 +53,8 @@ class Database:
             # 双保险：即使连的是有写权限的账号，这个连接也只能读
             cur.execute("SET default_transaction_read_only = on")
             cur.execute(f"SET statement_timeout = {self._statement_timeout_ms}")
+            if self._search_path:
+                cur.execute(pgsql.SQL("SET search_path = {}").format(pgsql.Identifier(self._search_path)))
         return conn
 
     def ping(self) -> str:

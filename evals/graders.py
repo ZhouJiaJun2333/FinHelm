@@ -23,7 +23,9 @@ from decimal import Decimal
 from typing import Any, Literal, Sequence
 
 # 结果怎么比：
-#   set       行的集合相同，不管顺序（默认）
+#   set       行的集合相同，不管顺序（默认）。重复的行要一一对上（行数得一样）
+#   distinct  去重之后再比集合 —— BIRD 的判法（set(pred) == set(gold)）。BIRD 的标准 SQL
+#             常常不写 DISTINCT，查出几千行重复值；Agent 写了 DISTINCT，按 set 会判错
 #   ordered   行的顺序也要一样（题目要求「从高到低」这种）
 #   top       标准答案是排名前几名；Agent 的结果前几行和它一样就行，
 #             后面多列几名不算错（问「哪个最高」，Agent 常常把整个排名都查出来）
@@ -33,7 +35,7 @@ from typing import Any, Literal, Sequence
 #             Agent 常常是先查一下数据覆盖哪几年来证明没有，这比返回一个空结果更好
 #   answer    只看回答（多轮会话里的回忆题：「第一个问题里华东是多少？」）。回答里说到
 #             answer_sql 的数就算对，靠记忆答、重新查一遍都行
-MatchMode = Literal["set", "ordered", "top", "contains", "empty", "answer"]
+MatchMode = Literal["set", "distinct", "ordered", "top", "contains", "empty", "answer"]
 
 # 数值比较的容差：**按数字写出来的精度算**，不用一个固定的绝对误差。
 #   ROUND(x, 2) 得到 0.33，舍入误差最多 0.005，那就容 0.005；写成 0.0561 就只容 0.00005；
@@ -136,6 +138,8 @@ def compare_results(
     """
     gold = [tuple(normalize(v) for v in r) for r in gold]
     pred = [tuple(normalize(v) for v in r) for r in pred]
+    if mode == "distinct":
+        gold, pred, mode = list(dict.fromkeys(gold)), list(dict.fromkeys(pred)), "set"
 
     if mode == "empty":
         ok = _looks_empty(pred)

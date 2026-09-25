@@ -27,6 +27,11 @@
      ]}
 
 每一轮的 id 是「会话 id/轮次」，比如 multi-001/3。答错了会话照样往下问 —— 真实用户也会接着问。
+
+题库级配置：没有 id、只有 settings 的一行，整个题库都用它（优先级：.env < 这里 < 命令行 --set）。
+BIRD 的题库靠它选场景包：
+
+    {"settings": {"domain": "financial"}}
 """
 
 from __future__ import annotations
@@ -73,6 +78,7 @@ class CaseSet:
     name: str
     cases: list[Case] = field(default_factory=list)
     sessions: list[Session] = field(default_factory=list)   # 多轮题库；和 cases 二选一
+    settings: dict[str, object] = field(default_factory=dict)  # 题库级配置（比如 domain）
     sha1: str = ""                     # 题库文件的指纹，写进运行记录：题改过，分数就不能直接比
 
     @property
@@ -88,12 +94,15 @@ def load_cases(name: str, only: set[str] | None = None) -> CaseSet:
     raw = path.read_bytes()
     cases: list[Case] = []
     sessions: list[Session] = []
+    settings: dict[str, object] = {}
     for n, line in enumerate(raw.decode("utf-8").splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("//"):
             continue
         try:
             d = json.loads(line)
-            if "turns" in d:
+            if "id" not in d and "settings" in d:
+                settings.update(d["settings"])
+            elif "turns" in d:
                 s = Session(
                     id=d["id"],
                     turns=[_case(t, f"{d['id']}/{i}") for i, t in enumerate(d["turns"], 1)],
@@ -115,7 +124,7 @@ def load_cases(name: str, only: set[str] | None = None) -> CaseSet:
     ids = [c.id for c in cases] + [s.id for s in sessions]
     if len(ids) != len(set(ids)):
         raise ValueError(f"{path.name} 里有重复的 id")
-    return CaseSet(name, cases, sessions, hashlib.sha1(raw).hexdigest()[:12])
+    return CaseSet(name, cases, sessions, settings, hashlib.sha1(raw).hexdigest()[:12])
 
 
 def _case(d: dict, case_id: str) -> Case:

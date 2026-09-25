@@ -21,7 +21,8 @@ from .core.provider import LLMProvider
 from .core.tools import ToolRegistry
 from .db.connection import Database
 from .db.introspection import SchemaInspector
-from .prompts import SYSTEM_PROMPT
+from .domains import get_domain
+from .prompts import build_system_prompt
 from .settings import Settings, build_provider
 from .tools.sql.describe_table import DescribeTableTool
 from .tools.sql.export_csv import ExportCsvTool
@@ -68,13 +69,16 @@ def build_application(
         export_dir:       CSV 写到哪。CLI 传会话目录下的 exports/；不传用 settings.export_dir。
     """
     settings = settings or Settings()
+    # 场景包：数据在哪个 schema、业务约定是什么。内核的其余部分不知道行业
+    domain = get_domain(settings.domain)
 
     # --- 数据层 ---
     db = Database(
         settings.database_url,
         statement_timeout_ms=settings.db_statement_timeout_ms,
+        search_path=domain.schema,
     )
-    inspector = SchemaInspector(db, schemas=(settings.db_schema,))
+    inspector = SchemaInspector(db, schemas=(domain.schema,))
 
     # --- 工具层：依赖在这里注入，工具内部不碰全局变量 ---
     # run_sql 往里存、export_csv 按编号取，界面和评测也读它 —— 只有这一份
@@ -82,7 +86,7 @@ def build_application(
     export_dir = export_dir or Path(settings.export_dir)
     tools = ToolRegistry([
         ListTablesTool(inspector),
-        DescribeTableTool(db, inspector, default_schema=settings.db_schema),
+        DescribeTableTool(db, inspector, default_schema=domain.schema),
         RunSqlTool(db, results),
         ExportCsvTool(db, results, export_dir),
     ])
@@ -119,7 +123,7 @@ def build_application(
     agent = Agent(
         llm=llm,
         tools=tools,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=build_system_prompt(domain),
         context=context,
         max_steps=settings.max_steps,
         approval_hook=approval_hook,

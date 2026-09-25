@@ -83,6 +83,14 @@ def test_top只看前几名_后面多列几名不算错():
     assert not compare_results(gold, [("客户0174", 338369.89), ("客户0071", 346022.41)], "top").lenient
 
 
+def test_distinct去重之后再比_BIRD的判法():
+    """BIRD 的标准 SQL 常常不写 DISTINCT：461 行全是 DISPONENT。Agent 写了 DISTINCT 只有 1 行。"""
+    gold = [("DISPONENT",)] * 461
+    assert compare_results(gold, [("DISPONENT",)], "distinct").strict
+    assert not compare_results(gold, [("DISPONENT",)], "set").lenient, "set 要求重复的行一一对上"
+    assert not compare_results(gold, [("DISPONENT",), ("OWNER",)], "distinct").lenient
+
+
 def test_contains多出的行不算错():
     gold = [("政府", 12181016.01), ("企业", 9452261.85)]
     pred = [("个人", 10333264.28), ("企业", 9452261.85), ("政府", 12181016.01)]
@@ -170,6 +178,26 @@ def test_题库能读_match都合法_每题至少一条标准SQL():
         assert c.match in ("set", "ordered", "top", "contains", "empty"), c.id
         assert c.gold_sql and all(s.strip().upper().startswith("SELECT") for s in c.gold_sql), c.id
         assert c.tags, f"{c.id} 没有标签，报告里没法分类"
+
+
+def test_BIRD题库_题库级配置选场景包_按去重集合判():
+    cs = load_cases("bird_financial")
+    assert cs.settings == {"domain": "financial"}
+    assert len(cs.cases) == 32
+    assert all(c.match == "distinct" and "提示（外部知识）" in c.question for c in cs.cases)
+
+
+def test_只看最后一条_BIRD官方判法():
+    """我们的主分数看任何一条；BIRD 只看最后一条。先查对、最后又查了一条明细 → 主分数对，BIRD 判法错。"""
+    case = Case("c", "q", ("gold",))
+    db = FakeDB({"SELECT 答案": [(61,)], "SELECT 明细": [("华东", 61), ("华北", 42)]})
+    t = trial_with([("SELECT 答案", True), ("SELECT 明细", True)], "61")
+    grade(t, case, db, Gold([[(61,)]]))
+    assert t.result_ok and not t.final_strict
+
+    t = trial_with([("SELECT 明细", True), ("SELECT 答案", True)], "61")
+    grade(t, case, db, Gold([[(61,)]]))
+    assert t.result_ok and t.final_strict
 
 
 # ================================================================ 一次 trial 怎么判

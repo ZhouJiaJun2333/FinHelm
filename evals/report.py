@@ -1,9 +1,10 @@
 """报告：把一批 trial 汇总成数字，并和上一次运行逐题对比。
 
-三个准确率，从宽到严：
+几个准确率：
     结果对     Agent 跑过的某条 SQL 查出了标准答案（允许多几列）
-    严格       而且列数也一样（BIRD 的判法）
+    严格       而且列数也一样
     回答对     结果对，而且最终回答里的数字对得上 —— 用户真正看到的是这个
+    最后一条   只看最后执行的那条 SQL、列数也一样 —— BIRD 官方的判法，和公开榜单比用它
 
 pass@1 = 跑一次答对的概率（所有 trial 的平均）
 pass^k = 连跑 k 次全对的比例（τ-bench 的指标）：时对时错的 Agent 比稳定答不上来的更坑人
@@ -70,6 +71,7 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
             "结果对": sum(t.result_ok for t in ts) / n,
             "严格": sum(bool(t.result and t.result.strict) for t in ts) / n,
             "回答对": sum(t.answer_ok for t in ts) / n,
+            "最后一条": sum(t.final_strict for t in ts) / n,
         }
 
     per_case = {}
@@ -184,6 +186,7 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         f"| pass@1 结果对 | {pct(p1['结果对'])} |",
         f"| pass@1 严格（列数也一样） | {pct(p1['严格'])} |",
         f"| **pass@1 回答对** | **{pct(p1['回答对'])}** |",
+        f"| pass@1 只看最后一条 SQL（BIRD 官方判法） | {pct(p1['最后一条'])} |",
         f"| pass^{meta['trials']}（每次都回答对的题） | {pct(s['pass^k'])} |",
         f"| 平均步数 | {s['平均步数']} |",
         f"| 平均 token（输入 / 输出） | {s['平均输入token']:,} / {s['平均输出token']:,} |",

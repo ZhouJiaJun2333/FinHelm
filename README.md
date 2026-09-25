@@ -105,6 +105,10 @@ pytest
 │   │       ├── export_csv.py       用户要文件时按编号重跑导出
 │   │       └── results.py          结果仓库：r1、r2… 只存一份，run_sql / 导出 / 界面 / 评测共用
 │   │
+│   ├── domains/                ★ 场景包：一个业务库的行业知识（schema、业务约定），.env 里 DOMAIN= 选
+│   │   ├── shop.py               自己造的电商库
+│   │   └── financial.py          BIRD 的捷克银行库
+│   │
 │   ├── session/                ★ 会话落盘（学 pi / Claude Code 的 JSONL 日志）
 │   │   ├── store.py              会话目录；每轮成功之后追加日志；读回历史（--resume）
 │   │   └── codec.py              消息 + 标记 ↔ JSON
@@ -407,6 +411,37 @@ run_sql 只给预览之后结果最多约 1.5k，改成清理 8000 / 压缩 1.2 
 **当前多轮基线**（2026-09-25，门槛 8000 / 1.2 万，runs/20260925-130738「门槛8000」）：32/32 全对，查不到的回忆 4/4；
 每段都在回忆轮之前清理或压缩 1~3 次；每段 36 万输入 token、92s，缓存 94%（清理后 25%、压缩后 26%、写摘要 95%）。
 这次发现判分器把「多一行合计」（Agent 用 ROLLUP）判成行数不对，改成去掉唯一一行文字标签是合计的行再比，重判了存档。
+
+### BIRD Mini-Dev：financial 库（公开评测）
+
+自建题库都满分了，量不出改进。[BIRD Mini-Dev](https://github.com/bird-bench/mini_dev) 是公开的 text-to-SQL 评测，
+financial 库是一家捷克银行的真实脱敏数据（PKDD'99，账户 / 客户 / 贷款 / 交易 / 信用卡，交易表 105 万行），32 道题。
+许可证 CC BY-SA 4.0，数据不进 git（`data/` 在 .gitignore 里）。
+
+**准备**（一次性）：
+
+```bash
+mkdir -p data/bird
+curl -L -o data/bird/minidev.zip https://bird-bench.oss-cn-beijing.aliyuncs.com/minidev.zip
+curl -L -o data/bird/mini_dev_pg.json https://huggingface.co/datasets/birdsql/bird_mini_dev/resolve/main/data/mini_dev_pg-00000-of-00001.json
+cd data/bird && unzip minidev.zip "minidev/MINIDEV_postgresql/BIRD_dev.sql" "minidev/MINIDEV/dev_databases/financial/database_description/*" && cd ../..
+python -m evals.bird.prepare
+```
+
+`minidev.zip` 约 800 MB（11 个库的 PostgreSQL 导出都在里面），我们只导 financial 的 8 张表到 `financial` schema；
+题目用 Hugging Face 上 2025-07 修订过的版本（zip 里的是旧版）。BIRD 随库发的列说明写成了 `COMMENT ON COLUMN`，
+`describe_table` 会给模型看 —— 不然 `a2`~`a16`、捷克语编码只能猜。
+
+**跑**：`python -m evals.run --cases bird_financial --trials 3`。题库第一行 `{"settings": {"domain": "financial"}}`
+自动切到 financial 场景包（`domains/financial.py`），不用改 .env。
+
+和 BIRD 官方判法的两处不同，报告里两种分数都有：
+- **看哪条 SQL**：主分数看 Agent 跑过的任何一条；「只看最后一条 SQL」那一行是 BIRD 的判法，和公开榜单比用它。
+- **去重**：BIRD 比的是 `set(结果)`，所以题目用 `distinct` 模式（去重后比集合）。有 3 道题的标准 SQL 查出大量重复行
+  （比如 461 行全是 `DISPONENT`），按我们原来的 `set`（重复行要一一对上）写了 DISTINCT 的 Agent 会被判错。
+
+⚠️ BIRD 的标注错误率不低（社区统计 Mini-Dev 约一半的题有问题，比如 q94 的标准 SQL 就可疑）。只和自己的旧版本比，
+不追榜；失败分析时先看标准答案对不对。
 
 ---
 
