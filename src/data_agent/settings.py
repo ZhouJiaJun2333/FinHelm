@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     )
     db_schema: str = "shop"
     db_statement_timeout_ms: int = 30_000
+    # 用户要导出结果时（/save、export_csv 工具），CSV 写到这里。只在用户要的时候写
+    export_dir: str = "outputs"
 
     # ---------------- Agent ----------------
     max_steps: int = 12

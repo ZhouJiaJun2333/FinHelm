@@ -71,3 +71,32 @@ def test_摘要要求里的引用写法没被format吃掉():
     from data_agent.core.context.compaction import DIRECT_OUTPUT, SUMMARY_PROMPT
 
     assert "{{r3}}" in SUMMARY_PROMPT.format(output_format=DIRECT_OUTPUT)
+
+
+# ================================================================ 导出
+def test_导出按编号重跑当时的SQL_不认识的编号报错并列出已有的(tmp_path):
+    from data_agent.tools.sql.export_csv import ExportCsvTool
+
+    db = FakeDb(347)
+    sql_tool = RunSqlTool(db)
+    sql_tool.execute({"sql": "SELECT name, amount FROM t"})
+    export = ExportCsvTool(db, sql_tool.queries, tmp_path)
+
+    out = export.execute({"ref": "r1"})
+    assert out.ok and "347 行 × 2 列" in out.content
+    assert db.max_rows_seen[-1] > FETCH_ROWS           # 导出可以比界面多拿
+    text = (tmp_path / "r1.csv").read_text(encoding="utf-8-sig")
+    assert text.splitlines()[:2] == ["name,amount", "客户0,0"]
+    assert (tmp_path / "r1.csv").read_bytes().startswith(b"\xef\xbb\xbf")   # 带 BOM，Excel 不乱码
+
+    bad = export.execute({"ref": "r9"})
+    assert not bad.ok and "r1" in bad.content
+
+
+def test_导出文件名不能带路径_重名不覆盖(tmp_path):
+    from data_agent.tools.sql.export_csv import export_query
+
+    first = export_query(FakeDb(2), "SELECT", tmp_path, "../../外面/客户清单")
+    second = export_query(FakeDb(2), "SELECT", tmp_path, "客户清单.csv")
+    assert first.path == tmp_path / "客户清单.csv"
+    assert second.path == tmp_path / "客户清单-1.csv"

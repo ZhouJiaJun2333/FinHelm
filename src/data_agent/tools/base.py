@@ -38,6 +38,10 @@ class ToolOutput:
     # 只给界面、不发给模型的数据（见模块说明第 2 点）。截断只截 content，不动它。
     details: Any = None
 
+    # TODO 大结果落盘（见 README「下一步扩展」）：这里现在是**截掉**，后面的内容就丢了。
+    #   能重拿的结果（run_sql 重查）无所谓；以后接网页、实时 API、Python 这类结果不能重拿的工具，
+    #   要换成：全文存进 会话目录/tool-results/<调用id>.txt，content 给开头一段 + 路径，
+    #   再配一个按位置读的工具（Claude Code、pi 都是这么做的）。需要先有会话目录。
     def capped(self, limit: int = MAX_OUTPUT_CHARS) -> "ToolOutput":
         if len(self.content) <= limit:
             return self

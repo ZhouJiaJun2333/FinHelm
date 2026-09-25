@@ -13,7 +13,7 @@
 结果分两份（见 tools/base.py 的 details）：
     模型    20 行以内原样给；更多只给前 10 行 + 行列数 —— 它要的是够推理的信息，
             要看别的行就改 SQL 再查（只读查询重跑拿到的是同一份数据，还能顺手筛选、聚合）
-    界面    完整结果（最多 1 万行），放在 details 里，终端存成 CSV
+    界面    完整结果（最多 1 万行），放在 details 里；用户要文件时再导出 CSV（export_csv）
 每个结果有编号（r1、r2…），模型和用户靠它指认同一份结果。
 """
 
@@ -77,6 +77,8 @@ class RunSqlTool(Tool):
         self.db = db
         # 编号只增不减：/reset、回滚都不回收 —— 界面上已经展示过的 r3 不能换成别的结果
         self._refs = itertools.count(1)
+        # 编号 → SQL。只记 SQL 不记结果：要导出时重跑（export_csv），工具层不用存大结果
+        self.queries: dict[str, str] = {}
 
     def run(self, args: Args) -> ToolOutput:
         sql = _validate(args.sql)
@@ -84,6 +86,7 @@ class RunSqlTool(Tool):
         if not result.columns or not result.rows:
             return ToolOutput(True, _format_empty(result), _summarize(result))
         ref = f"r{next(self._refs)}"
+        self.queries[ref] = sql
         return ToolOutput(True, _format(ref, result), _summarize(result, ref),
                           details=SqlResult(ref, sql, result))
 
@@ -165,7 +168,7 @@ REF = re.compile(r"\{\{\s*(r\d+)\s*\}\}")
 
 def expand_refs(text: str, tables: Mapping[str, SqlResult],
                 render: Callable[[SqlResult], str]) -> str:
-    """把回答里的 {{r3}} 换成 render(结果)。怎么画由界面定：终端放前几行 + CSV，评测展开整张。"""
+    """把回答里的 {{r3}} 换成 render(结果)。怎么画由界面定：终端放前几行，评测展开整张。"""
     def one(m: re.Match) -> str:
         table = tables.get(m.group(1))
         return render(table) if table else f"（找不到结果 {m.group(1)}）"

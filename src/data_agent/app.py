@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from .core.agent import Agent, ApprovalHook, FinishTurnHook
@@ -23,6 +24,7 @@ from .prompts import SYSTEM_PROMPT
 from .settings import Settings, build_provider
 from .tools.registry import ToolRegistry
 from .tools.sql.describe_table import DescribeTableTool
+from .tools.sql.export_csv import ExportCsvTool
 from .tools.sql.list_tables import ListTablesTool
 from .tools.sql.run_sql import RunSqlTool
 
@@ -66,10 +68,13 @@ def build_application(
     inspector = SchemaInspector(db, schemas=(settings.db_schema,))
 
     # --- 工具层：依赖在这里注入，工具内部不碰全局变量 ---
+    run_sql = RunSqlTool(db)
     tools = ToolRegistry([
         ListTablesTool(inspector),
         DescribeTableTool(db, inspector, default_schema=settings.db_schema),
-        RunSqlTool(db),
+        run_sql,
+        # 导出按编号重跑 run_sql 记下的 SQL —— 两个工具共用那张「编号 → SQL」表
+        ExportCsvTool(db, run_sql.queries, Path(settings.export_dir)),
     ])
 
     # --- 模型层 ---

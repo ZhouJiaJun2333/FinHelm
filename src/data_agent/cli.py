@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-import csv
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -28,20 +26,22 @@ from .core.events import (
 )
 from .core.messages import Usage
 from .settings import Settings
+from .tools.sql.export_csv import export_query
 from .tools.sql.run_sql import FULL_ROWS, SqlResult, expand_refs, markdown_table
 
 BANNER = """
-┌──────────────────────────────────────────────────┐
-│  SQL 数据分析 Agent                               │
-│                                                  │
-│  /tables  看库里有哪些表      /tools  看有哪些工具 │
-│  /context 看上下文用量        /compact 压缩上下文 │
-│  /reset   清空对话            /exit   退出       │
-└──────────────────────────────────────────────────┘"""
+┌─────────────────────────────────────────────────────┐
+│  SQL 数据分析 Agent                                 │
+│                                                     │
+│  /tables  看库里有哪些表      /tools   看有哪些工具 │
+│  /context 看上下文用量        /compact 压缩上下文   │
+│  /save r3 把结果存成 CSV      /reset   清空对话     │
+│  /exit    退出                                      │
+└─────────────────────────────────────────────────────┘"""
 
 
-def make_console_sink(verbose: bool, out_dir: Path, tables: dict[str, SqlResult]):
-    """把 Agent 事件打印到终端。大结果的完整数据存成 CSV 放在 out_dir。
+def make_console_sink(verbose: bool, tables: dict[str, SqlResult]):
+    """把 Agent 事件打印到终端。
 
     查出来的结果按编号收进 tables：回答里的 {{r3}} 要靠它展开。只增不减 ——
     回滚、压缩之后模型可能还会引用之前的编号，界面上的数据不跟着历史变。
@@ -65,7 +65,7 @@ def make_console_sink(verbose: bool, out_dir: Path, tables: dict[str, SqlResult]
             case ToolFinished(ok=True, details=SqlResult() as table, elapsed_ms=ms):
                 # 用户看的是完整结果，不是模型看到的预览
                 tables[table.ref] = table
-                print(f"✅ ({ms}ms)\n{_show_table(table, out_dir)}")
+                print(f"✅ ({ms}ms)\n{_show_table(table)}")
 
             case ToolFinished(ok=ok, content=content, elapsed_ms=ms):
                 mark = "✅" if ok else "❌"
@@ -92,28 +92,30 @@ def make_console_sink(verbose: bool, out_dir: Path, tables: dict[str, SqlResult]
     return sink
 
 
-def _show_table(table: SqlResult, out_dir: Path) -> str:
-    """终端里放前 FULL_ROWS 行；更多的整张存成 CSV（Excel 能直接打开）。"""
+def _show_table(table: SqlResult) -> str:
+    """终端里放前 FULL_ROWS 行。要完整的就 /save —— 不自动落盘，用户要才写文件。"""
     r = table.result
     text = f"结果 {table.ref}：{r.row_count} 行 × {len(r.columns)} 列\n"
     text += markdown_table(r.columns, r.rows[:FULL_ROWS])
     if r.row_count > FULL_ROWS:
-        path = save_csv(table, out_dir)
-        text += f"\n…终端只显示前 {FULL_ROWS} 行，完整结果：{path}"
+        text += f"\n…终端只显示前 {FULL_ROWS} 行。/save {table.ref} 可存成 CSV"
     if r.truncated:
         text += f"\n⚠️ 结果超过 {r.row_count} 行，只取了前 {r.row_count} 行"
     return text
 
 
-def save_csv(table: SqlResult, out_dir: Path) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{table.ref}.csv"
-    # utf-8-sig：带 BOM，Excel 打开中文不乱码
-    with open(path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(table.result.columns)
-        writer.writerows(table.result.rows)
-    return path
+def _save(arg: str, app: Application, tables: dict[str, SqlResult]) -> None:
+    """/save r3 [文件名]：和 export_csv 工具走同一个函数（按当时的 SQL 重跑再写）。"""
+    ref, _, filename = arg.strip().partition(" ")
+    table = tables.get(ref)
+    if table is None:
+        print(f"用法：/save r3 [文件名]。本次对话里的编号：{'、'.join(tables) or '还没有'}")
+        return
+    try:
+        done = export_query(app.db, table.sql, Path(app.settings.export_dir), filename or f"{ref}.csv")
+        print(done.describe(ref))
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ 导出失败：{type(exc).__name__}: {exc}")
 
 
 def _k(n: int) -> str:
@@ -163,9 +165,10 @@ def _preview(obj: object, limit: int) -> str:
 
 
 # ---------------------------------------------------------------- 斜杠命令
-def handle_command(cmd: str, app: Application) -> bool:
+def handle_command(cmd: str, app: Application, tables: dict[str, SqlResult]) -> bool:
     """处理 /开头的命令。返回 True 表示已处理。"""
-    match cmd:
+    name, _, arg = cmd.partition(" ")
+    match name:
         case "/exit" | "/quit":
             print("再见。")
             raise SystemExit(0)
@@ -183,6 +186,9 @@ def handle_command(cmd: str, app: Application) -> bool:
 
         case "/context":
             _print_context(app)
+
+        case "/save":
+            _save(arg, app, tables)
 
         case "/compact":
             # 整理的过程（🧹 那几行）由事件打印，这里只处理「什么都没做」和失败
@@ -204,13 +210,11 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     verbose = "--verbose" in sys.argv
-    # 每次启动一个目录：编号从 r1 重新数，放一起会互相覆盖
-    out_dir = Path("outputs") / f"{datetime.now():%Y%m%d-%H%M%S}"
     tables: dict[str, SqlResult] = {}
 
     settings = Settings()
     try:
-        app = build_application(settings, on_event=make_console_sink(verbose, out_dir, tables))
+        app = build_application(settings, on_event=make_console_sink(verbose, tables))
     except Exception as exc:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")
@@ -239,13 +243,13 @@ def main() -> None:
         if not user_input:
             continue
         if user_input.startswith("/"):
-            if not handle_command(user_input, app):
+            if not handle_command(user_input, app, tables):
                 print(f"未知命令：{user_input}")
             continue
 
         try:
             answer = app.agent.run(user_input)
-            print(f"\n💬 {expand_refs(answer, tables, lambda t: _show_table(t, out_dir))}")
+            print(f"\n💬 {expand_refs(answer, tables, _show_table)}")
         except KeyboardInterrupt:
             print("\n已中断本轮。")
         except AgentError as exc:

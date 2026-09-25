@@ -92,7 +92,8 @@ pytest
 │   │   └── sql/                  具体工具按领域分包
 │   │       ├── list_tables.py
 │   │       ├── describe_table.py
-│   │       └── run_sql.py
+│   │       ├── run_sql.py
+│   │       └── export_csv.py       用户要文件时按编号重跑导出
 │   │
 │   └── db/                     ★ 数据访问层
 │       ├── connection.py         连接 + 只读保护
@@ -366,8 +367,11 @@ python -m evals.run --cases shop_multi --trials 2    # 3 段会话，每段 14~1
 
 **大结果在源头处理**（2026-09-25，c913cc2 / 0013876 / 109cf0b）：一个工具结果两个读者（学 pi 的 content / details）——
 模型要够推理的最少信息，用户要完整数据。run_sql 的结果编号 r1、r2…：20 行以内原样给模型，更多只给前 10 行；
-完整结果（≤1 万行）走 `details` 给界面，终端存 CSV。模型要别的行就改 SQL 再查（只读查询重跑是同一份数据，
+完整结果（≤1 万行）走 `details` 给界面。模型要别的行就改 SQL 再查（只读查询重跑是同一份数据，
 所以不像 pi 那样要翻页工具）。回答里写 `{{r3}}`，界面在那个位置展示整张表，模型不用逐行抄。评测按展开后的回答判分。
+文件只在用户要的时候写：终端 `/save r3`，或者在对话里说「导出」（`export_csv` 工具），两边都按编号重跑当时的 SQL。
+（pi、Claude Code 自动把大结果存进临时 / 会话目录，那是给**模型**回头翻的 —— 它们的输出只有一份；
+我们的数据能重查，不需要为模型落盘。以后接结果不能重拿的工具再做，见「下一步扩展」。）
 
 | DeepSeek 官方 deepseek-flash | 改前 | 改后 |
 |:--|--:|--:|
@@ -390,6 +394,7 @@ python -m evals.run --cases shop_multi --trials 2    # 3 段会话，每段 14~1
 | 想加的东西 | 动哪里 | 大致做法 |
 |---|---|---|
 | **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 两层都已实现：10 万时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）；清理后还超 15 万，把较早的回合交给模型写成滚动摘要，保留最近约 2 万 token 原文（`CompactHistory`）。API 报上下文超长时强制整理一次再重试；`/compact` 手动压缩 |
+| **大结果落盘（tool-results/）** | `tools/base.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，配一个按位置读的工具（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，还要先有会话目录（持久化会话） |
 | **长期记忆** | `app.py` 里的 `dynamic_context` 钩子 | 用户偏好、历史结论落盘，每轮检索相关片段拼进系统提示词 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
 | **画图** | `tools/` 下开个 `chart/` 子包 | 查询结果交给 matplotlib，存图返回路径 |
