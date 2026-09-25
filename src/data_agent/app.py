@@ -23,7 +23,7 @@ from .tools.sandbox import Sandbox
 from .tools.sql.describe_table import DescribeTableTool
 from .tools.sql.export_csv import ExportCsvTool
 from .tools.sql.list_tables import ListTablesTool
-from .tools.sql.results import ResultStore, result_resolver
+from .tools.sql.results import ResultStore, result_resolver, result_saver
 from .tools.sql.run_sql import RunSqlTool
 from .tools.view_image import ViewImageTool
 
@@ -132,7 +132,7 @@ def build_application(
         if kind in domain.tools and enabled:
             sandboxes[kind] = Sandbox.docker(
                 image, kernel, work_dir, result_resolver(results), timeout_s=settings.sandbox_timeout_s,
-                memory=settings.sandbox_memory, cpus=settings.sandbox_cpus,
+                memory=settings.sandbox_memory, cpus=settings.sandbox_cpus, save=result_saver(results, kind),
             )
             tools.register(tool_class(sandboxes[kind]))
     # 看自己画的图。模型不能看图就不注册：提示词按注册的工具拼，「交付前看一眼」那句也就没了

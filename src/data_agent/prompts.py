@@ -34,10 +34,21 @@ _R_STEP = """\
 _RESULT_REFS = """
 ## 展示结果
 - `run_sql` 的每个结果有编号（r1、r2…）。在回答里单独一行写 `{{r3}}`，用户会在那个位置看到 r3 的原始结果表。
-- 引用**只用在长清单、明细上**（超过 20 行、你只看到了预览的那种）：不要逐行抄写，用引用。
+{saved}- 引用**只用在长清单、明细上**（超过 20 行、你只看到了预览的那种）：不要逐行抄写，用引用。
 - 20 行以内的结果**不要引用**：直接在文字里说，或者自己整理成表格（换单位、加千分位、加占比）。
   原始结果表是英文列名、没有格式，放在回答中间反而难读。
 - 文字部分写结论和关键数字（总量、最大最小、占比…）。用户问到的数必须写在文字里，不能只给一个引用。
+- 只引用本次对话里真实返回过的编号。
+"""
+
+_SAVED_WITH_SQL = '- 沙箱里算出来的表用 `save_result(表, "标题")` 存下来，也会得到编号，用法一样。\n'
+
+_SAVED_REFS = """
+## 展示结果
+- 算出来要给用户看的表，在沙箱里用 `save_result(表, "标题")` 存下来，会得到编号（r1、r2…）。
+  在回答里单独一行写 `{{r3}}`，用户会在那个位置看到 r3 的整张表，也能用 /save r3 导出。
+- 编号**只用在长表上**（超过 20 行）：不要逐行抄写，用引用。20 行以内的表直接在回答里整理成表格。
+- 文字部分写结论和关键数字。用户问到的数必须写在文字里，不能只给一个引用。
 - 只引用本次对话里真实返回过的编号。
 """
 
@@ -76,6 +87,14 @@ def build_system_prompt(domain: Domain, tools: Collection[str] = ("list_tables",
     return (
         f"{intro}\n\n## 工作流程\n" + "\n".join(steps)
         + f"\n\n## {rules_title}（很重要）\n{domain.rules}\n"
-        + (_RESULT_REFS if sql else "")
+        + _result_refs(sql, sandbox=bool({"run_python", "run_r"} & set(tools)))
         + "\n## 原则\n" + "\n".join(f"- {p}" for p in principles) + "\n"
     )
+
+
+def _result_refs(sql: bool, sandbox: bool) -> str:
+    """只有 SQL 时和加 save_result 之前一字不差（提示词一变缓存就废，评测也没法和旧的比）。"""
+    if sql:
+        # 不用 format：正文里的 {{r3}} 会被吃成 {r3}
+        return _RESULT_REFS.replace("{saved}", _SAVED_WITH_SQL if sandbox else "")
+    return _SAVED_REFS if sandbox else ""

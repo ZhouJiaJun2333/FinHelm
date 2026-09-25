@@ -267,3 +267,19 @@ def test_容器里_内存超限被杀_自动重启(tmp_path):
         assert sandbox.run("1 + 1").value == "2"
     finally:
         sandbox.close()
+
+
+@docker_only
+def test_自己savefig的图不再自动存一份_没存的照样自动存(tmp_path):
+    sandbox = Sandbox.docker("finhelm-sandbox", PYTHON_KERNEL, tmp_path, result_resolver(store_with_monthly()), timeout_s=30)
+    try:
+        ex = sandbox.run("plt.figure(); plt.plot([1, 2])\nplt.savefig('figures/mine.png')\n"
+                         "plt.figure(); plt.plot([3, 4])")
+        assert ex.error is None, ex.error
+        names = [f.name for f in ex.figures]
+        assert len(names) == 2 and "mine.png" in names and any(n.startswith("fig-") for n in names), names
+        # 存到 figures/ 以外的不算「自己存进交付目录」，照样自动存一份
+        other = sandbox.run("plt.plot([1]); plt.savefig('/tmp/x.png')")
+        assert [f.name for f in other.figures][0].startswith("fig-")
+    finally:
+        sandbox.close()

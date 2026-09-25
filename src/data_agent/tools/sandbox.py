@@ -33,6 +33,8 @@ MOUNT = "/opt/finhelm"
 
 # 给一个结果编号，返回内核要的数据：{"columns", "rows", "dates", "truncated"} 或 {"error"}
 Resolve = Callable[[str], dict[str, Any]]
+# 内核 save_result(表) 时存进结果仓库：收 {"title", "columns", "rows"}，回 {"ref", "rows", "truncated"} 或 {"error"}
+Save = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +70,12 @@ class Sandbox:
         grace_s: float = HARD_TIMEOUT_GRACE_S,
         kill_command: list[str] | None = None,
         cwd: Path | None = None,
+        save: Save | None = None,
     ) -> None:
         self.command = command
         self.work_dir = work_dir
         self.resolve = resolve
+        self.save = save
         self.timeout_s = timeout_s
         self.grace_s = grace_s               # 软超时之后再等多久才硬杀
         self.kill_command = kill_command     # docker：杀掉 docker run 客户端不会停容器
@@ -84,7 +88,7 @@ class Sandbox:
     @classmethod
     def docker(
         cls, image: str, kernel: KernelSpec, work_dir: Path, resolve: Resolve, *,
-        timeout_s: float = 60, memory: str = "2g", cpus: float = 2,
+        timeout_s: float = 60, memory: str = "2g", cpus: float = 2, save: Save | None = None,
     ) -> "Sandbox":
         work_dir = work_dir.resolve()
         name = f"finhelm-sandbox-{secrets.token_hex(4)}"
@@ -102,14 +106,14 @@ class Sandbox:
             image, *kernel.command, f"{MOUNT}/{kernel.files[0].name}",
         ]
         return cls(command, work_dir, resolve, timeout_s=timeout_s,
-                   kill_command=["docker", "kill", name])
+                   kill_command=["docker", "kill", name], save=save)
 
     @classmethod
     def local(cls, kernel: KernelSpec, work_dir: Path, resolve: Resolve, *, timeout_s: float = 60,
-              grace_s: float = HARD_TIMEOUT_GRACE_S) -> "Sandbox":
+              grace_s: float = HARD_TIMEOUT_GRACE_S, save: Save | None = None) -> "Sandbox":
         """不隔离，只给测试用：用本机的 Python 跑 Python 内核。"""
         return cls([sys.executable, "-u", str(kernel.files[0])], work_dir, resolve,
-                   timeout_s=timeout_s, grace_s=grace_s, cwd=work_dir)
+                   timeout_s=timeout_s, grace_s=grace_s, cwd=work_dir, save=save)
 
     # ------------------------------------------------------------ 执行
     def run(self, code: str) -> Execution:
@@ -121,6 +125,8 @@ class Sandbox:
                 msg = self._receive(deadline)
                 if msg["op"] == "need":
                     self._send({"op": "data", **self._payload(msg["ref"])})
+                elif msg["op"] == "save":
+                    self._send({"op": "saved", **self._store(msg)})
                 elif msg["op"] == "done":
                     return Execution(
                         output=msg["output"], value=msg["value"], error=msg["error"],
@@ -141,6 +147,14 @@ class Sandbox:
             return {"ref": ref, **self.resolve(ref)}
         except Exception as exc:  # noqa: BLE001 —— 内核那头在等回话，不能让它干等
             return {"ref": ref, "error": f"{type(exc).__name__}: {exc}"}
+
+    def _store(self, msg: dict[str, Any]) -> dict[str, Any]:
+        if self.save is None:
+            return {"error": "这里不能存结果编号。"}
+        try:
+            return self.save(msg)
+        except Exception as exc:  # noqa: BLE001 —— 同上，内核在等
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
     # ------------------------------------------------------------ 进程
     @property

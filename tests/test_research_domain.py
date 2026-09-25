@@ -42,7 +42,7 @@ def test_提示词_讲文件和模板_不讲SQL(tmp_path):
     prompt = build_system_prompt(get_domain("research"), ["run_python", "run_r"])
     assert "医学统计分析师" in prompt and "inputs/" in prompt and "fh_help()" in prompt
     assert "RevMan 5" in prompt and "不要根据 I² 自动切换" in prompt
-    for sql_only in ("run_sql", "list_tables", "{{r3}}", "SQL 里做完"):
+    for sql_only in ("run_sql", "list_tables", "SQL 里做完"):
         assert sql_only not in prompt
     steps = [line[:2] for line in prompt.splitlines() if line[:1].isdigit()]
     assert steps == ["1.", "2.", "3.", "4."]

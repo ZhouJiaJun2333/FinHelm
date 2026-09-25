@@ -26,6 +26,7 @@ class RunPythonTool(SandboxTool):
         "读用户上传的文件（inputs/ 下的 Excel、CSV）、画图。内核有状态，变量在调用之间保留（像 Jupyter）。"
         "已经导入 pandas as pd、numpy as np、matplotlib.pyplot as plt；还能用 scipy、statsmodels、openpyxl。"
         '用 load_result("r3") 取 run_sql 结果 r3 的完整数据（DataFrame），不要把数字手抄进代码。'
+        '要给用户看的长表用 save_result(df, "标题") 存下来，会得到编号，回答里写 {{r5}} 引用。'
         "最后一行是表达式就显示它的值；用 plt 画的图执行完自动保存，会告诉你文件路径。"
         "中文字体已经配好，图里直接写中文，不用改字体设置。要 PDF / SVG 等格式就自己 savefig 到 figures/ 下。"
         "图不会自动显示给你，不用 plt.show()（沙箱里也没有 IPython）。"

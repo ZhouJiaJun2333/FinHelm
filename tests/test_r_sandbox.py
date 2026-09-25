@@ -82,6 +82,17 @@ def test_图自动保存_自己存的文件也报(r):
     assert [f.name for f in own.figures] == ["mine.pdf"]
 
 
+def test_先打印再ggsave_同一张图只存一份(r):
+    """模型常常 print(p) 看一眼再 ggsave(p)：自动设备上那一页不再另存 fig-N.png。"""
+    ex = ok(r, 'p <- ggplot(data.frame(x = 1:3, y = 3:1), aes(x, y)) + geom_point()\n'
+               'print(p)\nggsave("figures/p.png", p, width = 4, height = 3)')
+    assert [f.name for f in ex.figures] == ["p.png"]
+    assert not list((r.work_dir / "figures").glob(".r-*.png")), "临时页删掉了"
+    # 只存了表格（不是图）时，自动出的图照样保存
+    table = ok(r, 'plot(1:3)\nwritexl::write_xlsx(data.frame(a = 1), "figures/t.xlsx")')
+    assert sorted(f.suffix for f in table.figures) == [".png", ".xlsx"]
+
+
 def test_工具输出里的重启提示认得R的报错():
     tool = RunRTool(sandbox=None)  # type: ignore[arg-type]
     assert "可能重启过" in tool.render(Execution(error="第 1 行出错：object 'm' not found"))

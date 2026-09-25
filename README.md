@@ -498,6 +498,34 @@ run_sql 只给预览之后结果最多约 1.5k，改成清理 8000 / 压缩 1.2 
 每段都在回忆轮之前清理或压缩 1~3 次；每段 36 万输入 token、92s，缓存 94%（清理后 25%、压缩后 26%、写摘要 95%）。
 这次发现判分器把「多一行合计」（Agent 用 ROLLUP）判成行数不对，改成去掉唯一一行文字标签是合计的行再比，重判了存档。
 
+### 医学科研：上传文件的题（research）
+
+```bash
+python -m evals.run --cases research --trials 3      # 12 道题，要 Docker 和 R 镜像
+python evals/cases/gen_research.py                   # 改题之后重新生成 Excel、标准答案和题库
+```
+
+**数据是真的**：7 个 metafor / meta 包收录的已发表 meta 分析（BCG 疫苗、抗菌导管、卒中单元、被动吸烟、静脉镁剂…），
+原样导出在 `evals/cases/research/source/`。**文件是乱的**：生成脚本把它们做成用户真会上传的那种 Excel ——
+标题行、两行合并表头、「4/123」「55±47」「1.18 (0.90–1.54)」写在一格里、给的是标准误不是标准差、中间空行、表底合计行。
+
+**标准答案不用模板算**：`research/gold.R` 直接调 meta 包的 RevMan 5 设置。`fh_` 模板是被考的对象，不能自己给自己判分。
+BCG 那题的 RR 0.49（0.34–0.70）、I² 92% 和教科书一致。
+
+| 题型 | 判分 |
+|---|---|
+| 合并效应、CI、I²、亚组、敏感性分析 | `gold_values`：每个数回答里都要说到。容差按回答写到几位算，不看正负号（「少住 14 天」算说到了 −13.98） |
+| 该用的模板（通用倒方差、带偏倚风险的森林图） | `expect_code`：沙箱代码里要出现 `fh_meta_gen(`、`fh_forest(..., rob =` |
+| 数据有错（Heard 1998 写成 151/5） | `expect_text`：回答里要点名这项研究、说出问题，不能自己改数 |
+| 自己画图 | `expect_figure`；另外统计「自己画了图之后有没有 `view_image` 看一眼」，不计分 |
+
+每个 trial 有自己的工作目录（`运行目录/work/<题>-<次>/`），图留着，失败时能直接看。步数耗尽、出错的不算对。
+
+**首个基线**（2026-09-26，deepseek-flash，12 题 × 3 次，max_steps 20）：回答对 **94%**，pass^3 83%，
+平均 12 步、53 秒、8.2 万输入 token（缓存 92%）。两次失败都是步数耗尽：一次反复修自己画的图；
+一次已经指出了 Heard 1998 的错，又去手算 τ² = 0 时 M-H 固定效应和随机效应为什么不一样（RevMan 的随机效应用倒方差权重，本来就不一样）。
+自己画图的 4 个 trial 里 3 个交付前看了图。标准误陷阱 3/3 都换算对了，还发现了源数据里一个方差异常小的研究。
+
 ### BIRD Mini-Dev：financial 库（公开评测）
 
 自建题库都满分了，量不出改进。[BIRD Mini-Dev](https://github.com/bird-bench/mini_dev) 是公开的 text-to-SQL 评测，
@@ -583,7 +611,7 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 | **长期记忆** | 新包 `memory/`；索引走 `Agent(session_context=...)`，召回的正文走一道 `ContextEdit` | 索引在会话开始时拼进系统提示词、会话中不变（变了缓存全废）；每次提问挑几条相关的，作为标记并进这条用户消息。设计见 refs 里的对比笔记 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
 | **画图、统计** | 已实现：`tools/python/`、`tools/r/` | `run_python` / `run_r` 在沙箱里跑，图存进 `work/figures/`；meta 分析有 RevMan 5 模板 |
-| **Python 表格编号** | `tools/python/` + `tools/sql/results.py` | 现在只有 SQL 结果有 r 号；Python 算出来的表也编号，回答里就能 `{{r5}}` 引用、`/save` 导出 |
+| **沙箱表格编号** | 已实现：`tools/sql/results.py` + 两个内核的 `save_result()` | Python / R 里 `save_result(df, "标题")` 把表发给宿主，存进同一个结果仓库、接着 r 号往下编；回答里 `{{r5}}` 引用、`/save r5` 导出（没有 SQL 可重跑，直接写存下的行）、`load_result("r5")` 取回 |
 | **流式输出** | `llm/` 各 provider 加 `stream_chat()` | `LLMResponse` 不变，只是分块 yield |
 | **人工审批** | 已实现：`build_application(approval_hook=...)` | 传个函数，工具执行前弹确认 |
 | **自定义结束条件** | 已实现：`build_application(finish_turn_hook=...)` | 见概念 8 |

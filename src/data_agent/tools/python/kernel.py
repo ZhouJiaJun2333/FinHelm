@@ -3,7 +3,9 @@
 在容器里跑，不 import 项目里的任何东西。和宿主机按行说 JSON：
     宿主 → 内核（stdin）   {"op": "exec", "code": ..., "timeout": 秒}
                            {"op": "data", "ref": "r3", ...}          回应 need
+                           {"op": "saved", "ref": "r5", ...}         回应 save
     内核 → 宿主（stdout）  {"op": "ready"}  {"op": "need", "ref": "r3"}  {"op": "done", ...}
+                           {"op": "save", "title", "columns", "rows"}   save_result() 存一张表
 用户代码的 print 收进 StringIO；C 扩展直接写 fd 1 的内容转去 stderr，搅不乱协议。
 """
 
@@ -45,6 +47,16 @@ try:
 
     plt.rcParams.validate["font.family"] = _keep_cjk(plt.rcParams.validate["font.family"])
     plt.rcParams["font.family"] = "sans-serif"
+
+    _savefig = matplotlib.figure.Figure.savefig
+
+    def _marking_savefig(self, fname, *args, **kwargs):
+        # 自己 savefig 到 figures/ 的图，执行完就不再自动存一份 fig-N.png（不然同一张图两个文件）
+        if isinstance(fname, (str, os.PathLike)) and os.path.abspath(fname).startswith(os.path.abspath("figures") + os.sep):
+            self._finhelm_saved = True
+        return _savefig(self, fname, *args, **kwargs)
+
+    matplotlib.figure.Figure.savefig = _marking_savefig
 except ImportError:                  # 本地测试环境可以不装
     plt = None
 
@@ -71,7 +83,7 @@ def receive() -> dict:
     return json.loads(line)
 
 
-# ---------------------------------------------------------------- SQL 结果
+# ---------------------------------------------------------------- 结果仓库（r 编号）
 _results: dict[str, pd.DataFrame] = {}
 
 
@@ -92,6 +104,24 @@ def load_result(ref: str) -> pd.DataFrame:
     return _results[ref].copy()
 
 
+def save_result(table, title: str = "") -> str:
+    """把一张表存进宿主的结果仓库、编上号（比如 r5）：回答里写 {{r5}} 用户就能看到整张表，/save r5 能导出。"""
+    frame = table.to_frame() if isinstance(table, pd.Series) else pd.DataFrame(table)
+    if not isinstance(frame.index, pd.RangeIndex):
+        frame = frame.reset_index()              # groupby 的结果，分组列在索引里
+    frame = frame.astype(object).where(frame.notna(), None)
+    send({"op": "save", "title": str(title), "columns": [str(c) for c in frame.columns],
+          "rows": frame.values.tolist()})
+    reply = receive()
+    if reply.get("error"):
+        raise ValueError(reply["error"])
+    ref = reply["ref"]
+    cut = f"（超过上限，只存了前 {reply['rows']} 行）" if reply.get("truncated") else ""
+    print(f"已存为结果 {ref}：{reply['rows']} 行 × {frame.shape[1]} 列{cut}。"
+          f"回答里单独一行写 {{{{{ref}}}}}，用户会在那里看到整张表。")
+    return ref
+
+
 def _blocked_input(*_args, **_kwargs):
     raise RuntimeError("沙箱里没有人能回答 input()。")
 
@@ -99,7 +129,7 @@ def _blocked_input(*_args, **_kwargs):
 NAMESPACE: dict = {
     "__name__": "__main__",
     "pd": pd, "np": np, "plt": plt,
-    "load_result": load_result, "input": _blocked_input,
+    "load_result": load_result, "save_result": save_result, "input": _blocked_input,
 }
 
 
@@ -177,6 +207,8 @@ def _save_figures() -> list[str]:
         return []
     saved, n = [], 1
     for num in plt.get_fignums():
+        if getattr(plt.figure(num), "_finhelm_saved", False):
+            continue
         while os.path.exists(path := f"figures/fig-{n}.png"):
             n += 1
         plt.figure(num).savefig(path, dpi=120, bbox_inches="tight")

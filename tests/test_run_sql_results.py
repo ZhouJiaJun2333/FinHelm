@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from data_agent.db.connection import QueryResult
-from data_agent.tools.sql.results import ResultStore, SqlResult
+from data_agent.tools.sql.results import ResultStore, StoredResult
 from data_agent.tools.sql.run_sql import FETCH_ROWS, FULL_ROWS, PREVIEW_ROWS, RunSqlTool
 
 
@@ -27,7 +27,7 @@ def test_小结果原样给模型_带编号():
     out = run(FakeDb(FULL_ROWS))
     assert out.content.startswith(f"结果 r1（{FULL_ROWS} 行 × 2 列")
     assert f"客户{FULL_ROWS - 1}" in out.content
-    assert isinstance(out.details, SqlResult) and out.details.ref == "r1"
+    assert isinstance(out.details, StoredResult) and out.details.ref == "r1"
 
 
 def test_大结果模型只看前几行_界面拿全部():

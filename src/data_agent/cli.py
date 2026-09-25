@@ -31,8 +31,8 @@ from .core.messages import Usage
 from .session import Session
 from .settings import Settings
 from .tools.sandbox import Execution
-from .tools.sql.export_csv import export_query
-from .tools.sql.results import ResultStore, SqlResult, markdown_table
+from .tools.sql.export_csv import export_result
+from .tools.sql.results import ResultStore, StoredResult, markdown_table
 
 REF_NAME = re.compile(r"r\d+")
 
@@ -52,9 +52,10 @@ BANNER = """
 
 
 # ---------------------------------------------------------- 工具结果怎么显示
-def _show_table(table: SqlResult) -> str:
+def _show_table(table: StoredResult) -> str:
     r = table.result
-    text = f"结果 {table.ref}：{r.row_count} 行 × {len(r.columns)} 列\n"
+    title = f"（{table.title}）" if table.title else ""
+    text = f"结果 {table.ref}{title}：{r.row_count} 行 × {len(r.columns)} 列\n"
     text += markdown_table(r.columns, r.rows[:TERMINAL_ROWS])
     if r.row_count > TERMINAL_ROWS:
         text += f"\n…终端只显示前 {TERMINAL_ROWS} 行。/save {table.ref} 可存成 CSV"
@@ -143,7 +144,7 @@ def parse_save(arg: str, refs: list[str]) -> tuple[str | None, str]:
 
 
 def _save(arg: str, app: Application) -> None:
-    """和 export_csv 工具走同一个函数（按当时的 SQL 重跑再写）。"""
+    """和 export_csv 工具走同一个函数（SQL 结果按当时的 SQL 重跑，沙箱存的表直接写）。"""
     ref, filename = parse_save(arg, app.results.refs())
     table = app.results.get(ref) if ref else None
     if table is None:
@@ -151,7 +152,7 @@ def _save(arg: str, app: Application) -> None:
               f"本次对话里的编号：{'、'.join(app.results.refs()) or '还没有'}")
         return
     try:
-        done = export_query(app.db, table.sql, app.export_dir, filename or f"{ref}.csv")
+        done = export_result(app.db, table, app.export_dir, filename or f"{ref}.csv")
         print(done.describe(ref))
     except Exception as exc:  # noqa: BLE001
         print(f"❌ 导出失败：{type(exc).__name__}: {exc}")
