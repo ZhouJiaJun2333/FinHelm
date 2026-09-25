@@ -22,6 +22,7 @@ from typing import Any
 from data_agent.app import build_application
 from data_agent.core.events import (
     ContextEdited,
+    ContextEditFailed,
     Event,
     LLMResponded,
     StepLimitReached,
@@ -95,6 +96,7 @@ class Trial:
     elapsed_s: float = 0.0
     step_limit: bool = False
     context_edits: int = 0
+    compaction_failures: int = 0          # 自动压缩没做成（这一步照常跑）
     result: ResultMatch | None = None     # SQL 结果比对；None = 没有可比的 SQL
     answer_check: AnswerCheck | None = None
     grade_error: str = ""                 # 重跑 Agent 的 SQL 时出错
@@ -218,6 +220,10 @@ def digest(t: Trial, events: list[Event]) -> None:
             t.context_edits += 1
             edited = True
             compacted |= e.kind == "HistoryCompacted"
+            if e.usage.prompt_tokens:
+                t.summary_calls.append(e.usage)
+        elif isinstance(e, ContextEditFailed):
+            t.compaction_failures += 1
             if e.usage.prompt_tokens:
                 t.summary_calls.append(e.usage)
         elif isinstance(e, LLMResponded):

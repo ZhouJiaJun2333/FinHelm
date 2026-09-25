@@ -144,6 +144,7 @@ def summarize_sessions(case_set: CaseSet, sessions: list[SessionTrial]) -> dict[
         "回忆轮重查": sum(bool(t.sql_calls) for t in recalls),
         # 一轮里整理了两次以上：清完还贴着门槛、又过线。门槛缩小的评测里会放大，真实门槛下该很少
         "一轮多次整理": sum(t.context_edits >= 2 for st in sessions for t in st.turns),
+        "压缩失败": sum(t.compaction_failures for st in sessions for t in st.turns),
         "总轮数": sum(len(st.turns) for st in sessions),
         # 填充轮不判分，出错不进「运行出错」—— 但它会让这一轮回滚、上下文没按预期变大，得单独看
         "填充轮出错": dict(Counter(t.error.split(":")[0] for st in sessions for t in st.turns

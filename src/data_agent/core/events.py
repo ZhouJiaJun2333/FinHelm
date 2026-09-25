@@ -68,6 +68,23 @@ class ContextEdited:
     usage: Usage = field(default_factory=Usage)
     # 标记的类名（ToolResultsCleared / HistoryCompacted…），评测靠它分开统计
     kind: str = ""
+    used_model: bool = False     # 做决定的工序调了模型（写摘要）
+
+
+@dataclass(slots=True)
+class ContextEditFailed:
+    """自动整理时，调模型的工序（写摘要）没做成。这一步不中断，带着没压的上下文接着跑。"""
+
+    reason: str
+    usage: Usage = field(default_factory=Usage)     # 失败之前已经花掉的
+    kind: str = ""                                  # 工序的类名
+
+
+@dataclass(slots=True)
+class AutoCompactionPaused:
+    """自动压缩连续失败太多次，本会话不再自动尝试。/compact 手动压成功后恢复。"""
+
+    failures: int
 
 
 @dataclass(slots=True)
@@ -78,8 +95,8 @@ class ContextOverflowed:
 
 
 Event = (
-    LLMResponded | ToolStarted | ToolFinished | ToolDenied
-    | TurnContinued | StepLimitReached | ContextEdited | ContextOverflowed
+    LLMResponded | ToolStarted | ToolFinished | ToolDenied | TurnContinued | StepLimitReached
+    | ContextEdited | ContextEditFailed | AutoCompactionPaused | ContextOverflowed
 )
 
 

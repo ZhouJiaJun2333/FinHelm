@@ -10,8 +10,17 @@ from dataclasses import dataclass
 from typing import Callable, Literal
 
 from .context import BaseContext, Context, Measure, Prompt
-from .errors import ContextOverflow, ModelRefused, OutputTruncated, UnexpectedStopReason
+from .errors import (
+    CompactionFailed,
+    ContextOverflow,
+    ModelRefused,
+    OutputTruncated,
+    UnexpectedStopReason,
+)
 from .events import (
+    AutoCompactionPaused,
+    ContextEdited,
+    ContextEditFailed,
     ContextOverflowed,
     Event,
     LLMResponded,
@@ -29,6 +38,9 @@ from .tools import ToolRegistry
 
 # 执行工具前的审批钩子：返回 (是否放行, 拒绝理由)
 ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]
+
+# 自动压缩连续失败几次就熔断（Claude Code 也是 3）
+MAX_COMPACTION_FAILURES = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +97,8 @@ class Agent:
         self._system: str | None = None
         # 本次会话花了多少 token。钱花了就是花了：失败的一轮回滚历史，但不回滚这里
         self.session_usage = Usage()
+        # 自动压缩连续失败了几次（熔断用）。和 session_usage 一样不跟着回滚
+        self._compaction_failures = 0
 
     # ------------------------------------------------------------------
     def run(self, user_input: str) -> str:
@@ -167,12 +181,28 @@ class Agent:
             return self.llm.chat(messages=self.context.render(), tools=tools, system=system)
 
     def _maintain(self, system: str, tools: list, *, force: bool = False) -> list[Event]:
-        """让上下文整理一次。system / tools 用来量大小，写摘要时原样带上以命中缓存。"""
-        events = self.context.maintain(self._measure(system, tools), force=force,
-                                       prompt=Prompt(system, tuple(tools)))
+        """让上下文整理一次。system / tools 用来量大小，写摘要时原样带上以命中缓存。
+
+        熔断：自动压缩连续失败 MAX_COMPACTION_FAILURES 次，之后只清理不压缩（强制的照常压），
+        免得每一步都白花一次写摘要的钱。调模型的整理成功一次就恢复。
+        """
+        paused = self._compaction_failures >= MAX_COMPACTION_FAILURES
+        try:
+            events = self.context.maintain(self._measure(system, tools), force=force,
+                                           prompt=Prompt(system, tuple(tools)),
+                                           model_calls=force or not paused)
+        except CompactionFailed as exc:            # 只有强制整理会抛出来
+            self.session_usage += exc.usage
+            raise
         for event in events:
-            self.session_usage += event.usage      # 写摘要也是一次收费的调用
+            self.session_usage += event.usage      # 写摘要也是一次收费的调用，失败了也收
             self.on_event(event)
+            if isinstance(event, ContextEditFailed):
+                self._compaction_failures += 1
+                if self._compaction_failures == MAX_COMPACTION_FAILURES:
+                    self.on_event(AutoCompactionPaused(self._compaction_failures))
+            elif isinstance(event, ContextEdited) and event.used_model:
+                self._compaction_failures = 0
         return events
 
     def _measure(self, system: str, tools: list) -> Measure:
@@ -253,3 +283,4 @@ class Agent:
     def reset(self) -> None:
         self.context.clear()
         self._system = None
+        self._compaction_failures = 0

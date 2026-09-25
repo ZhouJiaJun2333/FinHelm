@@ -20,9 +20,10 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Callable, ClassVar, Iterable
 
-from ..events import ContextEdited, Event
+from ..errors import CompactionFailed
+from ..events import ContextEdited, ContextEditFailed, Event
 from ..messages import Message, Usage
 
 # 给一份消息列表估 token 数。由 Agent 提供 —— 只有它知道系统提示词和工具定义。
@@ -66,12 +67,14 @@ class BaseContext(ABC):
     def render(self) -> list[Message]:
         """这一次真正要发给模型的消息（算出来的视图，不是历史本身）。"""
 
-    def maintain(self, measure: Measure, *, force: bool = False,
-                 prompt: Prompt | None = None) -> list[Event]:
+    def maintain(self, measure: Measure, *, force: bool = False, prompt: Prompt | None = None,
+                 model_calls: bool = True) -> list[Event]:
         """每次请求模型之前调用：超阈值就整理。返回做了什么（事件）。
 
-        force：不看阈值，能整理的都整理（API 报超长、用户 /compact）。
+        force：不看阈值，能整理的都整理（API 报超长、用户 /compact）。调模型的工序失败时抛
+               CompactionFailed；不强制时只记一个 ContextEditFailed 事件，接着跑。
         prompt：这次请求的系统提示词和工具定义，写摘要时用来复用缓存。
+        model_calls：False 时跳过调模型的工序（Agent 的熔断用）。
         """
         return []
 
@@ -99,6 +102,9 @@ class ContextEdit(ABC):
     maintain() 要做决定的才实现：返回一个标记，Context 追加进历史
     status()   想在界面上露脸就实现
     """
+
+    # 要调模型（写摘要）的工序。它们会失败、会花钱，Agent 的熔断只停它们
+    calls_model: ClassVar[bool] = False
 
     @abstractmethod
     def apply(self, entries: list[Entry]) -> list[Entry]:
@@ -147,19 +153,28 @@ class Context(BaseContext):
         return view
 
     # ------------------------------------------------------------ 整理
-    def maintain(self, measure: Measure, *, force: bool = False,
-                 prompt: Prompt | None = None) -> list[Event]:
+    def maintain(self, measure: Measure, *, force: bool = False, prompt: Prompt | None = None,
+                 model_calls: bool = True) -> list[Event]:
         def measure_view() -> int:
             return measure(self.render())
 
         events: list[Event] = []
         for i, edit in enumerate(self.edits):
+            if edit.calls_model and not model_calls:
+                continue
             before = measure_view()
-            marker = edit.maintain(self._apply(i), measure_view, force=force, prompt=prompt)
+            try:
+                marker = edit.maintain(self._apply(i), measure_view, force=force, prompt=prompt)
+            except CompactionFailed as exc:
+                if force:
+                    raise
+                events.append(ContextEditFailed(str(exc), usage=exc.usage, kind=type(edit).__name__))
+                continue
             if marker is not None:
                 self.add(marker)
                 events.append(ContextEdited(marker.describe(), before, measure_view(),
-                                            usage=marker.cost(), kind=type(marker).__name__))
+                                            usage=marker.cost(), kind=type(marker).__name__,
+                                            used_model=edit.calls_model))
         return events
 
     def status(self) -> list[str]:

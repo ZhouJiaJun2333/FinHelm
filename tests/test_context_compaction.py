@@ -18,7 +18,7 @@ from data_agent.core.context import (
 )
 from data_agent.core.context.compaction import extract_summary
 from data_agent.core.errors import CompactionFailed, ContextOverflow
-from data_agent.core.events import ContextEdited
+from data_agent.core.events import ContextEdited, ContextEditFailed
 from data_agent.core.messages import LLMResponse, Message, MessageMeta, ToolCall, Usage
 from data_agent.core.tokens import estimate_context
 
@@ -322,7 +322,7 @@ def test_写摘要一直超长_最多重试三次就报错():
     for n in range(20):
         add_turn(ctx, n)
     with pytest.raises(CompactionFailed, match="写摘要的请求本身超出了上下文窗口"):
-        ctx.maintain(measure)
+        ctx.maintain(measure, force=True)
     assert len(fake.inputs) == 1 + CompactHistory.OVERFLOW_RETRIES
 
 
@@ -332,7 +332,7 @@ def test_只剩一轮可丢时不再重试():
     for n in range(2):
         add_turn(ctx, n)
     with pytest.raises(CompactionFailed):
-        ctx.maintain(measure)                        # 只压第 0 轮，丢无可丢
+        ctx.maintain(measure, force=True)            # 只压第 0 轮，丢无可丢
     assert len(fake.inputs) == 1
 
 
@@ -356,17 +356,19 @@ def test_Agent里跑起来_摘要的花费记进会话用量():
     assert agent.session_usage == Usage(input=1020, output=202)
 
 
-def test_摘要失败时这一轮回滚():
+def test_自动压缩失败不中断这一轮_失败花的钱照样记账():
+    """上下文还没到窗口，压不成就带着没压的接着跑（Claude Code 也是）。强制压缩失败才抛。"""
     def broken(messages, prompt=None):
-        raise CompactionFailed("写摘要的请求返回了空内容。")
+        raise CompactionFailed("写摘要的请求返回了空内容。", Usage(input=500, output=3))
 
-    agent, _ = make_agent([LLMResponse(text="答", stop_reason="end_turn")],
-                          context=Context([CompactHistory(broken, trigger_tokens=1, keep_recent_tokens=1)]))
+    agent, events = make_agent([LLMResponse(text="答", stop_reason="end_turn")],
+                               context=Context([CompactHistory(broken, trigger_tokens=1, keep_recent_tokens=1)]))
     agent.run("问题1")
-    before = agent.context.history
-    with pytest.raises(CompactionFailed):
-        agent.run("问题2")
-    assert agent.context.history == before
+    assert agent.run("问题2") == "答"
+    [failed] = [e for e in events if isinstance(e, ContextEditFailed)]
+    assert failed.kind == "CompactHistory" and "空内容" in failed.reason
+    assert agent.session_usage == Usage(input=500, output=3)
+    assert not any(isinstance(e, HistoryCompacted) for e in agent.context.history)
 
 
 def test_finish_turn继续时_压缩不会把当前这轮的问题切掉():

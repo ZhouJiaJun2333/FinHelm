@@ -14,7 +14,9 @@ from .app import Application, build_application
 from .core.context import Entry, turn_starts
 from .core.errors import AgentError
 from .core.events import (
+    AutoCompactionPaused,
     ContextEdited,
+    ContextEditFailed,
     ContextOverflowed,
     Event,
     LLMResponded,
@@ -106,6 +108,13 @@ def make_console_sink(verbose: bool, results: ResultStore):
                                usage=usage):
                 cost = f"，写摘要花了 {_k(usage.prompt_tokens + usage.output)} token" if usage.output else ""
                 print(f"\n🧹 {what}：上下文 {_k(before)} → {_k(after)}（估算）{cost}")
+
+            case ContextEditFailed(reason=reason):
+                print(f"\n⚠️ 压缩没做成：{reason} 这一步带着没压的上下文接着跑")
+
+            case AutoCompactionPaused(failures=n):
+                print(f"\n⚠️ 自动压缩连续失败 {n} 次，本会话不再自动压缩（清理照常）。"
+                      "可以 /compact 手动再试，成功后恢复")
 
     return sink
 

@@ -62,6 +62,8 @@ class HistoryCompacted(Marker):
 class CompactHistory(ContextEdit):
     """trigger_tokens：清理之后还超过它才压缩；keep_recent_tokens：保留多少最近的原文（按回合取整）。"""
 
+    calls_model = True
+
     # 只依赖摘要本身：同样的标记必须渲染出同样的文字
     SUMMARY_HEADER = (
         "[以下是本次会话较早部分的摘要。原始对话已被压缩，不在上下文里了；"
@@ -267,15 +269,15 @@ def llm_summarizer(
             if not (response.tool_calls and not extract_summary(response.text)):
                 break
         else:
-            raise CompactionFailed("写摘要时模型两次都去调工具了，没写摘要。")
+            raise CompactionFailed("写摘要时模型两次都去调工具了，没写摘要。", usage)
         if response.truncated:
             raise CompactionFailed(
                 f"写摘要时输出被截断（已生成 {response.usage.output} 个 token）。"
-                "可以调大 .env 里的 CONTEXT_COMPACT_MAX_TOKENS。"
+                "可以调大 .env 里的 CONTEXT_COMPACT_MAX_TOKENS。", usage,
             )
         text = extract_summary(response.text)
         if not text:
-            raise CompactionFailed("写摘要的请求返回了空内容。")
+            raise CompactionFailed("写摘要的请求返回了空内容。", usage)
         return Summary(text, usage)
 
     return summarize

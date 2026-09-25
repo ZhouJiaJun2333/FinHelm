@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from .messages import Usage
+
 
 class AgentError(RuntimeError):
     pass
@@ -23,7 +25,11 @@ class UnexpectedStopReason(AgentError):
 
 
 class CompactionFailed(AgentError):
-    """写摘要失败（被截断、返回空…）。"""
+    """写摘要失败（被截断、返回空、请求本身超长…）。usage 是失败之前已经花掉的。"""
+
+    def __init__(self, message: str, usage: Usage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage or Usage()
 
 
 class ContextOverflow(AgentError):
