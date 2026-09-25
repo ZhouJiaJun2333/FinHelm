@@ -20,8 +20,7 @@ from data_agent.core.agent import Agent
 from data_agent.core.events import Event, collect_sink
 from data_agent.core.messages import LLMResponse, Message
 from data_agent.core.provider import LLMProvider
-from data_agent.core.tools import Tool
-from data_agent.core.tools import ToolRegistry
+from data_agent.core.tools import Tool, ToolRegistry
 
 
 class ScriptedProvider(LLMProvider):

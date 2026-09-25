@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from ...core.tools import Tool, ToolOutput
 from ...db.connection import Database
 from ...db.introspection import SchemaInspector
-from ...core.tools import Tool, ToolOutput
+from .results import markdown_table
 
 
 class DescribeTableTool(Tool):
@@ -63,7 +64,7 @@ class DescribeTableTool(Tool):
             result = self.db.query(
                 f'SELECT * FROM "{schema}"."{table}" LIMIT {args.sample_rows}'
             )
-            lines.append(_as_markdown(result.columns, result.rows))
+            lines.append(markdown_table(result.columns, result.rows) if result.rows else "（无数据）")
 
         # 线索里放全部列名：清理之后模型照样能写 SQL，多半不用再查一遍结构
         summary = f"{schema}.{table} 的表结构，{len(columns)} 列：" + ", ".join(
@@ -78,14 +79,3 @@ class DescribeTableTool(Tool):
             return schema.strip('"'), table.strip('"')
         return self.default_schema, raw
 
-
-def _as_markdown(columns: list[str], rows: list[tuple]) -> str:
-    if not rows:
-        return "（无数据）"
-    head = "| " + " | ".join(columns) + " |"
-    sep = "|" + "|".join(["---"] * len(columns)) + "|"
-    body = [
-        "| " + " | ".join("NULL" if v is None else str(v) for v in row) + " |"
-        for row in rows
-    ]
-    return "\n".join([head, sep, *body])

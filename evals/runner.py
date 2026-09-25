@@ -27,7 +27,7 @@ from data_agent.core.events import (
 from data_agent.core.messages import Message, Usage
 from data_agent.db.connection import Database
 from data_agent.settings import Settings
-from data_agent.tools.sql.run_sql import REF, SqlResult, expand_refs, markdown_table
+from data_agent.tools.sql.results import REF, ResultStore, markdown_table
 
 from .cases import Case, Session
 from .graders import AnswerCheck, ResultMatch, check_answer, compare_results
@@ -133,9 +133,10 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database,
     """让 Agent 回答一道题，然后判分。任何异常都记进结果，不往外抛 —— 一题出错不能拖垮整批。"""
     events: list[Event] = []
     t = Trial(case.id, trial)
+    results = ResultStore()
     started = time.perf_counter()
     try:
-        app = build_application(settings, on_event=collect_sink(events))
+        app = build_application(settings, on_event=collect_sink(events), results=results)
         try:
             t.answer = app.agent.run(case.question)
         finally:
@@ -146,7 +147,7 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database,
         t.transcript.append({"error": traceback.format_exc(limit=5)})
     t.elapsed_s = round(time.perf_counter() - started, 1)
     digest(t, events)
-    show(t, events)
+    show(t, results)
     grade(t, case, db, gold)
     return t
 
@@ -261,7 +262,7 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
         turn_events = events[start:]
         digest(t, turn_events)
         if case.graded:
-            show(t, events)          # 整段会话的事件：回答可以引用前面几轮的结果
+            show(t, app.results)     # 整段会话的结果：回答可以引用前面几轮的编号
         st.edits += [{"turn": n, "kind": e.kind, "before": e.tokens_before, "after": e.tokens_after}
                      for e in turn_events if isinstance(e, ContextEdited)]
         if case.graded:
@@ -273,16 +274,13 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
     return st
 
 
-def show(t: Trial, events: list[Event]) -> None:
+def show(t: Trial, results: ResultStore) -> None:
     """算出用户看到的回答：{{r3}} 展开成整张表。判分按它来 —— 表里的数用户看得到，就算说过了。
 
     只给判分的轮次算：填充轮的清单动辄几百行，展开了只会撑大存档。
     """
-    if not t.refs:
-        return
-    tables = {e.details.ref: e.details for e in events
-              if isinstance(e, ToolFinished) and isinstance(e.details, SqlResult)}
-    t.shown = expand_refs(t.answer, tables, lambda r: markdown_table(r.result.columns, r.result.rows))
+    if t.refs:
+        t.shown = results.expand(t.answer, lambda r: markdown_table(r.result.columns, r.result.rows))
 
 
 def _minus(a: Usage, b: Usage) -> Usage:

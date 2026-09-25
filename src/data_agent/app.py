@@ -17,15 +17,16 @@ from typing import Callable
 from .core.agent import Agent, ApprovalHook, FinishTurnHook
 from .core.context import ClearOldToolResults, CompactHistory, Context, llm_summarizer
 from .core.events import Event, noop_sink
+from .core.provider import LLMProvider
+from .core.tools import ToolRegistry
 from .db.connection import Database
 from .db.introspection import SchemaInspector
-from .core.provider import LLMProvider
 from .prompts import SYSTEM_PROMPT
 from .settings import Settings, build_provider
-from .core.tools import ToolRegistry
 from .tools.sql.describe_table import DescribeTableTool
 from .tools.sql.export_csv import ExportCsvTool
 from .tools.sql.list_tables import ListTablesTool
+from .tools.sql.results import ResultStore
 from .tools.sql.run_sql import RunSqlTool
 
 
@@ -39,6 +40,8 @@ class Application:
     tools: ToolRegistry
     llm: LLMProvider
     settings: Settings
+    # 这次会话查出过的结果（r1、r2…）。界面展开 {{r3}}、/save 导出都从这里拿
+    results: ResultStore
 
 
 def build_application(
@@ -48,6 +51,7 @@ def build_application(
     approval_hook: ApprovalHook | None = None,
     finish_turn_hook: FinishTurnHook | None = None,
     llm: LLMProvider | None = None,
+    results: ResultStore | None = None,
 ) -> Application:
     """把所有零件拼成一个能跑的 Agent。
 
@@ -57,6 +61,8 @@ def build_application(
         approval_hook:    工具执行前的审批钩子
         finish_turn_hook: 每轮结束时决定「收工还是继续」
         llm:              显式指定 provider。测试时可以塞个假的，不打真实 API。
+        results:          结果仓库。界面的事件 sink 在 Application 之前就要建好、就要用到它，
+                          那就自己建一个传进来；不传就新建。
     """
     settings = settings or Settings()
 
@@ -68,13 +74,13 @@ def build_application(
     inspector = SchemaInspector(db, schemas=(settings.db_schema,))
 
     # --- 工具层：依赖在这里注入，工具内部不碰全局变量 ---
-    run_sql = RunSqlTool(db)
+    # run_sql 往里存、export_csv 按编号取，界面和评测也读它 —— 只有这一份
+    results = results if results is not None else ResultStore()
     tools = ToolRegistry([
         ListTablesTool(inspector),
         DescribeTableTool(db, inspector, default_schema=settings.db_schema),
-        run_sql,
-        # 导出按编号重跑 run_sql 记下的 SQL —— 两个工具共用那张「编号 → SQL」表
-        ExportCsvTool(db, run_sql.queries, Path(settings.export_dir)),
+        RunSqlTool(db, results),
+        ExportCsvTool(db, results, Path(settings.export_dir)),
     ])
 
     # --- 模型层 ---
@@ -122,5 +128,5 @@ def build_application(
 
     return Application(
         agent=agent, db=db, inspector=inspector,
-        tools=tools, llm=llm, settings=settings,
+        tools=tools, llm=llm, settings=settings, results=results,
     )

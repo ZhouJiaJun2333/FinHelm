@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 
@@ -28,9 +29,12 @@ from .core.events import (
 from .core.messages import Usage
 from .settings import Settings
 from .tools.sql.export_csv import export_query
-from .tools.sql.run_sql import FULL_ROWS, SqlResult, expand_refs, markdown_table
+from .tools.sql.results import ResultStore, SqlResult, markdown_table
 
 REF_NAME = re.compile(r"r\d+")
+
+# 终端里一张结果表最多显示几行。要完整的就 /save —— 不自动落盘，用户要才写文件
+TERMINAL_ROWS = 20
 
 BANNER = """
 ┌─────────────────────────────────────────────────────┐
@@ -43,12 +47,27 @@ BANNER = """
 └─────────────────────────────────────────────────────┘"""
 
 
-def make_console_sink(verbose: bool, tables: dict[str, SqlResult]):
-    """把 Agent 事件打印到终端。
+# ---------------------------------------------------------- 工具结果怎么显示
+def _show_table(table: SqlResult) -> str:
+    r = table.result
+    text = f"结果 {table.ref}：{r.row_count} 行 × {len(r.columns)} 列\n"
+    text += markdown_table(r.columns, r.rows[:TERMINAL_ROWS])
+    if r.row_count > TERMINAL_ROWS:
+        text += f"\n…终端只显示前 {TERMINAL_ROWS} 行。/save {table.ref} 可存成 CSV"
+    if r.truncated:
+        text += f"\n⚠️ 结果超过 {r.row_count} 行，只取了前 {r.row_count} 行"
+    return text
 
-    查出来的结果按编号收进 tables：回答里的 {{r3}} 要靠它展开。只增不减 ——
-    回滚、压缩之后模型可能还会引用之前的编号，界面上的数据不跟着历史变。
-    """
+
+# 按工具名找「怎么显示它的结果」，参数是工具给界面的 details（学 pi 的 renderResult：
+# 每个工具一个渲染函数，通用的打印代码不认识具体工具）。没登记的工具显示模型看到的那份。
+RESULT_RENDERERS: dict[str, Callable[[Any], str]] = {
+    "run_sql": _show_table,       # 用户看完整结果，不是模型看到的预览
+}
+
+
+def make_console_sink(verbose: bool, results: ResultStore):
+    """把 Agent 事件打印到终端。results 用来展开过渡的话里的 {{r3}}。"""
 
     def sink(event: Event) -> None:
         match event:
@@ -58,7 +77,7 @@ def make_console_sink(verbose: bool, tables: dict[str, SqlResult]):
                 if calls:
                     if text:
                         # 过渡的话里也可能引用结果，和最终回答一样展开 —— 别让用户看到 {{r8}} 原文
-                        print(f"\n🤖 {expand_refs(text, tables, _show_table)}")
+                        print(f"\n🤖 {results.expand(text, _show_table)}")
                     print(f"   ↳ 调用：{', '.join(calls)}")
                 print(f"   📊 {_usage_line(usage, window)}")
 
@@ -66,10 +85,9 @@ def make_console_sink(verbose: bool, tables: dict[str, SqlResult]):
                 shown = _preview(args, 400 if verbose else 200)
                 print(f"\n🔧 {name}  {shown}")
 
-            case ToolFinished(is_error=False, details=SqlResult() as table, elapsed_ms=ms):
-                # 用户看的是完整结果，不是模型看到的预览
-                tables[table.ref] = table
-                print(f"✅ ({ms}ms)\n{_show_table(table)}")
+            case ToolFinished(name=name, is_error=False, details=details, elapsed_ms=ms) \
+                    if details is not None and name in RESULT_RENDERERS:
+                print(f"✅ ({ms}ms)\n{RESULT_RENDERERS[name](details)}")
 
             case ToolFinished(is_error=is_error, content=content, elapsed_ms=ms):
                 mark = "❌" if is_error else "✅"
@@ -96,20 +114,9 @@ def make_console_sink(verbose: bool, tables: dict[str, SqlResult]):
     return sink
 
 
-def _show_table(table: SqlResult) -> str:
-    """终端里放前 FULL_ROWS 行。要完整的就 /save —— 不自动落盘，用户要才写文件。"""
-    r = table.result
-    text = f"结果 {table.ref}：{r.row_count} 行 × {len(r.columns)} 列\n"
-    text += markdown_table(r.columns, r.rows[:FULL_ROWS])
-    if r.row_count > FULL_ROWS:
-        text += f"\n…终端只显示前 {FULL_ROWS} 行。/save {table.ref} 可存成 CSV"
-    if r.truncated:
-        text += f"\n⚠️ 结果超过 {r.row_count} 行，只取了前 {r.row_count} 行"
-    return text
-
-
-def parse_save(arg: str, tables: dict[str, SqlResult]) -> tuple[str | None, str]:
-    """/save 的参数 → (编号, 文件名)。编号可以省：
+# ---------------------------------------------------------------- /save
+def parse_save(arg: str, refs: list[str]) -> tuple[str | None, str]:
+    """/save 的参数 → (编号, 文件名)。refs 是已有的编号，按先后排。编号可以省：
 
         /save                 最近一个结果
         /save r3              r3
@@ -120,19 +127,18 @@ def parse_save(arg: str, tables: dict[str, SqlResult]) -> tuple[str | None, str]
     """
     first, _, rest = arg.strip().partition(" ")
     if REF_NAME.fullmatch(first):
-        return (first if first in tables else None), rest.strip()
-    latest = next(reversed(tables), None)      # dict 按插入顺序，最后一个就是最近的
-    return latest, arg.strip()
+        return (first if first in refs else None), rest.strip()
+    return (refs[-1] if refs else None), arg.strip()
 
 
-def _save(arg: str, app: Application, tables: dict[str, SqlResult]) -> None:
+def _save(arg: str, app: Application) -> None:
     """/save [r3] [文件名]：和 export_csv 工具走同一个函数（按当时的 SQL 重跑再写）。"""
-    ref, filename = parse_save(arg, tables)
-    if ref is None:
+    ref, filename = parse_save(arg, app.results.refs())
+    table = app.results.get(ref) if ref else None
+    if table is None:
         print(f"用法：/save [r3] [文件名]，不写编号就存最近一个结果。"
-              f"本次对话里的编号：{'、'.join(tables) or '还没有'}")
+              f"本次对话里的编号：{'、'.join(app.results.refs()) or '还没有'}")
         return
-    table = tables[ref]
     try:
         done = export_query(app.db, table.sql, Path(app.settings.export_dir), filename or f"{ref}.csv")
         print(done.describe(ref))
@@ -187,7 +193,7 @@ def _preview(obj: object, limit: int) -> str:
 
 
 # ---------------------------------------------------------------- 斜杠命令
-def handle_command(cmd: str, app: Application, tables: dict[str, SqlResult]) -> bool:
+def handle_command(cmd: str, app: Application) -> bool:
     """处理 /开头的命令。返回 True 表示已处理。"""
     name, _, arg = cmd.partition(" ")
     match name:
@@ -210,7 +216,7 @@ def handle_command(cmd: str, app: Application, tables: dict[str, SqlResult]) -> 
             _print_context(app)
 
         case "/save":
-            _save(arg, app, tables)
+            _save(arg, app)
 
         case "/compact":
             # 整理的过程（🧹 那几行）由事件打印，这里只处理「什么都没做」和失败
@@ -232,11 +238,12 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     verbose = "--verbose" in sys.argv
-    tables: dict[str, SqlResult] = {}
+    results = ResultStore()
 
     settings = Settings()
     try:
-        app = build_application(settings, on_event=make_console_sink(verbose, tables))
+        app = build_application(settings, on_event=make_console_sink(verbose, results),
+                                results=results)
     except Exception as exc:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")
@@ -265,13 +272,13 @@ def main() -> None:
         if not user_input:
             continue
         if user_input.startswith("/"):
-            if not handle_command(user_input, app, tables):
+            if not handle_command(user_input, app):
                 print(f"未知命令：{user_input}")
             continue
 
         try:
             answer = app.agent.run(user_input)
-            print(f"\n💬 {expand_refs(answer, tables, _show_table)}")
+            print(f"\n💬 {results.expand(answer, _show_table)}")
         except KeyboardInterrupt:
             print("\n已中断本轮。")
         except AgentError as exc:

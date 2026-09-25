@@ -19,10 +19,9 @@ from data_agent.core.errors import OutputTruncated
 from data_agent.core.events import ContextEdited
 from data_agent.core.messages import LLMResponse, Message, MessageMeta, ToolCall, Usage
 from data_agent.core.tokens import estimate_context, estimate_message
+from data_agent.core.tools import Tool, ToolOutput, ToolRegistry
 from data_agent.llm.anthropic_provider import AnthropicProvider
 from data_agent.llm.openai_provider import OpenAICompatibleProvider
-from data_agent.core.tools import Tool, ToolOutput
-from data_agent.core.tools import ToolRegistry
 
 from fakes import ScriptedProvider, make_agent
 

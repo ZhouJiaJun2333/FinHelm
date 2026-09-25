@@ -368,17 +368,19 @@ def test_找上一次运行_只认同一题库同一标签(tmp_path, monkeypatch
 def test_回答引用了结果_按用户看到的整张表判分():
     """模型写 {{r1}}，用户在那个位置看到整张表 —— 表里的数算说过了。"""
     from data_agent.db.connection import QueryResult
-    from data_agent.tools.sql.run_sql import SqlResult
+    from data_agent.tools.sql.results import ResultStore
     from evals.runner import digest, show
 
     rows = [("华东", 61), ("华北", 42)]
-    table = SqlResult("r1", "SELECT", QueryResult(["region", "n"], rows, False, 1))
-    events = [ToolStarted("run_sql", {"sql": "SELECT"}), ToolFinished("run_sql", "预览", is_error=False, elapsed_ms=1, details=table)]
+    results = ResultStore()
+    table = results.add("SELECT", QueryResult(["region", "n"], rows, False, 1))
+    events = [ToolStarted("run_sql", {"sql": "SELECT"}),
+              ToolFinished("run_sql", "预览", is_error=False, elapsed_ms=1, details=table)]
     case = Case("x", "各区域多少单？", ("gold",), match="set")
 
     t = Trial("x", 1, answer="各区域订单数如下：\n{{r1}}")
     digest(t, events)
-    show(t, events)
+    show(t, results)
     grade(t, case, FakeDB({"SELECT": rows}), Gold([rows]))
     assert t.refs == 1 and "| 华北 | 42 |" in t.shown
     assert t.answer_ok

@@ -13,21 +13,19 @@
 结果分两份（见 core/tools.py 的 details）：
     模型    20 行以内原样给；更多只给前 10 行 + 行列数 —— 它要的是够推理的信息，
             要看别的行就改 SQL 再查（只读查询重跑拿到的是同一份数据，还能顺手筛选、聚合）
-    界面    完整结果（最多 1 万行），放在 details 里；用户要文件时再导出 CSV（export_csv）
-每个结果有编号（r1、r2…），模型和用户靠它指认同一份结果。
+    界面    完整结果（最多 1 万行），存进结果仓库（results.py），也放在 details 里
+每个结果有编号（r1、r2…），模型和用户靠它指认同一份结果；用户要文件时按编号导出（export_csv）。
 """
 
 from __future__ import annotations
 
-import itertools
 import re
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
-from ...db.connection import Database, QueryResult
 from ...core.tools import Tool, ToolOutput
+from ...db.connection import Database, QueryResult
+from .results import ResultStore, markdown_table
 
 # 语句必须以这些开头
 ALLOWED_STARTS = ("select", "with")
@@ -45,15 +43,6 @@ FETCH_ROWS = 10_000
 # 模型看到的：不超过 FULL_ROWS 行原样给，超过就只给前 PREVIEW_ROWS 行
 FULL_ROWS = 20
 PREVIEW_ROWS = 10
-
-
-@dataclass(frozen=True, slots=True)
-class SqlResult:
-    """run_sql 给界面的完整结果（ToolOutput.details）。"""
-
-    ref: str                 # 结果编号，r1、r2…
-    sql: str
-    result: QueryResult
 
 
 class RunSqlTool(Tool):
@@ -74,22 +63,18 @@ class RunSqlTool(Tool):
             description="一句话说明这条 SQL 想回答什么问题。会记进日志，方便你和用户回溯。",
         )
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, results: ResultStore | None = None) -> None:
         self.db = db
-        # 编号只增不减：/reset、回滚都不回收 —— 界面上已经展示过的 r3 不能换成别的结果
-        self._refs = itertools.count(1)
-        # 编号 → SQL。只记 SQL 不记结果：要导出时重跑（export_csv），工具层不用存大结果
-        self.queries: dict[str, str] = {}
+        # 查出来的结果存这里、在这里编号。和 export_csv、界面共用一个（app.py 注入）
+        self.results = results if results is not None else ResultStore()
 
     def run(self, args: Args) -> ToolOutput:
         sql = _validate(args.sql)
         result = self.db.query(sql, max_rows=FETCH_ROWS)
         if not result.columns or not result.rows:
-            return ToolOutput(_format_empty(result), _summarize(result))
-        ref = f"r{next(self._refs)}"
-        self.queries[ref] = sql
-        return ToolOutput(_format(ref, result), _summarize(result, ref),
-                          details=SqlResult(ref, sql, result))
+            return ToolOutput(_format_empty(result), _summarize(result))   # 空结果不占编号
+        table = self.results.add(sql, result)
+        return ToolOutput(_format(table.ref, result), _summarize(result, table.ref), details=table)
 
 
 # ---------------------------------------------------------------- 校验
@@ -162,23 +147,3 @@ def _format(ref: str, result: QueryResult) -> str:
         + f"\n\n…还有 {n - PREVIEW_ROWS} 行没给你看。要用到其中的数，在 SQL 里筛选、排序或聚合后再查，不要猜。"
     )
 
-
-# 回答里的结果引用：模型写 {{r3}}，界面在这个位置展示整张表，模型就不用逐行抄写
-REF = re.compile(r"\{\{\s*(r\d+)\s*\}\}")
-
-
-def expand_refs(text: str, tables: Mapping[str, SqlResult],
-                render: Callable[[SqlResult], str]) -> str:
-    """把回答里的 {{r3}} 换成 render(结果)。怎么画由界面定：终端放前几行，评测展开整张。"""
-    def one(m: re.Match) -> str:
-        table = tables.get(m.group(1))
-        return render(table) if table else f"（找不到结果 {m.group(1)}）"
-    return REF.sub(one, text)
-
-
-def markdown_table(columns: list[str], rows: list[tuple]) -> str:
-    """结果表 → Markdown 表格。模型看的预览、界面展示的完整表都用它。"""
-    head = "| " + " | ".join(columns) + " |"
-    sep = "|" + "|".join(["---"] * len(columns)) + "|"
-    body = ["| " + " | ".join("NULL" if v is None else str(v) for v in row) + " |" for row in rows]
-    return "\n".join([head, sep, *body])

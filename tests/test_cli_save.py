@@ -4,22 +4,22 @@ from __future__ import annotations
 
 from data_agent.cli import parse_save
 
-TABLES = {"r1": object(), "r2": object(), "r3": object()}
+REFS = ["r1", "r2", "r3"]
 
 
 def test_不写编号就存最近一个():
-    assert parse_save("", TABLES) == ("r3", "")
+    assert parse_save("", REFS) == ("r3", "")
 
 
 def test_写了编号就存那个_后面是文件名():
-    assert parse_save("r1", TABLES) == ("r1", "")
-    assert parse_save("r1 华东订单", TABLES) == ("r1", "华东订单")
+    assert parse_save("r1", REFS) == ("r1", "")
+    assert parse_save("r1 华东订单", REFS) == ("r1", "华东订单")
 
 
 def test_第一个词不像编号就当文件名():
-    assert parse_save("华东订单", TABLES) == ("r3", "华东订单")
+    assert parse_save("华东订单", REFS) == ("r3", "华东订单")
 
 
 def test_编号不存在或还没有结果():
-    assert parse_save("r9", TABLES) == (None, "")
-    assert parse_save("", {}) == (None, "")
+    assert parse_save("r9", REFS) == (None, "")
+    assert parse_save("", []) == (None, "")

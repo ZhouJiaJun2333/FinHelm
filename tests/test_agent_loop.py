@@ -15,8 +15,7 @@ from pydantic import BaseModel
 from data_agent.core.context import Context
 from data_agent.core.events import LLMResponded, ToolFinished
 from data_agent.core.messages import LLMResponse, Message, ToolCall
-from data_agent.core.tools import Tool, ToolOutput
-from data_agent.core.tools import ToolRegistry
+from data_agent.core.tools import Tool, ToolOutput, ToolRegistry
 
 from fakes import EchoTool, make_agent
 

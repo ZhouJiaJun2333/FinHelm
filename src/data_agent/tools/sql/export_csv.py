@@ -4,9 +4,8 @@
 查出来的大结果不自动落盘：界面本来就拿着完整数据，模型要看更多就改 SQL 重查，
 落盘只剩「交给用户」这一个用途 —— 那就按需做。
 
-导出不用界面手里那份，而是**按编号找到当时的 SQL，重新跑一遍**：
-    · 工具层不用保存大结果，只记「编号 → SQL」
-    · 可以比界面多导一些行（界面最多 1 万行）
+导出不用结果仓库里存的那份，而是**按编号找到当时的 SQL，重新跑一遍**：
+    · 可以比仓库里多导一些行（run_sql 最多取 1 万行）
     · 前提是两次之间数据没变。分析库是离线灌的，没问题；接实时库时导出的是「导出那一刻」的数据，
       回复里会写明
 """
@@ -14,14 +13,14 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from ...db.connection import Database
 from ...core.tools import Tool
+from ...db.connection import Database
+from .results import ResultStore
 
 EXPORT_ROWS = 100_000
 
@@ -78,14 +77,15 @@ class ExportCsvTool(Tool):
         ref: str = Field(description="结果编号，比如 r3")
         filename: str = Field(default="", description="文件名，不填就用编号，比如 r3.csv")
 
-    def __init__(self, db: Database, queries: Mapping[str, str], out_dir: Path) -> None:
+    def __init__(self, db: Database, results: ResultStore, out_dir: Path) -> None:
         self.db = db
-        self.queries = queries        # run_sql 记的「编号 → SQL」，同一个 dict，随查随有
+        self.results = results        # 和 run_sql 共用的结果仓库（app.py 注入）
         self.out_dir = out_dir
 
     def run(self, args: Args) -> str:
-        sql = self.queries.get(args.ref.strip())
-        if sql is None:
-            known = "、".join(self.queries) or "还没有"
+        table = self.results.get(args.ref)
+        if table is None:
+            known = "、".join(self.results.refs()) or "还没有"
             raise ValueError(f"没有编号为 {args.ref} 的结果。本次对话里的编号：{known}")
-        return export_query(self.db, sql, self.out_dir, args.filename or f"{args.ref}.csv").describe(args.ref)
+        return export_query(self.db, table.sql, self.out_dir,
+                            args.filename or f"{table.ref}.csv").describe(table.ref)

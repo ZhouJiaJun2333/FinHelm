@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from data_agent.db.connection import QueryResult
-from data_agent.tools.sql.run_sql import FETCH_ROWS, FULL_ROWS, PREVIEW_ROWS, RunSqlTool, SqlResult
+from data_agent.tools.sql.results import ResultStore, SqlResult
+from data_agent.tools.sql.run_sql import FETCH_ROWS, FULL_ROWS, PREVIEW_ROWS, RunSqlTool
 
 
 class FakeDb:
@@ -60,10 +61,9 @@ def test_超过取数上限时告诉模型():
 
 
 def test_回答里的引用展开成结果_找不到的编号照实说():
-    from data_agent.tools.sql.run_sql import expand_refs
-
-    tables = {"r1": run(FakeDb(3)).details}
-    text = expand_refs("见下表：\n{{r1}}\n还有 {{ r9 }}", tables, lambda t: f"<{t.ref} 共 {t.result.row_count} 行>")
+    results = ResultStore()
+    RunSqlTool(FakeDb(3), results).execute({"sql": "SELECT 1"})
+    text = results.expand("见下表：\n{{r1}}\n还有 {{ r9 }}", lambda t: f"<{t.ref} 共 {t.result.row_count} 行>")
     assert text == "见下表：\n<r1 共 3 行>\n还有 （找不到结果 r9）"
 
 
@@ -78,9 +78,9 @@ def test_导出按编号重跑当时的SQL_不认识的编号报错并列出已�
     from data_agent.tools.sql.export_csv import ExportCsvTool
 
     db = FakeDb(347)
-    sql_tool = RunSqlTool(db)
-    sql_tool.execute({"sql": "SELECT name, amount FROM t"})
-    export = ExportCsvTool(db, sql_tool.queries, tmp_path)
+    results = ResultStore()               # run_sql 和导出共用一个仓库（app.py 里也是这么接的）
+    RunSqlTool(db, results).execute({"sql": "SELECT name, amount FROM t"})
+    export = ExportCsvTool(db, results, tmp_path)
 
     out = export.execute({"ref": "r1"})
     assert not out.is_error and "347 行 × 2 列" in out.content
