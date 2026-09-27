@@ -31,6 +31,7 @@ from data_agent.core.events import (
     Event,
     LLMResponded,
     StepLimitReached,
+    ToolCallRepeated,
     ToolFinished,
     ToolStarted,
     collect_sink,
@@ -104,6 +105,7 @@ class Trial:
     step_limit: bool = False
     wrapped_up: bool = False              # 步数用完后收尾成功，交的是真实回答（照常判分）
     wrap_up_failure: str = ""             # 收尾没成的原因（交的是兜底那句话）
+    repeat_warnings: int = 0              # 同样的参数反复调同一个工具，被提醒了几次
     context_edits: int = 0
     compaction_failures: int = 0          # 自动压缩没做成（这一步照常跑）
     result: ResultMatch | None = None     # SQL 结果比对；None = 没有可比的 SQL
@@ -278,6 +280,7 @@ def digest(t: Trial, events: list[Event]) -> None:
     t.step_limit = bool(limits)
     t.wrapped_up = any(e.wrapped_up for e in limits)
     t.wrap_up_failure = next((e.failure for e in limits if e.failure), "")
+    t.repeat_warnings = sum(isinstance(e, ToolCallRepeated) for e in events)
     succeeded = [c for c in t.sql_calls if c.ok]
     t.final_sql = succeeded[-1].sql if succeeded else ""
     digest_sandbox(t, events)

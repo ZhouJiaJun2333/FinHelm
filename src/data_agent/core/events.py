@@ -53,6 +53,14 @@ class TurnContinued:
 
 
 @dataclass(slots=True)
+class ToolCallRepeated:
+    """同一轮里同一个工具、同样的参数又调了一次（count 是第几次），工具结果后面附了提醒。"""
+
+    name: str
+    count: int
+
+
+@dataclass(slots=True)
 class StepLimitReached:
     max_steps: int
     wrapped_up: bool = False     # 收尾成功：模型根据已有结果给出了回答（不是兜底那句话）
@@ -97,7 +105,7 @@ class ContextOverflowed:
 
 
 Event = (
-    LLMResponded | ToolStarted | ToolFinished | ToolDenied | TurnContinued | StepLimitReached
+    LLMResponded | ToolStarted | ToolFinished | ToolDenied | ToolCallRepeated | TurnContinued | StepLimitReached
     | ContextEdited | ContextEditFailed | AutoCompactionPaused | ContextOverflowed
 )
 

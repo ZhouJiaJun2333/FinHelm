@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Literal
 
@@ -25,6 +27,7 @@ from .events import (
     Event,
     LLMResponded,
     StepLimitReached,
+    ToolCallRepeated,
     ToolDenied,
     ToolFinished,
     ToolStarted,
@@ -41,6 +44,12 @@ ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]
 
 # 自动压缩连续失败几次就熔断（Claude Code 也是 3）
 MAX_COMPACTION_FAILURES = 3
+
+# 同一轮里同一个工具、同样的参数调到第几次，就在结果后面附一句提醒（软干预，不拦）。
+# 第 2 次常常是正当的：旧结果被清理后，占位就是叫它重调
+REPEAT_WARN_AT = 3
+REPEAT_NOTE = ("\n\n[提醒：这一轮里你已经用完全相同的参数调用 {name} {n} 次了。结果没变的话再调也一样，"
+               "换个思路，或者根据已经得到的结果直接回答。]")
 
 # 步数用完时追加的提示（{n} = 步数）。默认保守：确定的照实说，没做完的说清楚做到哪一步，不拿没核实的数当结论。
 # 想让模型尽量给出答案（比如评测），组装时换一段（prompts.WRAP_UP_BEST_GUESS）
@@ -107,6 +116,8 @@ class Agent:
         self.session_usage = Usage()
         # 自动压缩连续失败了几次（熔断用）。和 session_usage 一样不跟着回滚
         self._compaction_failures = 0
+        # 这一轮里每种调用（工具名 + 参数）调了几次，发现原地打转用
+        self._calls_this_turn: Counter[str] = Counter()
 
     # ------------------------------------------------------------------
     def run(self, user_input: str) -> str:
@@ -129,6 +140,7 @@ class Agent:
     # ------------------------------------------------------------------
     def _run_turn(self, user_input: str) -> str:
         self.context.add(Message.user(user_input))
+        self._calls_this_turn.clear()
 
         for step in range(1, self.max_steps + 1):
             response = self._request(step)
@@ -286,12 +298,21 @@ class Agent:
         result = self.tools.invoke(call.name, call.arguments)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-        self.context.add(Message.tool_result(call.id, result.content, is_error=result.is_error,
+        key = f"{call.name} {json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)}"
+        self._calls_this_turn[key] += 1
+        count = self._calls_this_turn[key]
+        content = result.content
+        if count >= REPEAT_WARN_AT:
+            content += REPEAT_NOTE.format(name=call.name, n=count)
+
+        self.context.add(Message.tool_result(call.id, content, is_error=result.is_error,
                                              summary=result.summary, images=result.images))
         self.on_event(ToolFinished(
-            name=call.name, content=result.content, is_error=result.is_error,
+            name=call.name, content=content, is_error=result.is_error,
             elapsed_ms=elapsed_ms, details=result.details,
         ))
+        if count >= REPEAT_WARN_AT:
+            self.on_event(ToolCallRepeated(call.name, count))
 
     def _render_system_prompt(self) -> str:
         """固定人设 + 会话上下文。一个会话只算一次：系统提示词一变，后面整段缓存都废了。"""

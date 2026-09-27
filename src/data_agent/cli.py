@@ -22,6 +22,7 @@ from .core.events import (
     Event,
     LLMResponded,
     StepLimitReached,
+    ToolCallRepeated,
     ToolDenied,
     ToolFinished,
     ToolStarted,
@@ -106,6 +107,9 @@ def make_console_sink(verbose: bool, results: ResultStore):
 
             case ToolDenied(name=name, reason=reason):
                 print(f"\n⛔ 已拒绝 {name}：{reason}")
+
+            case ToolCallRepeated(name=name, count=n):
+                print(f"\n🔁 同样的参数第 {n} 次调用 {name}，已提醒模型换思路")
 
             case TurnContinued(nudge=nudge):
                 print(f"\n🔁 判定未完成，继续：{nudge}")
