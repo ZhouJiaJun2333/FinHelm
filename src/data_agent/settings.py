@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # ---------------- 数据库 ----------------
     # docker/docker-compose.yml 起的库，只读账号
     database_url: str = (
-        "postgresql://agent_ro:agent_ro_pwd@localhost:5433/analytics"
+        "postgresql://agent_ro:agent_ro_pwd@127.0.0.1:5433/analytics"
     )
     # 场景包（domains/）：shop = 自己造的电商库，financial = BIRD 的银行库，research = 医学科研（只用上传的文件）
     domain: str = "shop"

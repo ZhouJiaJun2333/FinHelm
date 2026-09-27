@@ -38,7 +38,7 @@ DESCRIPTIONS = DATA / "minidev" / "MINIDEV" / "dev_databases" / "financial" / "d
 QUESTIONS = DATA / "mini_dev_pg.json"
 CASES = ROOT / "evals" / "cases" / "bird_financial.jsonl"
 
-ADMIN_URL = os.environ.get("BIRD_ADMIN_URL", "postgresql://postgres:postgres@localhost:5433/analytics")
+ADMIN_URL = os.environ.get("BIRD_ADMIN_URL", "postgresql://postgres:postgres@127.0.0.1:5433/analytics")
 DB_ID = "financial"
 SCHEMA = "financial"
 TABLES = ("account", "card", "client", "disp", "district", "loan", "order", "trans")

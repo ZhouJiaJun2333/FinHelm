@@ -35,7 +35,8 @@ class Database:
 
     # ------------------------------------------------------------------
     def _connect(self) -> psycopg.Connection:
-        conn = psycopg.connect(self._dsn, autocommit=True)
+        # 连不上就报错，别一直挂着：localhost 可能先解析成 ::1，端口只绑了 127.0.0.1 时会卡住
+        conn = psycopg.connect(self._dsn, autocommit=True, connect_timeout=10)
         with conn.cursor() as cur:
             # 连的是有写权限的账号，这个连接也只能读
             cur.execute("SET default_transaction_read_only = on")
