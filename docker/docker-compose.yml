@@ -11,7 +11,7 @@ services:
       TZ: Asia/Shanghai
     ports:
       # 宿主机用 5433，避开你其他项目占 5432 的情况
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"   # 只给本机连：默认密码写在这个文件里
     volumes:
       - dataagent_pgdata:/var/lib/postgresql/data
       # 容器首次初始化时，这个目录下的 .sql 会按文件名顺序自动执行
