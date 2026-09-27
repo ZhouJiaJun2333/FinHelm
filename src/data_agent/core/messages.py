@@ -39,6 +39,10 @@ class Usage:
         )
 
 
+# 模型给的参数不是合法 JSON 时，provider 把原文放在这个键下，交给工具层报错（不在 provider 里崩）
+INVALID_JSON_ARGS = "__invalid_json__"
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCall:
     """模型发出的一次工具调用请求（执行的是我们自己的代码）。"""

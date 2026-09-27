@@ -14,7 +14,7 @@ from data_agent.core.errors import (
     UnexpectedStopReason,
 )
 from data_agent.core.events import TurnContinued
-from data_agent.core.messages import LLMResponse, ToolCall, Usage
+from data_agent.core.messages import INVALID_JSON_ARGS, LLMResponse, ToolCall, Usage
 from data_agent.llm.anthropic_provider import AnthropicProvider
 from data_agent.core.provider import LLMProvider
 
@@ -203,7 +203,7 @@ def test_截断在工具调用中途时不留悬空的tool_call():
     agent, _ = make_agent([
         LLMResponse(
             text="", stop_reason="max_tokens",
-            tool_calls=[ToolCall("c1", "echo", {"__invalid_json__": '{"tex'})],
+            tool_calls=[ToolCall("c1", "echo", {INVALID_JSON_ARGS: '{"tex'})],
         ),
     ])
     with pytest.raises(OutputTruncated):

@@ -14,7 +14,7 @@ from typing import Any, ClassVar, Iterable, Iterator
 
 from pydantic import BaseModel, ValidationError
 
-from .messages import Image
+from .messages import INVALID_JSON_ARGS, Image
 
 MAX_OUTPUT_CHARS = 6000  # 单个工具结果的上限，防止一条结果吃掉半个上下文
 
@@ -68,6 +68,7 @@ class Tool(ABC):
         """中立格式的工具描述，provider 再翻译成自家格式。"""
         params = self.Args.model_json_schema()
         params.pop("title", None)
+        params["additionalProperties"] = False     # 多传的参数 execute() 会拒掉，schema 里也写明
         return {
             "name": self.name,
             "description": self.description,
@@ -80,6 +81,13 @@ class Tool(ABC):
 
     def execute(self, raw_args: dict[str, Any]) -> ToolOutput:
         """校验参数 → 执行 → 兜住异常。"""
+        if INVALID_JSON_ARGS in raw_args:
+            return ToolOutput.error(f"参数不是合法的 JSON，请重新调用：{raw_args[INVALID_JSON_ARGS]}"
+                                    ).capped(self.max_output_chars)
+        # pydantic 默认静默丢掉多传的字段：拼错的可选参数（limt）会被当成没传，调用照样「成功」
+        if unknown := sorted(set(raw_args) - set(self.Args.model_fields)):
+            known = "、".join(self.Args.model_fields) or "（没有参数）"
+            return ToolOutput.error(f"参数不合法：{self.name} 没有参数 {'、'.join(unknown)}。可用的参数：{known}")
         try:
             args = self.Args(**raw_args)
         except ValidationError as exc:

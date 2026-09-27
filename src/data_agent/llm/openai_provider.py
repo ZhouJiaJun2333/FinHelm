@@ -13,7 +13,7 @@ from typing import Any
 from openai import BadRequestError, OpenAI
 
 from ..core.errors import ContextOverflow
-from ..core.messages import Image, LLMResponse, Message, ToolCall, Usage
+from ..core.messages import INVALID_JSON_ARGS, Image, LLMResponse, Message, ToolCall, Usage
 from ..core.provider import LLMProvider
 from .overflow import is_context_overflow
 
@@ -157,8 +157,8 @@ class OpenAICompatibleProvider(LLMProvider):
             try:
                 arguments = json.loads(call.function.arguments or "{}")
             except json.JSONDecodeError:
-                # 非法 JSON 不崩：交给 pydantic 校验失败，错误会回到模型那里
-                arguments = {"__invalid_json__": call.function.arguments}
+                # 非法 JSON 不崩：交给工具层报错，错误会回到模型那里
+                arguments = {INVALID_JSON_ARGS: call.function.arguments}
             tool_calls.append(
                 ToolCall(id=call.id, name=call.function.name, arguments=arguments)
             )

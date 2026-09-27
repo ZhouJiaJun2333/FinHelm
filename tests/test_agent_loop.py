@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from data_agent.core.context import Context
 from data_agent.core.events import LLMResponded, ToolFinished
-from data_agent.core.messages import LLMResponse, Message, ToolCall
+from data_agent.core.messages import INVALID_JSON_ARGS, LLMResponse, Message, ToolCall
 from data_agent.core.tools import Tool, ToolOutput, ToolRegistry
 
 from fakes import EchoTool, make_agent
@@ -113,6 +113,33 @@ def test_参数不合法时返回错误而不是抛异常(registry):
     finished = [e for e in events if isinstance(e, ToolFinished)]
     assert finished[0].is_error is True
     assert "参数不合法" in finished[0].content
+
+
+class PageTool(Tool):
+    """参数全是可选的：多传、拼错的字段被静默丢掉的话，调用会带着默认值「成功」。"""
+    name = "page"
+    description = "分页"
+
+    class Args(BaseModel):
+        limit: int = 10
+
+    def run(self, args: Args) -> str:
+        return f"limit={args.limit}"
+
+
+def test_拼错的可选参数不会被静默忽略():
+    out = PageTool().execute({"limt": 5})
+    assert out.is_error and "没有参数 limt" in out.content and "可用的参数：limit" in out.content
+    assert PageTool().execute({"limit": 5}).content == "limit=5"
+
+
+def test_参数不是合法JSON时明确报错_不带着默认值执行():
+    out = PageTool().execute({INVALID_JSON_ARGS: '{"limit": 5'})
+    assert out.is_error and "不是合法的 JSON" in out.content and '{"limit": 5' in out.content
+
+
+def test_schema里写明不收多余参数():
+    assert PageTool().schema()["parameters"]["additionalProperties"] is False
 
 
 def test_调用不存在的工具(registry):
