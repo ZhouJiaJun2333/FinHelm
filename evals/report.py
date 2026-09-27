@@ -114,6 +114,9 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
         "步数耗尽": sum(t.step_limit and not t.wrapped_up for t in trials),
         "收尾": sum(t.wrapped_up for t in trials),
         "收尾后答对": sum(t.wrapped_up and t.answer_ok for t in trials),
+        "接着跑": sum(t.resumes > 0 for t in trials),
+        "接着跑后答对": sum(t.resumes > 0 and t.answer_ok for t in trials),
+        "注入错误": sum(t.injected for t in trials),
         "重复调用提醒": sum(t.repeat_warnings for t in trials),
         "被提醒的trial": sum(bool(t.repeat_warnings) for t in trials),
         "不判分": bool(trials) and not any(t.graded for t in trials),
@@ -242,6 +245,8 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         f"| 平均耗时 | {s['平均耗时s']}s |",
         f"| 步数耗尽 / 运行出错 | {s['步数耗尽']} / {s['运行出错']} |",
         *([f"| 步数用完后收尾（其中答对） | {s['收尾']}（{s['收尾后答对']}） |"] if s.get("收尾") else []),
+        *([f"| 注入的 API 错误 | {s['注入错误']} 次 |"] if s.get("注入错误") else []),
+        *([f"| 出错后接着跑的题（其中答对） | {s['接着跑']}（{s['接着跑后答对']}） |"] if s.get("接着跑") else []),
         *([f"| 重复调用提醒（次 / trial 数） | {s['重复调用提醒']} / {s['被提醒的trial']} |"]
           if s.get("重复调用提醒") else []),
         "",

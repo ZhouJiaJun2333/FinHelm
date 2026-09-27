@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .core.agent import WRAP_UP, Agent, ApprovalHook, FinishTurnHook
+from .core.agent import WRAP_UP, Agent, ApprovalHook, FinishTurnHook, InterruptedTurn
 from .core.context import ClearOldToolResults, CompactHistory, Context, llm_summarizer
 from .core.events import Event, noop_sink
+from .core.messages import Message
 from .core.provider import LLMProvider
 from .core.tools import ToolRegistry
 from .db.connection import Database
@@ -65,6 +66,14 @@ class Application:
         files = "、".join(f"{p.name}（{_size(p)}）" for p in self.pending_uploads)
         self.pending_uploads = []
         return f"[用户上传了文件，在 inputs/ 下：{files}]\n\n{text}"
+
+    def fresh_kernel_note(self, turn: InterruptedTurn) -> str:
+        """程序重启后接着跑：这一轮在沙箱里建的变量都没了，要告诉模型，否则它会直接用。"""
+        kernels = {tool.name for tool in self.tools if isinstance(tool, (RunPythonTool, RunRTool))}
+        used = sorted(kernels & {c.name for e in turn.entries if isinstance(e, Message) for c in e.tool_calls})
+        if not used:
+            return ""
+        return f"[程序重启过，{'、'.join(used)} 的内核是新的：之前定义的变量都没了，要用就重新读取或计算。]"
 
     def reset(self) -> None:
         """清空对话，内核也换个空的：新对话不该看到上一段留下的变量。"""

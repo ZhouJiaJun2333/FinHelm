@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-from .context import BaseContext, Context, Measure, Prompt
+from .context import BaseContext, Context, Entry, Measure, Prompt
 from .errors import (
     CompactionFailed,
     ContextOverflow,
@@ -32,6 +33,7 @@ from .events import (
     ToolFinished,
     ToolStarted,
     TurnContinued,
+    TurnResumed,
     noop_sink,
 )
 from .messages import LLMResponse, Message, ToolCall, Usage
@@ -56,6 +58,28 @@ REPEAT_NOTE = ("\n\n[提醒：这一轮里你已经用完全相同的参数调�
 WRAP_UP = ("[步数用完了（{n} 步），不能再调用工具。请根据上面已经得到的结果直接回答："
            "已经确定的结论照实给出；没做完的部分说明做到了哪一步、还差什么，不要把没核实过的数字当成结论。"
            "用户原来对回答格式的要求照样遵守。]")
+
+# 工具执行到一半断了：不重做（副作用可能已经发生，比如沙箱里的变量改了一半），如实告诉模型（学 Claude Code / pi）
+INTERRUPTED_RESULT = "[中断：这次调用没有执行完，结果未知（可能已经执行了一部分）。需要的话先确认状态再继续。]"
+CONTINUE_NUDGE = "请从中断的地方继续完成上面的任务。"
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptedTurn:
+    """一轮没跑完时留下的进度（检查点）。Agent.resume() 把它接回历史，从下一步接着跑。
+
+    正式历史照样回滚、只放完整的回合；进度另外放在这里。entries 的形状一定合法：
+    没执行完的工具调用补了「结果未知」，接回去不会出现没配对的 tool_call。
+    """
+
+    entries: tuple[Entry, ...]     # 这一轮已有的条目，第一条是提问
+    steps: int                     # 已经完成了几步（模型回复了几次）
+    reason: str = ""               # 为什么断的；每一步存的检查点是空的
+
+    @property
+    def question(self) -> str:
+        first = self.entries[0]
+        return first.content if isinstance(first, Message) else ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +109,9 @@ class TurnDecision:
 # 决定「这一步之后收工还是继续」。不装时：调了工具就继续，没调就结束（pi 的 finishTurn）
 FinishTurnHook = Callable[[TurnOutcome], TurnDecision]
 
+# 每走完一步、以及一轮断掉时，交出当前进度（存盘用：进程被杀了也能接着跑）
+CheckpointHook = Callable[[InterruptedTurn], None]
+
 
 class Agent:
     def __init__(
@@ -99,6 +126,7 @@ class Agent:
         on_event: Callable[[Event], None] = noop_sink,
         session_context: Callable[[], str] | None = None,
         wrap_up_prompt: str = WRAP_UP,
+        checkpoint_hook: CheckpointHook | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -108,6 +136,7 @@ class Agent:
         self.wrap_up_prompt = wrap_up_prompt
         self.approval_hook = approval_hook
         self.finish_turn_hook = finish_turn_hook
+        self.checkpoint_hook = checkpoint_hook
         self.on_event = on_event
         # 会话开始时拼到系统提示词末尾的内容（库概览，以后的记忆索引）。只算一次
         self.session_context = session_context
@@ -118,37 +147,102 @@ class Agent:
         self._compaction_failures = 0
         # 这一轮里每种调用（工具名 + 参数）调了几次，发现原地打转用
         self._calls_this_turn: Counter[str] = Counter()
+        # 上一轮没跑完留下的进度，resume() 接着跑；问新问题、/reset 就作废
+        self.interrupted: InterruptedTurn | None = None
+        self._turn_snapshot: object = None
+        self._steps_done = 0
 
     # ------------------------------------------------------------------
     def run(self, user_input: str) -> str:
-        """跑一轮对话，返回最终回答。
+        """跑一轮对话，返回最终回答。上一轮没跑完的进度作废。"""
+        self.interrupted = None
+        return self._transaction(lambda: self._run_turn(user_input))
 
-        事务：要么完整完成，要么历史回到进来之前。半截的一轮会毒化历史——
-        tool_call 没有结果，之后每次请求都 400；只有提问没有回答，下一次提问会和它粘在一起。
-        用 finally 而不是 except，连 Ctrl-C 一起兜住。
+    def resume(self, message: str = "") -> str:
+        """接着跑上一轮没跑完的（self.interrupted），从下一步开始，步数用剩下的。
+
+        message：用户接着说的话（「别按月拆了，直接算全年」），接在进度后面；不给就直接接着跑。
         """
-        snapshot = self.context.snapshot()
-        completed = False
+        turn = self.interrupted
+        if turn is None:
+            raise ValueError("没有没跑完的回合可以接着跑")
+        self.interrupted = None
+        return self._transaction(lambda: self._resume_turn(turn, message))
+
+    def _transaction(self, body: Callable[[], str]) -> str:
+        """事务：要么完整完成，要么历史回到进来之前。半截的一轮会毒化历史——
+        tool_call 没有结果，之后每次请求都 400；只有提问没有回答，下一次提问会和它粘在一起。
+        回滚之前把进度存进 self.interrupted（检查点），resume() 能接着跑。
+        捕获 BaseException，连 Ctrl-C 一起兜住：Ctrl-C 就是「暂停」。
+        """
+        self._turn_snapshot = self.context.snapshot()
+        self._steps_done = 0
         try:
-            answer = self._run_turn(user_input)
-            completed = True
-            return answer
-        finally:
-            if not completed:
-                self.context.restore(snapshot)
+            return body()
+        except BaseException as exc:
+            progress = self._progress(type(exc).__name__ + (f": {exc}" if str(exc) else ""))
+            self.interrupted = progress if progress.entries else None
+            if self.interrupted is not None:
+                self._save(self.interrupted)
+            self.context.restore(self._turn_snapshot)
+            raise
+
+    def _progress(self, reason: str = "") -> InterruptedTurn:
+        """这一轮到现在的进度，形状修成合法的：可以原样接回历史。"""
+        entries = self.context.since(self._turn_snapshot)
+        last = next((e for e in reversed(entries) if isinstance(e, Message) and e.role == "assistant"), None)
+        if last is not None and last.tool_calls:
+            answered = {e.tool_call_id for e in entries if isinstance(e, Message) and e.role == "tool"}
+            entries += [Message.tool_result(c.id, INTERRUPTED_RESULT, is_error=True)
+                        for c in last.tool_calls if c.id not in answered]
+        # 断在收尾那次请求上：收尾提示不留，接着跑时会重新收尾、重新加
+        wrap_up = self.wrap_up_prompt.format(n=self.max_steps)
+        if entries and isinstance(entries[-1], Message) and entries[-1].meta.synthetic \
+                and entries[-1].content == wrap_up:
+            entries.pop()
+        return InterruptedTurn(tuple(entries), self._steps_done, reason)
+
+    def _checkpoint(self) -> None:
+        if self.checkpoint_hook is not None:
+            self._save(self._progress())
+
+    def _save(self, turn: InterruptedTurn) -> None:
+        # 存盘是锦上添花：写失败不能把跑了几十步的一轮搞没，也不能盖掉原来的异常
+        if self.checkpoint_hook is not None:
+            with contextlib.suppress(Exception):
+                self.checkpoint_hook(turn)
 
     # ------------------------------------------------------------------
     def _run_turn(self, user_input: str) -> str:
         self.context.add(Message.user(user_input))
         self._calls_this_turn.clear()
+        self._checkpoint()
+        return self._loop(1)
 
-        for step in range(1, self.max_steps + 1):
+    def _resume_turn(self, turn: InterruptedTurn, message: str) -> str:
+        for entry in turn.entries:
+            self.context.add(entry)
+        self._steps_done = turn.steps
+        self._calls_this_turn = Counter(_call_key(c) for e in turn.entries if isinstance(e, Message)
+                                        for c in e.tool_calls)
+        last = turn.entries[-1]
+        if not message and turn.steps < self.max_steps and isinstance(last, Message) and last.role == "assistant":
+            message = CONTINUE_NUDGE          # 历史不能以 assistant 结尾再请求
+        if message:
+            # 不是新问题，是这一轮里的补充：标 synthetic，不算回合开头
+            self.context.add(Message.user(message).with_meta(synthetic=True))
+        self.on_event(TurnResumed(turn.steps, message))
+        return self._loop(turn.steps + 1)
+
+    def _loop(self, start: int) -> str:
+        for step in range(start, self.max_steps + 1):
             response = self._request(step)
 
             # 先查 stop_reason 再进历史：截断、被拒的回复不可信，不能让它进去
             self._check_stop_reason(response)
 
             self.context.add(response.to_message())
+            self._steps_done = step
 
             requested_tools = bool(response.tool_calls)
             for call in response.tool_calls:
@@ -165,6 +259,8 @@ class Agent:
                 nudge = decision.nudge or "请继续完成上面的任务。"
                 self.context.add(Message.user(nudge).with_meta(synthetic=True))
                 self.on_event(TurnContinued(step=step, nudge=nudge))
+
+            self._checkpoint()
 
         return self._wrap_up()
 
@@ -298,7 +394,7 @@ class Agent:
         result = self.tools.invoke(call.name, call.arguments)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-        key = f"{call.name} {json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)}"
+        key = _call_key(call)
         self._calls_this_turn[key] += 1
         count = self._calls_this_turn[key]
         content = result.content
@@ -339,3 +435,8 @@ class Agent:
         self.context.clear()
         self._system = None
         self._compaction_failures = 0
+        self.interrupted = None
+
+
+def _call_key(call: ToolCall) -> str:
+    return f"{call.name} {json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)}"

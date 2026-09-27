@@ -53,6 +53,14 @@ class TurnContinued:
 
 
 @dataclass(slots=True)
+class TurnResumed:
+    """上一轮没跑完，从第 steps + 1 步接着跑。message 是用户接着说的话（可以为空）。"""
+
+    steps: int
+    message: str = ""
+
+
+@dataclass(slots=True)
 class ToolCallRepeated:
     """同一轮里同一个工具、同样的参数又调了一次（count 是第几次），工具结果后面附了提醒。"""
 
@@ -105,7 +113,8 @@ class ContextOverflowed:
 
 
 Event = (
-    LLMResponded | ToolStarted | ToolFinished | ToolDenied | ToolCallRepeated | TurnContinued | StepLimitReached
+    LLMResponded | ToolStarted | ToolFinished | ToolDenied | ToolCallRepeated | TurnContinued | TurnResumed
+    | StepLimitReached
     | ContextEdited | ContextEditFailed | AutoCompactionPaused | ContextOverflowed
 )
 

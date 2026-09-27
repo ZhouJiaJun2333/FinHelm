@@ -9,6 +9,8 @@
     --label 名字              给这次运行起个名，写进目录名和报告，比较几种配置时用
     --rebuild 目录            不跑模型，用存下的 trials/sessions.jsonl 重新出报告
                               （报告那一步崩了，或者改了报告格式想重出一遍）
+    --inject-errors 0.1       每次请求模型以这个概率注入 API 错误（验证检查点：出错后接着跑）
+    --no-resume               出错了不接着跑，整题记为出错（检查点之前的行为，对照用）
     --regrade 目录            不跑模型，用存下的 SQL 和回答按现在的判分规则重新判分、出报告
                               （改了判分器 / 补了标准答案，不用再花钱跑一遍）。只支持单题库
 
@@ -59,6 +61,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--compare", default="last")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", dest="sets")
     ap.add_argument("--label", default="")
+    ap.add_argument("--inject-errors", type=float, default=0.0, metavar="概率")
+    ap.add_argument("--no-resume", action="store_true")
     ap.add_argument("--rebuild", type=Path, metavar="目录")
     ap.add_argument("--regrade", type=Path, metavar="目录")
     args = ap.parse_args(argv)
@@ -124,6 +128,8 @@ def main(argv: list[str] | None = None) -> None:
         "domain": domain.name,
         "prompt_sha1": prompt_fingerprint(settings),
         "max_steps": settings.max_steps,
+        "inject_errors": args.inject_errors,
+        "resume": not args.no_resume,
         **_git(),
     }
     # 先写一份：跑了半小时、最后出报告时崩了，有 meta + jsonl 就能 --rebuild
@@ -140,8 +146,10 @@ def main(argv: list[str] | None = None) -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as pool, \
             open(run_dir / ("sessions.jsonl" if multi else "trials.jsonl"), "w", encoding="utf-8") as f:
         futures = [
-            pool.submit(run_session, u, i, settings, db, gold, forced) if multi
-            else pool.submit(run_trial, u, i, settings, db, gold[u.id], case_set.submit, run_dir / "work")
+            pool.submit(run_session, u, i, settings, db, gold, forced, args.inject_errors, not args.no_resume)
+            if multi else
+            pool.submit(run_trial, u, i, settings, db, gold[u.id], case_set.submit, run_dir / "work",
+                        args.inject_errors, not args.no_resume)
             for u, i in jobs
         ]
         for done, fut in enumerate(as_completed(futures), 1):

@@ -32,7 +32,7 @@ class ScriptedProvider(LLMProvider):
 
     model = "scripted"
 
-    def __init__(self, script: Iterable[LLMResponse | Exception] = (),
+    def __init__(self, script: Iterable[LLMResponse | BaseException] = (),
                  context_window: int | None = None) -> None:
         self.script = list(script)
         self.context_window = context_window
@@ -49,7 +49,7 @@ class ScriptedProvider(LLMProvider):
         self.system_seen.append(system)
         self.tools_seen.append(tools)
         step = self.script[min(self.calls - 1, len(self.script) - 1)]
-        if isinstance(step, Exception):
+        if isinstance(step, BaseException):
             raise step                          # 剧本里放异常 = 这一次调用失败
         return step
 
@@ -67,7 +67,7 @@ class EchoTool(Tool):
 
 
 def make_agent(
-    script: Iterable[LLMResponse | Exception] = (),
+    script: Iterable[LLMResponse | BaseException] = (),
     *,
     tools: Iterable[Tool] | None = None,
     **agent_kw,

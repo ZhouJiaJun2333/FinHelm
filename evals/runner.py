@@ -34,17 +34,23 @@ from data_agent.core.events import (
     ToolCallRepeated,
     ToolFinished,
     ToolStarted,
+    TurnResumed,
     collect_sink,
 )
 from data_agent.core.messages import Message, Usage
 from data_agent.db.connection import Database
-from data_agent.settings import Settings
+from data_agent.settings import Settings, build_provider
 from data_agent.tools.sandbox import Execution
 from data_agent.tools.sql.results import REF, ResultStore, markdown_table
 
 from .cases import CASES_DIR, Case, Session
 from .dabstep.scorer import question_scorer
+from .faults import FlakyProvider, InjectedFault
 from .graders import AnswerCheck, ResultMatch, check_answer, check_values, compare_results, said_scalar
+
+# 出错后等几秒从断的地方接着跑（限流、断网多半等一会儿就好）。有进展就重新计数，
+# 同一步上连续失败 len + 1 次才放弃
+RESUME_WAITS = (30, 120)
 
 # 判分时重跑 SQL 最多取多少行。标准答案不会有这么多行；Agent 的查询超过这个数，肯定不对。
 GRADE_MAX_ROWS = 5000
@@ -106,6 +112,8 @@ class Trial:
     wrapped_up: bool = False              # 步数用完后收尾成功，交的是真实回答（照常判分）
     wrap_up_failure: str = ""             # 收尾没成的原因（交的是兜底那句话）
     repeat_warnings: int = 0              # 同样的参数反复调同一个工具，被提醒了几次
+    resumes: int = 0                      # 出错后从检查点接着跑了几次
+    injected: int = 0                     # 注入了几次 API 错误（--inject-errors）
     context_edits: int = 0
     compaction_failures: int = 0          # 自动压缩没做成（这一步照常跑）
     result: ResultMatch | None = None     # SQL 结果比对；None = 没有可比的 SQL
@@ -197,11 +205,13 @@ class Trial:
 
 # ================================================================ 跑一次
 def run_trial(case: Case, trial: int, settings: Settings, db: Database | None,
-              gold: Gold, submit: str = "", work_root: Path | None = None) -> Trial:
+              gold: Gold, submit: str = "", work_root: Path | None = None,
+              faults: float = 0.0, resume: bool = True) -> Trial:
     """让 Agent 回答一道题（题库要求的话再加一轮提交），然后判分。
 
     任何异常都记进结果，不往外抛 —— 一题出错不能拖垮整批。
     work_root：没有 SQL 的题每个 trial 在它下面建自己的工作目录（并发的 trial 不能共用 figures/）。
+    faults：每次请求模型以这个概率注入 API 错误；resume：出错了从检查点接着跑（关掉 = 以前的整题作废）。
     """
     events: list[Event] = []
     t = Trial(case.id, trial, no_sql=case.no_sql, graded=case.graded,
@@ -210,14 +220,16 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database | None,
     started = time.perf_counter()
     app = None
     work_dir = (work_root / f"{case.id}-{trial}") if case.no_sql and work_root else None
+    llm = FlakyProvider(build_provider(settings), faults, f"{case.id}-{trial}") if faults else None
     try:
-        app = build_application(settings, on_event=collect_sink(events), results=results, work_dir=work_dir)
+        app = build_application(settings, on_event=collect_sink(events), results=results, work_dir=work_dir,
+                                llm=llm)
         question = case.question
         if case.files:
             app.attach([CASES_DIR / f for f in case.files])
             question = app.with_uploads(question)
         try:
-            t.answer = app.agent.run(question)
+            t.answer = answer(app.agent, question, resume=resume)
         finally:
             t.usage = app.agent.session_usage
             t.transcript = _transcript(app.agent.context.history)
@@ -225,6 +237,7 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database | None,
         t.error = f"{type(exc).__name__}: {exc}"
         t.transcript.append({"error": traceback.format_exc(limit=5)})
     t.elapsed_s = round(time.perf_counter() - started, 1)
+    t.injected = llm.injected if llm else 0
     answered = list(events)               # 回答那一轮的事件；主分数、步数、token 只看这些
     if submit and not t.error:
         t.submission = submit_sql(app, submit, events)
@@ -235,6 +248,28 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database | None,
     show(t, results)
     grade(t, case, db, gold)
     return t
+
+
+def answer(agent, question: str, *, resume: bool = True, waits: tuple[float, ...] = RESUME_WAITS) -> str:
+    """回答一道题。出错了等一会儿从断的地方接着跑（检查点），不整题重来。
+
+    接着跑之后多走了几步就重新计数；同一步上连续失败 len(waits) + 1 次才放弃，抛出最后那个异常。
+    注入的错误不用等。
+    """
+    attempt, failures, last = (lambda: agent.run(question)), 0, -1
+    while True:
+        try:
+            return attempt()
+        except Exception as exc:
+            turn = agent.interrupted
+            if not resume or turn is None:
+                raise
+            failures = 0 if turn.steps > last else failures + 1
+            if failures >= len(waits):
+                raise
+            last = turn.steps
+            time.sleep(0 if isinstance(exc, InjectedFault) else waits[failures])
+            attempt = agent.resume
 
 
 def submit_sql(app, prompt: str, events: list[Event]) -> Submission:
@@ -281,6 +316,7 @@ def digest(t: Trial, events: list[Event]) -> None:
     t.wrapped_up = any(e.wrapped_up for e in limits)
     t.wrap_up_failure = next((e.failure for e in limits if e.failure), "")
     t.repeat_warnings = sum(isinstance(e, ToolCallRepeated) for e in events)
+    t.resumes = sum(isinstance(e, TurnResumed) for e in events)
     succeeded = [c for c in t.sql_calls if c.ok]
     t.final_sql = succeeded[-1].sql if succeeded else ""
     digest_sandbox(t, events)
@@ -376,7 +412,8 @@ class SessionTrial:
 
 
 def run_session(session: Session, trial: int, settings: Settings, db: Database,
-                golds: dict[str, Gold], forced: dict[str, Any] | None = None) -> SessionTrial:
+                golds: dict[str, Gold], forced: dict[str, Any] | None = None,
+                faults: float = 0.0, resume: bool = True) -> SessionTrial:
     """同一个 Agent 按顺序回答每一轮。某一轮出错（Agent.run 是事务，历史会回滚）就记下来接着问。
 
     配置的优先级：forced（命令行 --set）> 会话自带的 settings > .env。
@@ -384,9 +421,10 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
     st = SessionTrial(session.id, trial)
     events: list[Event] = []
     started = time.perf_counter()
+    settings = settings.model_copy(update={**session.settings, **(forced or {})})
+    llm = FlakyProvider(build_provider(settings), faults, f"{session.id}-{trial}") if faults else None
     try:
-        app = build_application(settings.model_copy(update={**session.settings, **(forced or {})}),
-                                on_event=collect_sink(events))
+        app = build_application(settings, on_event=collect_sink(events), llm=llm)
     except Exception as exc:  # noqa: BLE001
         st.error = f"{type(exc).__name__}: {exc}"
         return st
@@ -394,11 +432,13 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
     for n, case in enumerate(session.turns, 1):
         t = Trial(case.id, trial, graded=case.graded)
         start, before, t0 = len(events), app.agent.session_usage, time.perf_counter()
+        injected = llm.injected if llm else 0
         try:
-            t.answer = app.agent.run(case.question)
+            t.answer = answer(app.agent, case.question, resume=resume)
         except Exception as exc:  # noqa: BLE001
             t.error = f"{type(exc).__name__}: {exc}"
         t.elapsed_s = round(time.perf_counter() - t0, 1)
+        t.injected = (llm.injected if llm else 0) - injected
         t.usage = _minus(app.agent.session_usage, before)
         turn_events = events[start:]
         digest(t, turn_events)

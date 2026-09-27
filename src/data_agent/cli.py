@@ -6,12 +6,14 @@ import argparse
 import re
 import shlex
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 from dotenv import load_dotenv
 
 from .app import Application, build_application
+from .core.agent import InterruptedTurn
 from .core.context import Entry, turn_starts
 from .core.errors import AgentError
 from .core.events import (
@@ -27,8 +29,9 @@ from .core.events import (
     ToolFinished,
     ToolStarted,
     TurnContinued,
+    TurnResumed,
 )
-from .core.messages import Usage
+from .core.messages import Message, Usage
 from .session import Session
 from .settings import Settings
 from .tools.sandbox import Execution
@@ -46,6 +49,7 @@ BANNER = """
 │                                                     │
 │  /tables  看库里有哪些表      /tools   看有哪些工具 │
 │  /attach  上传文件（/attach 路径1 "带 空格的路径2"）│
+│  /continue 接着跑暂停、出错的那一轮（可带一句话）   │
 │  /context 看上下文用量        /compact 压缩上下文   │
 │  /save    把最近的结果存成 CSV（/save r3 指定编号） │
 │  /reset   清空对话            /exit    退出         │
@@ -113,6 +117,9 @@ def make_console_sink(verbose: bool, results: ResultStore):
 
             case TurnContinued(nudge=nudge):
                 print(f"\n🔁 判定未完成，继续：{nudge}")
+
+            case TurnResumed(steps=n, message=message):
+                print(f"\n▶️ 从第 {n + 1} 步接着跑" + (f"：{message}" if message else ""))
 
             case StepLimitReached(max_steps=n, wrapped_up=wrapped, failure=failure):
                 print(f"\n⚠️ 触发步数上限 {n}" + ("，已根据现有结果收尾" if wrapped else f"，收尾没成（{failure}）"))
@@ -252,6 +259,12 @@ def handle_command(cmd: str, app: Application) -> bool:
         case "/attach":
             _attach(arg, app)
 
+        case "/continue":
+            if app.agent.interrupted is None:
+                print("没有暂停或出错的回合可以接着跑。")
+            else:
+                _run(app, lambda: app.agent.resume(arg.strip()))
+
         case "/context":
             _print_context(app)
 
@@ -297,15 +310,28 @@ def _handle(user_input: str, app: Application) -> None:
         if not handle_command(user_input, app):
             print(f"未知命令：{user_input}")
         return
+    _run(app, lambda: app.agent.run(app.with_uploads(user_input)))
+
+
+def _run(app: Application, turn: Callable[[], str]) -> None:
+    """跑一轮（新问题或接着跑）。断了的话进度留在 agent.interrupted，提示可以 /continue。"""
     try:
-        answer = app.agent.run(app.with_uploads(user_input))
+        answer = turn()
         print(f"\n💬 {app.results.expand(answer, _show_table)}")
     except KeyboardInterrupt:
-        print("\n已中断本轮。")
+        print("\n⏸ 已暂停本轮。" + _resume_hint(app.agent.interrupted))
     except AgentError as exc:
-        print(f"\n⚠️ {exc}")
+        print(f"\n⚠️ {exc}" + _resume_hint(app.agent.interrupted))
     except Exception as exc:  # noqa: BLE001
-        print(f"\n❌ 出错：{type(exc).__name__}: {exc}")
+        print(f"\n❌ 出错：{type(exc).__name__}: {exc}" + _resume_hint(app.agent.interrupted))
+
+
+def _resume_hint(turn: InterruptedTurn | None) -> str:
+    if turn is None:
+        return ""
+    done = f"做完了 {turn.steps} 步，" if turn.steps else ""
+    return (f"\n   进度已保留（{done}/continue 接着跑，后面可以加一句话调整方向）；"
+            "直接问新问题就放弃这一轮。")
 
 
 def main() -> None:
@@ -332,10 +358,24 @@ def main() -> None:
         print("检查 .env 配置（参考 .env.example）")
         return
     app.agent.context.restore(history)
+    app.agent.checkpoint_hook = session.save_checkpoint     # 每走一步存一次：进程被杀了也能接着跑
+    if args.resume is not None:
+        app.agent.interrupted = _pending_turn(session, app)
     try:
         _repl(app, session, results, settings, history)
     finally:
         app.close()
+
+
+def _pending_turn(session: Session, app: Application) -> InterruptedTurn | None:
+    """上次没跑完的那一轮。程序重启过，沙箱内核是新的，要的话补一句提醒接在进度后面。"""
+    turn = session.load_checkpoint()
+    if turn is None:
+        return None
+    note = app.fresh_kernel_note(turn)
+    if note:
+        turn = replace(turn, entries=(*turn.entries, Message.user(note).with_meta(synthetic=True)))
+    return turn
 
 
 def _repl(app: Application, session: Session, results: ResultStore, settings: Settings,
@@ -356,6 +396,9 @@ def _repl(app: Application, session: Session, results: ResultStore, settings: Se
     print(f"会话：{session.root}（下次 python run.py --resume {session.id} 接着聊）")
     if history:
         print(f"已恢复 {len(turn_starts(history))} 轮对话、{len(results.refs())} 个查询结果")
+    if (turn := app.agent.interrupted) is not None:
+        why = f"（{turn.reason}）" if turn.reason else "（程序被关掉了）"
+        print(f"⏸ 上次有一轮没跑完{why}：{_preview(turn.question, 60)}" + _resume_hint(turn))
 
     while True:
         try:
@@ -368,8 +411,10 @@ def _repl(app: Application, session: Session, results: ResultStore, settings: Se
         try:
             _handle(user_input, app)
         finally:
-            # 每处理完一次输入就落盘。失败的一轮已经回滚，历史没变，什么都不写
+            # 每处理完一次输入就落盘。失败的一轮已经回滚，历史没变，什么都不写；进度另外存。
+            # 先写历史再删检查点：中间崩了，检查点的 base 对不上，读的时候会丢掉
             session.sync(app.agent.context.history)
+            session.save_checkpoint(app.agent.interrupted)
 
 
 if __name__ == "__main__":

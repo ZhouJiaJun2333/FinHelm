@@ -2,6 +2,7 @@
 
     sessions/<id>/
         session.jsonl    对话历史（消息 + 标记），每轮成功之后追加
+        checkpoint.json  没跑完的那一轮的进度（每走一步整个重写），这一轮提交了就删
         results.jsonl    查询结果 r1、r2…（tools/sql/results.py 写）
         exports/         /save 和 export_csv 写的 CSV
         work/            run_python 沙箱的工作目录（图表在 work/figures/）
@@ -13,11 +14,13 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..core.agent import InterruptedTurn
 from ..core.context import Entry
 from .codec import decode, encode
 
@@ -34,6 +37,10 @@ class Session:
     @property
     def log_path(self) -> Path:
         return self.root / "session.jsonl"
+
+    @property
+    def checkpoint_path(self) -> Path:
+        return self.root / "checkpoint.json"
 
     @property
     def results_path(self) -> Path:
@@ -101,6 +108,36 @@ class Session:
         if new:
             self._append([encode(e) for e in new])
             self._written = len(history)
+
+    # ------------------------------------------------------------ 检查点
+    def save_checkpoint(self, turn: InterruptedTurn | None) -> None:
+        """存没跑完的那一轮（None = 删掉）。和 session.jsonl 分开：正式历史只放完整的回合。
+
+        base 记下它接在第几条正式历史后面：这一轮提交之后、删检查点之前崩了，读的时候对不上就知道它过期了。
+        """
+        if turn is None:
+            self.checkpoint_path.unlink(missing_ok=True)
+            return
+        if not self.log_path.exists():
+            self._append([])          # 第一轮就断了：先把会话建起来，--resume 才找得到
+        data = {"version": VERSION, "base": self._written, "steps": turn.steps, "reason": turn.reason,
+                "entries": [encode(e) for e in turn.entries]}
+        tmp = self.checkpoint_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
+        os.replace(tmp, self.checkpoint_path)     # 写到一半崩了也不会留下半个文件
+
+    def load_checkpoint(self) -> InterruptedTurn | None:
+        """load() 之后调。接不上现在的正式历史（过期、格式不认识）就删掉，返回 None。"""
+        if not self.checkpoint_path.exists():
+            return None
+        try:
+            data = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
+            if data.get("version") == VERSION and data["base"] == self._written:
+                return InterruptedTurn(tuple(decode(e) for e in data["entries"]), data["steps"], data["reason"])
+        except (ValueError, KeyError):
+            pass
+        self.checkpoint_path.unlink()
+        return None
 
     def _append(self, records: list[dict[str, Any]]) -> None:
         if not self.log_path.exists():

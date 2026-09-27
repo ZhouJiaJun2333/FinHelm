@@ -94,6 +94,10 @@ class BaseContext(ABC):
     def restore(self, snapshot: object) -> None:
         """回滚到 snapshot() 拍下的状态。"""
 
+    @abstractmethod
+    def since(self, snapshot: object) -> list[Entry]:
+        """snapshot() 之后追加的条目。一轮没跑完时，Agent 用它留下进度。"""
+
 
 class ContextEdit(ABC):
     """一道工序：看着历史算视图，自己不持有状态。
@@ -131,8 +135,9 @@ class Context(BaseContext):
 
     # ------------------------------------------------------------ 历史
     def add(self, entry: Entry) -> None:
-        if isinstance(entry, Message) and entry.meta.usage is not None:
-            # usage 量的是刚发出去的那份视图（现在的 render()）。盖个指纹，前缀被改了就能认出来
+        if isinstance(entry, Message) and entry.meta.usage is not None and entry.meta.measured_on is None:
+            # usage 量的是刚发出去的那份视图（现在的 render()）。盖个指纹，前缀被改了就能认出来。
+            # 已经盖过的（接着跑时接回来的）不重盖：它量的是当时那份视图，不一定是现在这份
             entry = entry.with_meta(measured_on=_fingerprint(self.render()))
         self._history.append(entry)
 
@@ -190,6 +195,9 @@ class Context(BaseContext):
 
     def restore(self, snapshot: list[Entry]) -> None:
         self._history[:] = snapshot
+
+    def since(self, snapshot: list[Entry]) -> list[Entry]:
+        return self._history[len(snapshot):]
 
 
 # ========================================================= 锚点是否还有效
