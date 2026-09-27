@@ -111,7 +111,10 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
         "平均输出token": round(sum(t.usage.output for t in trials) / n),
         "缓存": cache_stats(trials),
         "平均耗时s": round(sum(t.elapsed_s for t in trials) / n, 1),
-        "步数耗尽": sum(t.step_limit for t in trials),
+        "步数耗尽": sum(t.step_limit and not t.wrapped_up for t in trials),
+        "收尾": sum(t.wrapped_up for t in trials),
+        "收尾后答对": sum(t.wrapped_up and t.answer_ok for t in trials),
+        "不判分": bool(trials) and not any(t.graded for t in trials),
         "运行出错": sum(bool(t.error) for t in trials),
         "失败分类": dict(Counter(t.failure for t in trials if t.failure)),
         "回答里算对": [f"{t.case_id} #{t.trial}" for t in trials if t.text_ok],
@@ -201,6 +204,7 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
     p1 = s["pass@1"]
     cache = s["缓存"]
     files = s.get("上传文件")
+    hidden = s.get("不判分")          # 答案不公开：对错的数一律不显示，免得 0% 看着像全错
     out = [
         f"# 评测报告：{meta['cases']}（{meta['model']}）",
         "",
@@ -217,12 +221,13 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
           [f"| pass@1 要求的步骤都做了（模板、图、指出数据问题） | {pct(p1['结果对'])} |"] if files else [
             f"| pass@1 结果对 | {pct(p1['结果对'])} |",
             f"| pass@1 严格（列数也一样） | {pct(p1['严格'])} |"]),
-        f"| **pass@1 回答对** | **{pct(p1['回答对'])}** |",
+        f"| **pass@1 回答对** | **{pct(p1['回答对'])}** |" if not hidden else
+        "| **pass@1 回答对** | 答案不公开，没有判分 |",
         *([f"| 　其中 SQL 没对上、回答里把数算对了 | {len(s['回答里算对'])} 次 |"] if s.get("回答里算对") else []),
         *([] if files else [f"| pass@1 只看最后一条 SQL（BIRD 的规则，按值比） | {pct(p1['最后一条'])} |"]),
         *([f"| **pass@1 提交轮交的 SQL（BIRD 的规则，按值比）** | **{pct(p1['提交'])}** |"]
           if s.get("提交轮", {}).get("次数") else []),
-        f"| pass^{meta['trials']}（每次都回答对的题） | {pct(s['pass^k'])} |",
+        *([] if hidden else [f"| pass^{meta['trials']}（每次都回答对的题） | {pct(s['pass^k'])} |"]),
         f"| 平均步数 | {s['平均步数']} |",
         f"| 平均 token（输入 / 输出） | {s['平均输入token']:,} / {s['平均输出token']:,} |",
         f"| 缓存命中率（全部 / 首次调用 / 后续调用） | {pct(cache['命中率'])} / "
@@ -234,6 +239,7 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
           if cache.get("写摘要次数") else []),
         f"| 平均耗时 | {s['平均耗时s']}s |",
         f"| 步数耗尽 / 运行出错 | {s['步数耗尽']} / {s['运行出错']} |",
+        *([f"| 步数用完后收尾（其中答对） | {s['收尾']}（{s['收尾后答对']}） |"] if s.get("收尾") else []),
         "",
     ]
     if "会话" in s:
@@ -281,12 +287,12 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
 
     out += ["## 按标签", "", "| 标签 | trial 数 | 结果对 | 回答对 |", "|:--|--:|--:|--:|"]
     for tag, r in sorted(s["按标签"].items(), key=lambda kv: kv[1]["回答对"]):
-        out.append(f"| {tag} | {r['trials']} | {pct(r['结果对'])} | {pct(r['回答对'])} |")
+        out.append(f"| {tag} | {r['trials']} | " + ("— | — |" if hidden else f"{pct(r['结果对'])} | {pct(r['回答对'])} |"))
 
     out += ["", "## 逐题", "", "| 题 | 问题 | 回答对 | 缓存命中 | 失败 |", "|:--|:--|--:|--:|:--|"]
     for cid, c in s["逐题"].items():
         fails = "，".join(f"{k}×{v}" for k, v in c["失败"].items())
-        out.append(f"| {cid} | {c['question'].splitlines()[0]} | {c['回答对']}/{c['trials']} | {pct(c['缓存命中率'])} | {fails} |")
+        out.append(f"| {cid} | {c['question'].splitlines()[0]} | {'—' if hidden else f"{c['回答对']}/{c['trials']}"} | {pct(c['缓存命中率'])} | {fails} |")
 
     if diff is not None:
         out += ["", f"## 和上一次比（{meta.get('compared_with', '')}）", ""]

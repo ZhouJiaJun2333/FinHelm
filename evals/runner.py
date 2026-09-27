@@ -102,6 +102,8 @@ class Trial:
     summary_calls: list[Usage] = field(default_factory=list)  # 写摘要那几次调用（不在 calls 里）
     elapsed_s: float = 0.0
     step_limit: bool = False
+    wrapped_up: bool = False              # 步数用完后收尾成功，交的是真实回答（照常判分）
+    wrap_up_failure: str = ""             # 收尾没成的原因（交的是兜底那句话）
     context_edits: int = 0
     compaction_failures: int = 0          # 自动压缩没做成（这一步照常跑）
     result: ResultMatch | None = None     # SQL 结果比对；None = 没有可比的 SQL
@@ -117,6 +119,7 @@ class Trial:
     custom_plots: int = 0
     viewed_after: int = 0
     final_answer: str = ""                # DABstep：回答最后「最终答案：」那一行，提交文件用它
+    wrote_final: bool = False             # 写了「最终答案：」这一行（空列表的正确写法是后面留空）
     official: bool = False                # DABstep 的题：只按「最终答案」判
 
     # ------------------------------------------------------------ 结论
@@ -130,8 +133,8 @@ class Trial:
         """回答也对了：结果对，而且回答里的数字对得上（没有数字可核对的题只看结果）；
         或者 SQL 没对上、但回答里把标准答案那个数算对了。
         步数耗尽、出错的不算：只查「有没有出图」的题，图画出来了、回答却是兜底的那句话。"""
-        if self.error or self.step_limit:
-            return False
+        if not self.graded or self.error or (self.step_limit and not self.wrapped_up):
+            return False                      # 不判分的（答案不公开、填充轮）谈不上对
         return (self.result_ok and (self.answer_check is None or self.answer_check.ok is not False)
                 or self.text_ok)
 
@@ -147,7 +150,7 @@ class Trial:
             return ""
         if self.error:
             return "运行出错"
-        if self.step_limit:
+        if self.step_limit and not self.wrapped_up:
             return "步数耗尽"
         if self.text_ok:
             return ""
@@ -271,7 +274,10 @@ def digest(t: Trial, events: list[Event]) -> None:
             edited = compacted = False
             t.calls.append(e.usage)
     t.steps = len(t.calls)
-    t.step_limit = any(isinstance(e, StepLimitReached) for e in events)
+    limits = [e for e in events if isinstance(e, StepLimitReached)]
+    t.step_limit = bool(limits)
+    t.wrapped_up = any(e.wrapped_up for e in limits)
+    t.wrap_up_failure = next((e.failure for e in limits if e.failure), "")
     succeeded = [c for c in t.sql_calls if c.ok]
     t.final_sql = succeeded[-1].sql if succeeded else ""
     digest_sandbox(t, events)
@@ -495,22 +501,25 @@ def grade(t: Trial, case: Case, db, gold: Gold) -> None:
 NO_DATA_WORDS = ("没有", "无数据", "不存在", "为空", "暂无", "查不到")
 
 
-FINAL = re.compile(r"最终答案\s*[:：]\s*(.+)")
+# 只取同一行：\s 会跨行，「最终答案：」后面留空（空列表的正确写法）时会把下一行当成答案
+FINAL = re.compile(r"最终答案[ \t]*[:：][ \t]*(.*)")
 
 
-def extract_final(answer: str) -> str:
-    """回答里最后一个「最终答案：」后面的内容，去掉 Markdown 的加粗、反引号。"""
+def extract_final(answer: str) -> str | None:
+    """回答里最后一个「最终答案：」那一行冒号后面的内容，去掉 Markdown 的加粗、反引号。
+    None = 没写这一行；"" = 写了但是空的（官方要求空列表回答空字符串）。"""
     found = FINAL.findall(answer)
-    return found[-1].strip().strip("*`").strip() if found else ""
+    return found[-1].strip().strip("*`").strip() if found else None
 
 
 def grade_files(t: Trial, case: Case) -> None:
     """没有 SQL 的题：该做的做了没有（代码、图、回答里该指出的问题）记在 result，数字记在 answer_check。
     DABstep 的题只看「最终答案」那一行，按官方规则比。"""
-    t.final_answer = extract_final(t.answer)
+    final = extract_final(t.answer)
+    t.final_answer, t.wrote_final = final or "", final is not None
     if case.official_answer is not None:
-        ok = bool(t.final_answer) and question_scorer(t.final_answer, case.official_answer)
-        reason = "" if ok else (f"最终答案 {t.final_answer!r}，标准答案 {case.official_answer!r}" if t.final_answer
+        ok = t.wrote_final and question_scorer(t.final_answer, case.official_answer)
+        reason = "" if ok else (f"最终答案 {t.final_answer!r}，标准答案 {case.official_answer!r}" if t.wrote_final
                                 else "回答里没有「最终答案：」那一行")
         t.result = ResultMatch(ok, ok, reason)
         return

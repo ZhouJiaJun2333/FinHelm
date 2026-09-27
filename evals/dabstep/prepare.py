@@ -29,7 +29,8 @@ BASE = "https://huggingface.co/datasets/adyen/DABstep/resolve/main/data"
 CONTEXT = ["acquirer_countries.csv", "fees.json", "manual.md", "merchant_category_codes.csv",
            "merchant_data.json", "payments-readme.md", "payments.csv"]
 
-SETTINGS = {"domain": "payments", "max_steps": 25}
+# 步数用完时尽量交一个答案：排行榜上弃权和答错一样算错
+SETTINGS = {"domain": "payments", "max_steps": 25, "wrap_up": "best_guess"}
 
 ASK = """{question}
 

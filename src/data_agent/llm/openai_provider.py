@@ -62,7 +62,8 @@ class OpenAICompatibleProvider(LLMProvider):
         pending: list[Image] = []
 
         for msg in messages:
-            if msg.role != "tool" and pending:
+            # user 不在这里发图：紧跟在工具结果后面的 user 要和这批图并成一条（见下）
+            if msg.role not in ("tool", "user") and pending:
                 out.append(_tool_images_message(pending))
                 pending = []
 
@@ -71,12 +72,21 @@ class OpenAICompatibleProvider(LLMProvider):
 
             elif msg.role == "user":
                 if msg.images and vision:
-                    out.append({"role": "user", "content": [
+                    content: str | list[dict[str, Any]] = [
                         *([{"type": "text", "text": msg.content}] if msg.content else []),
                         *(_image_part(i) for i in msg.images),
-                    ]})
+                    ]
                 else:
-                    out.append({"role": "user", "content": _with_omitted(msg)})
+                    content = _with_omitted(msg)
+                if pending:
+                    # 这批工具结果的图和紧跟其后的 user（比如步数用完时的收尾提示）是同一个 user 回合，
+                    # 并成一条。和 Anthropic 那边一样只并这一种：两条文字 user 挨着是历史里有残留，照原样发
+                    item = _tool_images_message(pending)
+                    item["content"] += _parts(content)
+                    out.append(item)
+                    pending = []
+                else:
+                    out.append({"role": "user", "content": content})
 
             elif msg.role == "assistant":
                 if msg.raw is not None:
@@ -199,6 +209,12 @@ def _tool_images_message(images: list[Image]) -> dict[str, Any]:
     """不是用户说的话，只是把图片带过去。开头一句说明来源，免得模型当成用户新发的图。"""
     return {"role": "user", "content": [{"type": "text", "text": TOOL_IMAGES_HEADER},
                                         *(_image_part(i) for i in images)]}
+
+
+def _parts(content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return content
+    return [{"type": "text", "text": content}] if content else []
 
 
 def _with_omitted(msg: Message) -> str:

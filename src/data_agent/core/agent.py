@@ -42,6 +42,12 @@ ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]
 # 自动压缩连续失败几次就熔断（Claude Code 也是 3）
 MAX_COMPACTION_FAILURES = 3
 
+# 步数用完时追加的提示（{n} = 步数）。默认保守：确定的照实说，没做完的说清楚做到哪一步，不拿没核实的数当结论。
+# 想让模型尽量给出答案（比如评测），组装时换一段（prompts.WRAP_UP_BEST_GUESS）
+WRAP_UP = ("[步数用完了（{n} 步），不能再调用工具。请根据上面已经得到的结果直接回答："
+           "已经确定的结论照实给出；没做完的部分说明做到了哪一步、还差什么，不要把没核实过的数字当成结论。"
+           "用户原来对回答格式的要求照样遵守。]")
+
 
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
@@ -83,12 +89,14 @@ class Agent:
         finish_turn_hook: FinishTurnHook | None = None,
         on_event: Callable[[Event], None] = noop_sink,
         session_context: Callable[[], str] | None = None,
+        wrap_up_prompt: str = WRAP_UP,
     ) -> None:
         self.llm = llm
         self.tools = tools
         self.system_prompt = system_prompt
         self.context = context if context is not None else Context()
         self.max_steps = max_steps
+        self.wrap_up_prompt = wrap_up_prompt
         self.approval_hook = approval_hook
         self.finish_turn_hook = finish_turn_hook
         self.on_event = on_event
@@ -123,21 +131,7 @@ class Agent:
         self.context.add(Message.user(user_input))
 
         for step in range(1, self.max_steps + 1):
-            system = self._render_system_prompt()
-            tools = self.tools.schemas()
-
-            # 每一步都整理：一轮里连调十几次工具，上下文在一轮之内就可能涨过阈值
-            self._maintain(system, tools)
-
-            response = self._chat(step, system, tools)
-            self.session_usage += response.usage      # 被截断的回复同样收费，先记账
-            self.on_event(LLMResponded(
-                step=step,
-                text=response.text,
-                tool_calls=[c.name for c in response.tool_calls],
-                usage=response.usage,
-                context_window=self.llm.context_window,
-            ))
+            response = self._request(step)
 
             # 先查 stop_reason 再进历史：截断、被拒的回复不可信，不能让它进去
             self._check_stop_reason(response)
@@ -152,16 +146,56 @@ class Agent:
             if decision.action == "end":
                 return response.text
 
-            if not requested_tools:
+            if not requested_tools and step < self.max_steps:
                 # 历史以 assistant 结尾不能直接再请求（Anthropic 会当成 prefill，新模型直接 400），
-                # 补一条 nudge。标成 synthetic：它不是真人的新问题，不算新回合的开头
+                # 补一条 nudge。标成 synthetic：它不是真人的新问题，不算新回合的开头。
+                # 最后一步不补：接下来的收尾提示就是这一步的「继续」，两条说的是一回事
                 nudge = decision.nudge or "请继续完成上面的任务。"
                 self.context.add(Message.user(nudge).with_meta(synthetic=True))
                 self.on_event(TurnContinued(step=step, nudge=nudge))
 
-        # 步数耗尽：兜底回答也要进历史，让模型下一轮知道上一轮卡住了，
-        # 也保证历史以 assistant 结尾（正常返回，事务不会替我们收尾）
-        self.on_event(StepLimitReached(self.max_steps))
+        return self._wrap_up()
+
+    def _request(self, step: int) -> LLMResponse:
+        """请求一次模型：先整理上下文，再请求、记账、发事件。stop_reason 由调用方判断。"""
+        system = self._render_system_prompt()
+        tools = self.tools.schemas()
+
+        # 每一步都整理：一轮里连调十几次工具，上下文在一轮之内就可能涨过阈值
+        self._maintain(system, tools)
+
+        response = self._chat(step, system, tools)
+        self.session_usage += response.usage      # 被截断的回复同样收费，先记账
+        self.on_event(LLMResponded(
+            step=step,
+            text=response.text,
+            tool_calls=[c.name for c in response.tool_calls],
+            usage=response.usage,
+            context_window=self.llm.context_window,
+        ))
+        return response
+
+    def _wrap_up(self) -> str:
+        """步数用完：不再给工具，让模型根据已经得到的结果回答（学 smolagents 的 final answer）。
+
+        以前直接返回「没做完」，前面几十步的结果全浪费了。收尾的回答不再过 finish_turn_hook：
+        步数已经用完，钩子说「没做完」也没法再继续，有文字就当回答。
+        收尾失败（又去调工具、被截断、API 报错）才用兜底那句话，原因放进 StepLimitReached。
+        兜底回答也要进历史：让模型下一轮知道上一轮卡住了，也保证历史以 assistant 结尾。
+        工具表照样发（去掉工具会断缓存，有的厂商历史里有工具调用时还要求带着工具表），只在提示里说别再调。
+        """
+        self.context.add(Message.user(self.wrap_up_prompt.format(n=self.max_steps)).with_meta(synthetic=True))
+        try:
+            response = self._request(self.max_steps + 1)
+            failure = ("又去调了工具" if response.tool_calls
+                       else f"stop_reason={response.stop_reason}" if not response.finished_normally
+                       else "回答是空的" if not response.text else "")
+        except Exception as exc:  # noqa: BLE001 —— 收尾是尽力而为，失败就用兜底，不能把这一轮搞没
+            failure = f"{type(exc).__name__}: {exc}"
+        self.on_event(StepLimitReached(self.max_steps, wrapped_up=not failure, failure=failure))
+        if not failure:
+            self.context.add(response.to_message())
+            return response.text
         fallback = (
             f"已达到最大步数 {self.max_steps} 仍未得出结论。"
             "可以把问题拆小一点，或者调大 max_steps。"

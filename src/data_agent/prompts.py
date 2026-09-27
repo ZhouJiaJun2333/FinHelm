@@ -59,6 +59,12 @@ _SAVED_REFS = """
 _VIEW_IMAGE = ("自己写代码画的图，交付前用 `view_image` 看一眼：文字有没有重叠、被裁切，图例、坐标轴、单位、"
                "数字对不对，有问题改好再交付。{templates}")
 
+# 步数用完时的收尾提示（settings.wrap_up = best_guess）。默认的保守版本在 core/agent.py 的 WRAP_UP
+WRAP_UP_BEST_GUESS = (
+    "[步数用完了（{n} 步），不能再调用工具。请根据上面已经算出来的结果，直接给出你目前最好的回答。"
+    "还有没定下来的口径、没算完的部分，就按你认为最合理的假设给出结论或估计值，并写明假设和做到了哪一步；"
+    "只有问题本身不成立（问的东西数据里根本没有）时，才说没法回答。用户原来对回答格式的要求照样遵守。]")
+
 
 def build_system_prompt(domain: Domain, tools: Collection[str] = ("list_tables", "describe_table", "run_sql")) -> str:
     """tools：实际注册了的工具名。"""

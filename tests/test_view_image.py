@@ -155,6 +155,19 @@ def test_openai_对话以工具结果结尾时图片也要发出去():
     assert out[-1]["role"] == "user" and len(out[-1]["content"]) == 4
 
 
+def test_openai_工具结果的图后面紧跟user_并成一条():
+    """步数用完时的收尾提示紧跟在带图的工具结果后面：和那批图是同一个 user 回合，不发两条连续的 user。"""
+    out = OpenAICompatibleProvider.convert_messages([*history_two_images()[:-1], Message.user("收尾")], None)
+    assert [m["role"] for m in out] == ["user", "assistant", "tool", "tool", "user"]
+    assert out[-1]["content"][0] == {"type": "text", "text": TOOL_IMAGES_HEADER}
+    assert out[-1]["content"][-1] == {"type": "text", "text": "收尾"} and len(out[-1]["content"]) == 5
+
+
+def test_openai_两条文字user照样分开():
+    out = OpenAICompatibleProvider.convert_messages([Message.user("a"), Message.user("b")], None)
+    assert out == [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
+
+
 def test_openai_不能看图的模型_图片换成一句说明():
     """换成 deepseek-v4-pro 接着聊，历史里还有之前的图：发过去它只会说 Unsupported Image。"""
     msgs = [*history_two_images(), Message(role="user", content="这张呢", images=(PNG,))]

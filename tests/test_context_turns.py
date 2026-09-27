@@ -72,7 +72,7 @@ def test_下一次真人提问才开始新回合():
 
 
 def test_Agent补的消息都标了synthetic_但发出去和普通消息一样():
-    """nudge 和步数耗尽的兜底回答是 Agent 自己补的；真人提问和模型回复不是。"""
+    """nudge 和步数用完时的收尾提示是 Agent 自己补的；真人提问和模型回复不是。"""
     agent, _ = make_agent(
         [LLMResponse(text="还没完", stop_reason="end_turn")],
         finish_turn_hook=lambda o: TurnDecision.keep_going("继续"),
@@ -85,10 +85,11 @@ def test_Agent补的消息都标了synthetic_但发出去和普通消息一样()
         ("user", "问题", False),
         ("assistant", "还没完", False),
         ("user", "继续", True),
-        ("assistant", "还没完", False),
-        ("user", "继续", True),
-        ("assistant", flags[-1][1], True),        # 兜底回答
+        ("assistant", "还没完", False),           # 最后一步：不补 nudge，接着收尾
+        ("user", flags[4][1], True),              # 收尾提示
+        ("assistant", "还没完", False),           # 收尾的回答是模型真说的
     ]
+    assert flags[4][1].startswith("[步数用完了（2 步）")
     # synthetic 在 meta 里，provider 不看 meta —— 请求体和普通 user 消息完全一样
     nudge = agent.context.history[2]
     assert (AnthropicProvider.convert_messages([nudge])

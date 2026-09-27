@@ -60,6 +60,9 @@ class Settings(BaseSettings):
 
     # ---------------- Agent ----------------
     max_steps: int = 12
+    # 步数用完时怎么收尾：report = 确定的照实说、没做完的说清楚做到哪一步；
+    # best_guess = 没定下来的按最合理的假设给出答案（评测：交一个答案比弃权划算）
+    wrap_up: Literal["report", "best_guess"] = "report"
     # 输出上限，思考 token 也算在内。8192 时列长清单会被截断；只是封顶，调高不多花钱
     max_tokens: int = 32768
 

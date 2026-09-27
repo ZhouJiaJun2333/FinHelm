@@ -52,7 +52,7 @@ class AnthropicProvider(LLMProvider):
                 continue                       # system 走顶层参数
 
             if msg.role == "user":
-                out.append({"role": "user", "content": _with_images(msg)})
+                _append_user(out, _with_images(msg))
 
             elif msg.role == "assistant":
                 if msg.raw is not None:
@@ -79,10 +79,7 @@ class AnthropicProvider(LLMProvider):
                 if msg.is_error:
                     block["is_error"] = True
                 # 连续的工具结果合并进同一条 user 消息，拆开发会让模型不敢再并行调工具
-                if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):
-                    out[-1]["content"].append(block)
-                else:
-                    out.append({"role": "user", "content": [block]})
+                _append_user(out, [block])
         return out
 
     # ------------------------------------------------------------- 调用
@@ -151,6 +148,26 @@ class AnthropicProvider(LLMProvider):
             cache_read=u.cache_read_input_tokens or 0,
             cache_write=u.cache_creation_input_tokens or 0,
         )
+
+
+def _append_user(out: list[dict[str, Any]], content: str | list[dict[str, Any]]) -> None:
+    """工具结果和紧跟在后面的 user（下一个工具结果、步数用完时的收尾提示）是同一个 user 回合，
+    并成一条 —— Anthropic 原生就是 tool_result 块后面跟 text 块。
+
+    只并这一种。两条文字 user 挨着说明历史里有残留（没答完的问题、上一轮的 nudge），
+    照原样分开发，让角色交替的检查抓得到，不在这里悄悄抹平。"""
+    last = out[-1] if out else None
+    if last and last["role"] == "user" and isinstance(last["content"], list) \
+            and last["content"][0].get("type") == "tool_result":
+        last["content"] += _blocks(content)
+    else:
+        out.append({"role": "user", "content": content})
+
+
+def _blocks(content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return content
+    return [{"type": "text", "text": content}] if content else []      # 空的 text 块 API 不收
 
 
 def _with_images(msg: Message) -> str | list[dict[str, Any]]:

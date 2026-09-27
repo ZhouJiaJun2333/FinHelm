@@ -216,14 +216,15 @@ def _regrade(run_dir: Path, meta: dict, case_set: CaseSet, trials: list[Trial]) 
 
 
 def prompt_fingerprint(settings: Settings) -> str:
-    """系统提示词 + 工具定义的指纹，按这次真正会组装出来的 Agent 算。
+    """系统提示词 + 工具定义 + 收尾提示的指纹，按这次真正会组装出来的 Agent 算。
 
     提示词按注册了哪些工具拼（沙箱、view_image 开没开），只按场景包算的话，
     开关不同的两次运行指纹一样，报告里就看不出提示词变过。不启动沙箱（第一次调用才起容器）。
     """
     app = build_application(settings)
     try:
-        text = app.agent.system_prompt + json.dumps(app.tools.schemas(), ensure_ascii=False, sort_keys=True)
+        text = (app.agent.system_prompt + json.dumps(app.tools.schemas(), ensure_ascii=False, sort_keys=True)
+                + app.agent.wrap_up_prompt)
     finally:
         app.close()
     return hashlib.sha1(text.encode()).hexdigest()[:12]
@@ -258,7 +259,7 @@ def _parse_sets(items: list[str]) -> dict[str, object]:
 
 def _progress(r: Trial | SessionTrial) -> str:
     if isinstance(r, Trial):
-        mark = "✅" if r.answer_ok else "❌"
+        mark = "·" if not r.graded else "✅" if r.answer_ok else "❌"
         return f"{mark} {r.case_id} #{r.trial}  {r.elapsed_s:>5.1f}s  {r.steps} 步  {r.failure}"
     graded = [t for t in r.turns if t.graded]
     marks = "".join("·" if not t.graded else "✅" if t.answer_ok else "❌" for t in r.turns)

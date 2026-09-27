@@ -171,7 +171,9 @@ def test_钩子不会让死循环逃过步数上限():
     agent, _ = make_agent(
         script, max_steps=3, finish_turn_hook=lambda o: TurnDecision.keep_going("继续"),
     )
-    assert "最大步数 3" in agent.run("x")
+    # 步数用完照样停下；收尾那次模型给了文字，就把它当回答（不再是「已达到最大步数」）
+    assert agent.run("x") == "永远说没完"
+    assert agent.llm.calls == 4, "3 步 + 1 次收尾"
 
 
 # ============================ run() 的事务语义（历史不能留半截状态）

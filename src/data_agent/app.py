@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .core.agent import Agent, ApprovalHook, FinishTurnHook
+from .core.agent import WRAP_UP, Agent, ApprovalHook, FinishTurnHook
 from .core.context import ClearOldToolResults, CompactHistory, Context, llm_summarizer
 from .core.events import Event, noop_sink
 from .core.provider import LLMProvider
@@ -15,7 +15,7 @@ from .core.tools import ToolRegistry
 from .db.connection import Database
 from .db.introspection import SchemaInspector
 from .domains import get_domain
-from .prompts import build_system_prompt
+from .prompts import WRAP_UP_BEST_GUESS, build_system_prompt
 from .settings import Settings, build_provider
 from .tools.python import PYTHON_KERNEL, RunPythonTool
 from .tools.r import R_KERNEL, RunRTool
@@ -181,6 +181,7 @@ def build_application(
         finish_turn_hook=finish_turn_hook,
         on_event=on_event,
         session_context=inspector.overview if inspector else None,
+        wrap_up_prompt=WRAP_UP_BEST_GUESS if settings.wrap_up == "best_guess" else WRAP_UP,
     )
 
     return Application(

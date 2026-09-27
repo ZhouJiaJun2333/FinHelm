@@ -110,8 +110,8 @@ def make_console_sink(verbose: bool, results: ResultStore):
             case TurnContinued(nudge=nudge):
                 print(f"\n🔁 判定未完成，继续：{nudge}")
 
-            case StepLimitReached(max_steps=n):
-                print(f"\n⚠️ 触发步数上限 {n}")
+            case StepLimitReached(max_steps=n, wrapped_up=wrapped, failure=failure):
+                print(f"\n⚠️ 触发步数上限 {n}" + ("，已根据现有结果收尾" if wrapped else f"，收尾没成（{failure}）"))
 
             case ContextOverflowed():
                 print("\n⚠️ 请求超出了模型的上下文窗口，强制整理后重试")

@@ -55,6 +55,8 @@ class TurnContinued:
 @dataclass(slots=True)
 class StepLimitReached:
     max_steps: int
+    wrapped_up: bool = False     # 收尾成功：模型根据已有结果给出了回答（不是兜底那句话）
+    failure: str = ""            # 收尾没成的原因（又去调工具、被截断、API 报错…），用的是兜底那句话
 
 
 @dataclass(slots=True)
