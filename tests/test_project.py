@@ -65,7 +65,7 @@ def test_题库指定schema_只看它():
 def test_没指定schema_组装时不碰数据库_第一次用到才查(monkeypatch):
     calls = []
     monkeypatch.setattr(SchemaInspector, "_user_schemas", lambda self: calls.append(1) or ("financial", "shop"))
-    app = build_application(Settings(database_url=NO_DB, python_sandbox=False, r_sandbox=False),
+    app = build_application(Settings(database_url=NO_DB, db_schema="", python_sandbox=False, r_sandbox=False),
                             llm=ScriptedProvider())
     assert calls == []
     assert app.inspector.schemas == ("financial", "shop") and app.inspector.schemas == ("financial", "shop")
