@@ -7,6 +7,7 @@ import re
 import shlex
 import sys
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,6 +33,7 @@ from .core.events import (
     TurnResumed,
 )
 from .core.messages import Message, Usage
+from .memory import SCOPES, age
 from .session import Session
 from .settings import Settings
 from .tools.sandbox import Execution
@@ -53,6 +55,7 @@ BANNER = """
 │  /context 看上下文用量        /compact 压缩上下文   │
 │  /save    把最近的结果存成 CSV（/save r3 指定编号） │
 │  /skills  看有哪些技能        /skill:名字 按技能做  │
+│  /memory  看长期记忆（改、删直接动文件，或跟我说）  │
 │  /reset   清空对话            /exit    退出         │
 └─────────────────────────────────────────────────────┘"""
 
@@ -281,6 +284,9 @@ def handle_command(cmd: str, app: Application) -> bool:
             for skill in app.skills:
                 print(f"  · {skill.name}（{skill.path.parent}）\n      {skill.description}")
 
+        case "/memory":
+            _print_memory(app)
+
         case _ if name.startswith("/skill:"):
             _run_skill(name.removeprefix("/skill:"), arg, app)
 
@@ -295,6 +301,19 @@ def handle_command(cmd: str, app: Application) -> bool:
         case _:
             return False
     return True
+
+
+def _print_memory(app: Application) -> None:
+    if app.memory is None:
+        print("长期记忆关着（MEMORY_ENABLED=false）。")
+        return
+    today = date.today()
+    for scope, store in app.memory.stores.items():
+        entries = store.entries()
+        print(f"[{SCOPES[scope]}] {store.root}（{len(entries)} 条）")
+        for e in entries:
+            print(f"  · {e.name}（{age(e.updated, today)}）：{e.description}")
+    print("改、删：直接改对应的 .md 文件，或者跟我说「忘掉……」「……改成……」。新会话才会读到手改的内容。")
 
 
 def _run_skill(skill_name: str, request: str, app: Application) -> None:

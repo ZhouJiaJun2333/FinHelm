@@ -28,6 +28,17 @@
 
 每一轮的 id 是「会话 id/轮次」，比如 multi-001/3。答错了会话照样往下问 —— 真实用户也会接着问。
 
+跨会话（长期记忆，题库 settings 里 memory_enabled: true）：同一段里用 new_session 隔开几次会话，
+记忆目录不换（每个 trial 一个空的），考的是「第二天再来问还记不记得」。
+
+        {"question": "我们说的大客户是……", "filler": true,
+         "memory_has": ["5\\s*万"]},                 这一轮之后，记忆文件里必须有（正则）
+        {"question": "有多少大客户？", "new_session": true,   开一个新会话再问
+         "match": "answer", "answer_sql": "..."}
+        memory_lacks                                    这一轮之后，记忆文件里不能有（不该记的、该删的）
+
+记忆文件拼成一段文字再匹配，每个文件前面一行「=== user/名字」或「=== project/名字」，要限定作用域就把它写进正则。
+
 上传文件的题（research 题库，不连数据库）：先把文件传上去再提问，按回答和做了什么判分。
 
     {"id": "rs-01",
@@ -72,6 +83,9 @@ class Case:
     tags: tuple[str, ...] = ()
     note: str = ""
     filler: bool = False               # 多轮会话里的填充轮：不判分
+    new_session: bool = False          # 这一轮开始前换一个新会话（长期记忆的题）
+    memory_has: tuple[str, ...] = ()   # 这一轮之后记忆文件里必须有（正则）
+    memory_lacks: tuple[str, ...] = ()  # 这一轮之后记忆文件里不能有
     # 上传文件的题（见开头）
     files: tuple[str, ...] = ()
     gold_values: tuple[float, ...] = ()
@@ -176,6 +190,9 @@ def _case(d: dict, case_id: str) -> Case:
         tags=tuple(d.get("tags", ())),
         note=d.get("note", ""),
         filler=d.get("filler", False),
+        new_session=d.get("new_session", False),
+        memory_has=tuple(d.get("memory_has", ())),
+        memory_lacks=tuple(d.get("memory_lacks", ())),
         files=tuple(d.get("files", ())),
         gold_values=tuple(float(v) for v in d.get("gold_values", ())),
         expect_code=tuple(d.get("expect_code", ())),

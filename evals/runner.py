@@ -18,6 +18,8 @@ BIRD 官方一题只收一条 SQL、结果要完全一样；Agent 回答真人�
 from __future__ import annotations
 
 import re
+import shutil
+import tempfile
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -129,6 +131,11 @@ class Trial:
     custom_plots: int = 0
     viewed_after: int = 0
     skills: list[str] = field(default_factory=list)     # load_skill 成功加载过的技能，按顺序
+    # 长期记忆：这一轮 remember 成功写了什么（「save project/big-customer」），读了几次；记忆文件检查
+    memory_writes: list[str] = field(default_factory=list)
+    memory_reads: int = 0
+    memory_ok: bool | None = None         # None = 这一轮没有 memory_has / memory_lacks
+    memory_problems: str = ""
     final_answer: str = ""                # DABstep：回答最后「最终答案：」那一行，提交文件用它
     wrote_final: bool = False             # 写了「最终答案：」这一行（空列表的正确写法是后面留空）
     official: bool = False                # DABstep 的题：只按「最终答案」判
@@ -322,6 +329,7 @@ def digest(t: Trial, events: list[Event]) -> None:
     t.final_sql = succeeded[-1].sql if succeeded else ""
     digest_sandbox(t, events)
     digest_skills(t, events)
+    digest_memory(t, events)
 
 
 SANDBOX_TOOLS = ("run_python", "run_r")
@@ -337,6 +345,41 @@ def digest_skills(t: Trial, events: list[Event]) -> None:
             if pending.name == "load_skill" and not e.is_error:
                 t.skills.append(str(pending.arguments.get("name", "")))
             pending = None
+
+
+def digest_memory(t: Trial, events: list[Event]) -> None:
+    """remember 成功写了什么、read_memory 读了几次。"""
+    pending: ToolStarted | None = None
+    for e in events:
+        if isinstance(e, ToolStarted):
+            pending = e
+        elif isinstance(e, ToolFinished) and pending is not None:
+            a = pending.arguments
+            if pending.name == "remember" and not e.is_error:
+                t.memory_writes.append(f"{a.get('action')} {a.get('scope')}/{a.get('name')}")
+            elif pending.name == "read_memory" and not e.is_error:
+                t.memory_reads += 1
+            pending = None
+
+
+def memory_files(root: Path) -> dict[str, str]:
+    """记忆目录下的全部记忆：{"project/big-customer": 全文}。索引 MEMORY.md 不算。"""
+    out = {}
+    for path in sorted(root.rglob("*.md")):
+        if path.name != "MEMORY.md":
+            scope = "user" if path.parent.parent == root else "project"
+            out[f"{scope}/{path.stem}"] = path.read_text(encoding="utf-8")
+    return out
+
+
+def check_memory(t: Trial, case: Case, files: dict[str, str]) -> None:
+    """memory_has / memory_lacks：拼成一段文字匹配，每个文件前面一行「=== 作用域/名字」。"""
+    if not (case.memory_has or case.memory_lacks):
+        return
+    text = "\n".join(f"=== {k}\n{v}" for k, v in files.items())
+    problems = [f"记忆里没有 {p}" for p in case.memory_has if not re.search(p, text)]
+    problems += [f"记忆里不该有 {p}" for p in case.memory_lacks if re.search(p, text)]
+    t.memory_ok, t.memory_problems = not problems, "；".join(problems)
 
 
 def digest_sandbox(t: Trial, events: list[Event]) -> None:
@@ -380,6 +423,7 @@ class SessionTrial:
     error: str = ""                       # 连 Agent 都没建起来
     elapsed_s: float = 0.0
     transcript: list[dict[str, Any]] = field(default_factory=list)
+    memory: dict[str, str] = field(default_factory=dict)   # 跑完时的记忆文件（长期记忆的题）
 
     # 给 report.cache_stats 用：整段会话连起来看，「首次调用」是整段会话的第一次
     @property
@@ -436,6 +480,10 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
     events: list[Event] = []
     started = time.perf_counter()
     settings = settings.model_copy(update={**session.settings, **(forced or {})})
+    # 长期记忆：每个 trial 一个空的记忆目录，几次会话共用；跑完存进记录再删
+    memory_root = Path(tempfile.mkdtemp(prefix="finhelm-memory-")) if settings.memory_enabled else None
+    if memory_root:
+        settings = settings.model_copy(update={"memory_dir": str(memory_root)})
     llm = FlakyProvider(build_provider(settings), faults, f"{session.id}-{trial}") if faults else None
     try:
         app = build_application(settings, on_event=collect_sink(events), llm=llm)
@@ -444,6 +492,11 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
         return st
 
     for n, case in enumerate(session.turns, 1):
+        if case.new_session and n > 1:
+            # 第二天再来：新的 Agent、新的系统提示词（记忆目录重新读），上一次会话的历史都不在了
+            st.transcript += _transcript(app.agent.context.history)
+            app.close()
+            app = build_application(settings, on_event=collect_sink(events), llm=llm)
         t = Trial(case.id, trial, graded=case.graded)
         start, before, t0 = len(events), app.agent.session_usage, time.perf_counter()
         injected = llm.injected if llm else 0
@@ -462,11 +515,16 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
                      for e in turn_events if isinstance(e, ContextEdited)]
         if case.graded:
             grade(t, case, db, golds[case.id])
+        if memory_root:
+            check_memory(t, case, memory_files(memory_root))
         st.turns.append(t)
 
     st.elapsed_s = round(time.perf_counter() - started, 1)
-    st.transcript = _transcript(app.agent.context.history)
+    st.transcript += _transcript(app.agent.context.history)
     app.close()
+    if memory_root:
+        st.memory = memory_files(memory_root)
+        shutil.rmtree(memory_root, ignore_errors=True)
     return st
 
 

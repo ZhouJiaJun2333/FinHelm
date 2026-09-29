@@ -59,6 +59,8 @@ python run.py
 
 **技能（Skills）**：换一份数据也成立的做法（比如 meta 分析的流程和默认口径）不写进 `AGENTS.md`，写成技能：一个目录一个 `SKILL.md`（[Agent Skills 规范](https://agentskills.io/specification)，学 pi）。系统提示词里只列名字和一句描述，模型做对应的任务前用 `load_skill` 读全文。内置的在 `src/data_agent/skills/builtin/`，项目自己的放 `<PROJECT_DIR>/.agents/skills/`（同名盖过内置的）；frontmatter 的 `tools: [run_r]` 写要用的工具，环境里没有就不列。`/skills` 看有哪些，`/skill:meta-analysis 要做的事` 直接指定。
 
+**长期记忆**：跨会话记住你定过的口径（「我们说的活跃客户是……」）、个人偏好、对做法的纠正（学 Claude Code 的 auto memory）。一条记忆一个 Markdown 文件，用户级在 `~/.finhelm/memory/`，项目级在 `~/.finhelm/projects/<项目路径>/memory/`（不放进项目目录：`AGENTS.md` 是共享的项目说明，记忆是替你个人记的笔记）。会话开始时把每条的一行摘要拼进系统提示词，模型要细节再用 `read_memory` 读全文；写用 `remember`，只对这一轮有效的条件、查出来的数字不记。不用向量检索：几十条的量级，摘要目录放得下，模型自己判断读哪条。`/memory` 看有哪些，改、删直接动文件或者跟它说。`MEMORY_ENABLED=false` 关掉。
+
 每次对话有一个会话目录 `sessions/<会话ID>/`：对话日志 `session.jsonl`、查询结果 `results.jsonl`、
 导出的 CSV `exports/`、沙箱的工作目录 `work/`（图在 `work/figures/`）。启动时会打印会话 ID，接着上次聊：
 
@@ -108,6 +110,7 @@ pytest
 │   ├── settings.py             配置（.env）
 │   ├── prompts.py              系统提示词
 │   ├── skills/                 ★ 技能目录（catalog.py）和内置技能（builtin/<名字>/SKILL.md）
+│   ├── memory.py               ★ 长期记忆：两层目录、一条一个文件、索引
 │   ├── cli.py                  终端界面（只管显示）
 │   │
 │   ├── core/                   ★ Agent 运行时（不 import 包外任何模块，tests/test_imports.py 守着）
@@ -148,6 +151,7 @@ pytest
 │   │   ├── paths.py            模型写的路径（/data/…、/work/…、相对路径）→ 宿主机路径，只放行两个目录
 │   │   ├── read_file.py        按行读文本文件、带行号（学 Claude Code 的 Read），一次能读完一份手册
 │   │   ├── load_skill.py       读一个技能的全文
+│   │   ├── memory.py           remember / read_memory
 │   │   └── view_image.py       把一张图发给模型看（模型能看图时才注册）
 │   │
 │   ├── session/                ★ 会话落盘（学 pi / Claude Code 的 JSONL 日志）
@@ -714,7 +718,7 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 |---|---|---|
 | **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 两层都已实现：10 万时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）；清理后还超 15 万，把较早的回合交给模型写成滚动摘要，保留最近约 2 万 token 原文（`CompactHistory`）。API 报上下文超长时强制整理一次再重试（写摘要的请求自己也超长，就丢掉最老的一半回合再写，最多 3 次）；自动压缩失败不中断这一轮，连续失败 3 次熔断（只清理不压缩，`/compact` 成功后恢复）；`/compact` 手动压缩 |
 | **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，用 `read_file` 按行号分页读（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，会话目录已经有了（`Session.root`），放在它下面的 `tool-results/` |
-| **长期记忆** | 新包 `memory/`；索引走 `Agent(session_context=...)`，召回的正文走一道 `ContextEdit` | 索引在会话开始时拼进系统提示词、会话中不变（变了缓存全废）；每次提问挑几条相关的，作为标记并进这条用户消息。设计见 refs 里的对比笔记 |
+| **长期记忆** | 已实现：`memory.py` + `remember` / `read_memory` | 记忆多到索引放不下时，再加 Claude Code 那种「每轮用小模型按摘要挑几条」；自动从对话里提取（Codex 的后台合并）等评测证明漏记再做 |
 | **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
 | **画图、统计** | 已实现：`tools/python/`、`tools/r/` | `run_python` / `run_r` 在沙箱里跑，图存进 `work/figures/`；meta 分析有 RevMan 5 模板 |
 | **沙箱表格编号** | 已实现：`tools/sql/results.py` + 两个内核的 `save_result()` | Python / R 里 `save_result(df, "标题")` 把表发给宿主，存进同一个结果仓库、接着 r 号往下编；回答里 `{{r5}}` 引用、`/save r5` 导出（没有 SQL 可重跑，直接写存下的行）、`load_result("r5")` 取回 |
@@ -729,7 +733,7 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 | **MCP 客户端** | 把外部 MCP 工具包装成 `Tool` 注册进来 | 外部工具的描述是不可信输入（可能夹带提示词注入），要能审批、按需开；参数照样过严格校验 |
 | **统一运行状态** | 从事件推导，学 pi 的 `AgentState` | 是否在运行、正在执行的工具调用、最近的错误；做 Web 界面时要用 |
 
-接下来的顺序：~~轮内检查点~~ → ~~Skills~~ → 长期记忆 → RAG（配 FinanceBench）→ MCP 客户端 → 统一运行状态 + 流式输出 + Web 界面。
+接下来的顺序：~~轮内检查点~~ → ~~Skills~~ → ~~长期记忆~~ → RAG（配 FinanceBench）→ MCP 客户端 → 统一运行状态 + 流式输出 + Web 界面。
 每一样都要有评测证明它有用。
 
 加**新工具**是最简单的扩展，三步：

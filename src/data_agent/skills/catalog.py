@@ -11,6 +11,8 @@ from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..frontmatter import split
+
 BUILTIN = Path(__file__).parent / "builtin"
 NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")     # 规范：小写字母、数字、连字符，和目录名一致
 
@@ -24,30 +26,11 @@ class Skill:
 
     def body(self) -> str:
         """正文（去掉开头的 frontmatter）。每次现读：改了 SKILL.md 不用重启。"""
-        return _split(self.path.read_text(encoding="utf-8-sig"))[1].strip()
-
-
-def _split(text: str) -> tuple[dict[str, str], str]:
-    """--- 包起来的 key: value 和后面的正文。只认单行的值，够用了，不引入 YAML 依赖。"""
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        raise ValueError("开头要有 --- 包起来的 name、description")
-    try:
-        end = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
-    except StopIteration:
-        raise ValueError("frontmatter 没有结尾的 ---") from None
-    fields = {}
-    for line in lines[1:end]:
-        if line.strip() and not line.lstrip().startswith("#"):
-            key, sep, value = line.partition(":")
-            if not sep:
-                raise ValueError(f"看不懂这一行：{line}")
-            fields[key.strip()] = value.strip().strip("'\"")
-    return fields, "\n".join(lines[end + 1:])
+        return split(self.path.read_text(encoding="utf-8-sig"))[1].strip()
 
 
 def _parse(path: Path) -> Skill:
-    fields, _ = _split(path.read_text(encoding="utf-8-sig"))
+    fields, _ = split(path.read_text(encoding="utf-8-sig"))
     name, description = fields.get("name", ""), fields.get("description", "")
     if name != path.parent.name or not NAME.fullmatch(name):
         raise ValueError(f"name 要和目录名一样，只用小写字母、数字、连字符（现在是 {name!r}）")

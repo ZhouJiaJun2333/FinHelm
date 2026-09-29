@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     project_dir: str = "."
     # 只读挂进沙箱 /data/ 的数据目录（手册、CSV…），留空 = 没有
     data_dir: str = ""
+    # 长期记忆：用户级在 <MEMORY_DIR>/memory/，项目级在 <MEMORY_DIR>/projects/<项目路径>/memory/
+    memory_enabled: bool = True
+    memory_dir: str = "~/.finhelm"
     db_statement_timeout_ms: int = 30_000
     # 每次对话一个子目录：日志、查询结果、导出的 CSV
     sessions_dir: str = "sessions"

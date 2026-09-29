@@ -82,7 +82,8 @@ def main(argv: list[str] | None = None) -> None:
     forced = _parse_sets(args.sets)
     overrides = {"openai_model": args.model} if args.model else {}
     # 优先级：.env < 题库级配置（项目目录、schema、工具开关）< --model / --set
-    settings = Settings(**{**case_set.settings, **overrides, **forced})
+    # 长期记忆默认关：本机的记忆不能混进评测。要测记忆的题库自己打开，每个 trial 一个空的记忆目录（runner）
+    settings = Settings(**{"memory_enabled": False, **case_set.settings, **overrides, **forced})
     model = settings.openai_model if settings.provider == "openai" else settings.anthropic_model
     graded = case_set.graded_cases
     # 会话覆盖的配置名写错了，model_copy 会悄悄忽略 —— 门槛没调低，整段会话就白跑了

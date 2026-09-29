@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import date
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -29,6 +30,8 @@ from .tools.paths import SandboxPaths
 from .tools.read_file import ReadFileTool
 from .tools.view_image import ViewImageTool
 from .tools.load_skill import LoadSkillTool
+from .tools.memory import ReadMemoryTool, RememberTool
+from .memory import Memory
 from .skills import BUILTIN, Skill, load_skills, usable
 
 
@@ -49,6 +52,7 @@ class Application:
     sandboxes: dict[str, Sandbox] = field(default_factory=dict)   # "python" / "r"
     skills: list[Skill] = field(default_factory=list)             # 能用的技能（要的工具都在）
     skill_problems: list[str] = field(default_factory=list)       # 写坏了、被跳过的 SKILL.md
+    memory: Memory | None = None                                  # 关了长期记忆是 None
     pending_uploads: list[Path] = field(default_factory=list)     # 上传了、还没告诉模型的文件
 
     def attach(self, paths: list[Path]) -> list[Path]:
@@ -167,6 +171,11 @@ def build_application(
     skills = usable(found, [t.name for t in tools])
     if skills:
         tools.register(LoadSkillTool(skills))
+    # 长期记忆：目录（每条一行摘要）会话开始时拼进系统提示词，正文 read_memory 按需读
+    memory = Memory.open(Path(settings.memory_dir).expanduser(), project) if settings.memory_enabled else None
+    if memory:
+        tools.register(RememberTool(memory))
+        tools.register(ReadMemoryTool(memory))
 
     # --- 上下文 ---
     # 触发线不超过「窗口 - 余量」：换成小窗口的模型时不能等到 10 万才动手
@@ -195,13 +204,14 @@ def build_application(
         llm=llm,
         tools=tools,
         system_prompt=build_system_prompt([t.name for t in tools], rules=rules,
-                                          data_dir=data_dir is not None, skills=skills),
+                                          data_dir=data_dir is not None, skills=skills,
+                                          memory=memory is not None),
         context=context,
         max_steps=settings.max_steps,
         approval_hook=approval_hook,
         finish_turn_hook=finish_turn_hook,
         on_event=on_event,
-        session_context=inspector.overview if inspector else None,
+        session_context=_session_context(inspector, memory),
         wrap_up_prompt=WRAP_UP_BEST_GUESS if settings.wrap_up == "best_guess" else WRAP_UP,
     )
 
@@ -209,4 +219,14 @@ def build_application(
         agent=agent, db=db, inspector=inspector,
         tools=tools, llm=llm, settings=settings, results=results, export_dir=export_dir,
         work_dir=work_dir, sandboxes=sandboxes, skills=skills, skill_problems=skill_problems,
+        memory=memory,
     )
+
+
+def _session_context(inspector: SchemaInspector | None, memory: Memory | None) -> Callable[[], str] | None:
+    """会话开始时现算一次、附在系统提示词后面的：库概览、长期记忆目录。/reset 之后重算（记忆可能变了）。"""
+    parts = [p for p in (inspector.overview if inspector else None,
+                         (lambda: memory.index(date.today())) if memory else None) if p]
+    if not parts:
+        return None
+    return lambda: "\n\n".join(p() for p in parts)

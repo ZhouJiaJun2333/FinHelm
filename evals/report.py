@@ -185,6 +185,16 @@ def summarize_sessions(case_set: CaseSet, sessions: list[SessionTrial]) -> dict[
             for st_id in dict.fromkeys(st.session_id for st in sessions)
         },
     }
+    everything = [t for st in sessions for t in st.turns]
+    checked = [t for t in everything if t.memory_ok is not None]
+    if checked or any(t.memory_writes for t in everything):
+        s["长期记忆"] = {
+            "记忆检查": len(checked),
+            "记忆检查通过": sum(bool(t.memory_ok) for t in checked),
+            "没通过": [f"{t.case_id} #{t.trial}：{t.memory_problems}" for t in checked if not t.memory_ok],
+            "平均每段写入": round(sum(len(t.memory_writes) for t in everything) / n, 2),
+            "平均每段读取": round(sum(t.memory_reads for t in everything) / n, 2),
+        }
     return s
 
 
@@ -253,6 +263,11 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
           if s.get("重复调用提醒") else []),
         "",
     ]
+    if mem := s.get("长期记忆"):
+        out += ["## 长期记忆", "",
+                f"- 记忆文件检查（该记的记了、不该记的没记、该删的删了）：通过 {mem['记忆检查通过']} / {mem['记忆检查']}",
+                f"- 平均每段 remember 成功 {mem['平均每段写入']} 次、read_memory {mem['平均每段读取']} 次",
+                *[f"- ❌ {x}" for x in mem["没通过"]], ""]
     if "会话" in s:
         ss = s["会话"]
         out += [
