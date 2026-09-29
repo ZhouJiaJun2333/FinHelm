@@ -9,7 +9,12 @@ import pytest
 pytest.importorskip("pymupdf")
 pytest.importorskip("numpy")
 
+import numpy as np
+
 from data_agent.rag import ChunkSpec, Document, Element, Index, IndexSpec, ParsedCache, SearchSpec
+from data_agent.rag import index as index_mod
+from data_agent.rag import parsers
+from data_agent.rag.embed_cache import EmbeddingCache, text_key
 from data_agent.rag.bm25 import BM25, _stem, tokenize
 from data_agent.rag.chunk import chunk_document
 from data_agent.rag.index import _fuse
@@ -69,13 +74,23 @@ def test_解析_页眉页码去掉_标题有章节路径_表格按列对齐(tmp_
     assert table.text.splitlines()[1] == "|---|---|---|---|"
 
 
-def test_解析结果缓存_存了读回来一样(tmp_path):
+def test_解析结果缓存_按内容不按文件名(tmp_path, monkeypatch):
     pdf = _pdf(tmp_path / "pdfs" / "X_2018_10K.pdf")
     cache = ParsedCache(tmp_path / "parsed")
     first = cache.get(pdf, meta={"company": "X"})
-    assert list((tmp_path / "parsed").glob("pymupdf-v*/X_2018_10K.jsonl"))
+    assert len(list((tmp_path / "parsed").glob("pymupdf-v*/*.jsonl"))) == 1
     again = cache.get(pdf, meta={"company": "X"})
     assert again.elements == first.elements and again.meta["company"] == "X"
+
+    calls = []
+    real = parsers.parse
+    monkeypatch.setattr(parsers, "parse", lambda path, parser="pymupdf": calls.append(path.name) or real(path, parser))
+    renamed = pdf.rename(pdf.with_name("Y_2018_10K.pdf"))
+    moved = cache.get(renamed)
+    assert calls == [] and moved.name == "Y_2018_10K", "改名不用重新解析，名字按现在的文件"
+
+    _pdf(pdf, pages=2)                                  # 原来的名字，换了内容
+    assert cache.get(pdf).pages == 2 and calls == ["X_2018_10K.pdf"], "同名换了内容要重新解析"
 
 
 # ================================================================ 分片
@@ -139,19 +154,96 @@ def test_RRF融合_只看名次():
 
 
 # ================================================================ 索引
-def test_建索引_有缓存_按文档过滤检索(tmp_path, monkeypatch):
-    docs = {"A_2018_10K": _doc(), "B_2018_10K": Document("B_2018_10K", [
-        Element("paragraph", "Line item capital purchases for company B.", 0)], pages=1)}
-    monkeypatch.setattr(ParsedCache, "get", lambda self, path, parser="pymupdf", meta=None: docs[path.stem])
+class FakeEmbedder:
+    """不加载模型：向量由文本哈希决定，记下每次编码了哪些文本。"""
+    encoded: list[str] = []
+
+    def __init__(self, name: str, max_length: int = 1024) -> None:
+        self.name, self.max_length = name, max_length
+
+    def embed(self, texts, *, query=False, progress=False):
+        type(self).encoded += list(texts)
+        rng = [np.random.default_rng(int(text_key(t)[:8], 16)).standard_normal(8) for t in texts]
+        return np.array(rng, dtype=np.float16).reshape(len(texts), 8)
+
+
+def _fake_docs(monkeypatch, tmp_path, docs: dict[str, Document]) -> list[Path]:
+    """PDF 文件只是占位（内容 = 文档正文，用来算哈希），解析直接返回 docs 里的。"""
+    monkeypatch.setattr(ParsedCache, "get",
+                        lambda self, path, parser="pymupdf", meta=None, sha="": docs[path.stem])
+    pdfs = []
+    for name, doc in docs.items():
+        path = tmp_path / "pdfs" / f"{name}.pdf"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(e.text for e in doc.elements), encoding="utf-8")
+        pdfs.append(path)
+    return pdfs
+
+
+def _one(text: str, name: str) -> Document:
+    return Document(name, [Element("paragraph", text, 0)], pages=1)
+
+
+def test_建索引_再同步没变的不动_按文档过滤检索(tmp_path, monkeypatch):
+    docs = {"A_2018_10K": _doc(), "B_2018_10K": _one("Line item capital purchases for company B.", "B_2018_10K")}
+    pdfs = _fake_docs(monkeypatch, tmp_path, docs)
     spec = IndexSpec(chunk=ChunkSpec("structure", max_tokens=80))
-    pdfs = [tmp_path / f"{n}.pdf" for n in docs]
-    index = Index.build(spec, pdfs, tmp_path / "index", ParsedCache(tmp_path))
-    assert (tmp_path / "index").glob("structure80+ctx-*/chunks.jsonl")
-    again = Index.build(spec, pdfs, tmp_path / "index", ParsedCache(tmp_path))
-    assert [c.text for c in again.chunks] == [c.text for c in index.chunks], "同样的配置直接读"
+    index = Index.sync(spec, pdfs, tmp_path / "index", ParsedCache(tmp_path))
+    assert sorted(index.changes.added) == ["A_2018_10K", "B_2018_10K"]
+    assert [c.id for c in index.chunks] == list(range(len(index.chunks))), "全局 id 连续"
+
+    chunked = []
+    monkeypatch.setattr(index_mod, "chunk_document", lambda *a, **k: chunked.append(1) or [])
+    again = Index.sync(spec, pdfs, tmp_path / "index", ParsedCache(tmp_path))
+    assert not chunked and str(again.changes) == "新增 0、更新 0、删除 0", "没变的不重新分片"
+    assert [c.text for c in again.chunks] == [c.text for c in index.chunks]
 
     search = SearchSpec(("bm25",), top_k=3)
     only_b = index.search("capital purchases", search, docs=["B_2018_10K"])
     assert only_b and {h.chunk.doc for h in only_b} == {"B_2018_10K"}
     with pytest.raises(ValueError, match="没有向量"):
         index.search("x", SearchSpec(("dense",)))
+
+
+def test_增量同步_增删改_嵌入缓存复用(tmp_path, monkeypatch):
+    monkeypatch.setattr(index_mod, "Embedder", FakeEmbedder)
+    FakeEmbedder.encoded = []
+    spec = IndexSpec(chunk=ChunkSpec("page"), embedder="fake/model")
+    docs = {n: _one(f"{n} revenue grew", n) for n in ("A", "B", "C")}
+    pdfs = _fake_docs(monkeypatch, tmp_path, docs)
+    first = Index.sync(spec, pdfs, tmp_path / "index", ParsedCache(tmp_path))
+    assert len(FakeEmbedder.encoded) == 3 and first.vectors.shape == (3, 8)
+    vec_a = first.vectors[0].copy()
+
+    # B 换内容、C 删掉、D 新增、A 只是修改时间变了
+    docs2 = {"A": docs["A"], "B": _one("B margin fell", "B"), "D": _one("D cash flow", "D")}
+    pdfs2 = _fake_docs(monkeypatch, tmp_path, docs2)
+    (tmp_path / "pdfs" / "C.pdf").unlink()
+    FakeEmbedder.encoded = []
+    second = Index.sync(spec, pdfs2, tmp_path / "index", ParsedCache(tmp_path))
+    assert (second.changes.added, second.changes.changed, second.changes.removed) == (["D"], ["B"], ["C"])
+    assert FakeEmbedder.encoded == ["B\nB margin fell", "D\nD cash flow"], "只编码新文本"
+    assert [c.doc for c in second.chunks] == ["A", "B", "D"] and second.vectors.shape == (3, 8)
+    assert (second.vectors[0] == vec_a).all()
+    folder = next((tmp_path / "index").glob("page+ctx-*"))
+    assert sorted(p.name for p in (folder / "docs").iterdir()) == ["A.jsonl", "A.npy", "B.jsonl", "B.npy",
+                                                                    "D.jsonl", "D.npy"]
+
+    # 换回 B 的旧内容：片文本和第一次一样，从嵌入缓存拿，不重新编码
+    _fake_docs(monkeypatch, tmp_path, {**docs2, "B": docs["B"]})
+    FakeEmbedder.encoded = []
+    third = Index.sync(spec, pdfs2, tmp_path / "index", ParsedCache(tmp_path))
+    assert third.changes.changed == ["B"] and FakeEmbedder.encoded == []
+    assert (third.vectors[1] == first.vectors[1]).all()
+
+
+def test_嵌入缓存_一批里重复的只编码一次_重开还在(tmp_path):
+    FakeEmbedder.encoded = []
+    cache = EmbeddingCache(tmp_path, FakeEmbedder("BAAI/bge-m3", 512))
+    vecs, new = cache.embed(["a", "b", "a"])
+    assert new == 2 and FakeEmbedder.encoded == ["a", "b"] and (vecs[0] == vecs[2]).all()
+    assert (tmp_path / "BAAI--bge-m3-L512" / "pack-0001.keys").is_file()
+    reopened = EmbeddingCache(tmp_path, FakeEmbedder("BAAI/bge-m3", 512))
+    again, new = reopened.embed(["b", "c"])
+    assert new == 1 and (again[0] == vecs[1]).all() and len(reopened) == 3
+    assert len(EmbeddingCache(tmp_path, FakeEmbedder("BAAI/bge-m3", 1024))) == 0, "截断长度不同是另一份缓存"

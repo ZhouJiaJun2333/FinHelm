@@ -774,6 +774,11 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
   512 token，表格按行拆、每块带表头，标题跟着内容走）。每片前面加「文档名 > 章节路径」（简化版 Contextual Retrieval）。
 - **召回**：BM25（手写倒排，分词学 Lucene 英文分析器）+ bge-m3 向量，RRF 融合；按文档过滤；
   bge-reranker-v2-m3 重排。模型本地跑（RTX 5070，15.8 万片编码 23 分钟）。
+- **增量更新**：索引是文件夹里 PDF 的镜像，`Index.sync` 只处理新增、改过、删掉的文档（按文件内容哈希判断；
+  大小和修改时间没变就不重新算哈希，学 git 的 index），每处理完一份更新清单，断了能接着做。三层缓存：
+  解析按文件内容（同名换了内容会重新解析，改名不用）、嵌入按「模型 + 片文本」（改分片或解析规则时，文字没变的片不重新编码）、
+  BM25 不存盘，加载时现建（全局 IDF 总是最新）。改了解析规则全量重建 368 份：23 分钟 → 24 秒（向量全部命中缓存），
+  检索结果逐题和原来一样。
 
 结果（证据页在前 5 片里的比例，hit@5；「本文档」= 只在题目问的那份里找，「全部」= 368 份混在一起）：
 
@@ -802,7 +807,7 @@ python -m evals.financebench.retrieval --embedder BAAI/bge-m3 --search bm25 --se
 | **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 两层都已实现：10 万时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）；清理后还超 15 万，把较早的回合交给模型写成滚动摘要，保留最近约 2 万 token 原文（`CompactHistory`）。API 报上下文超长时强制整理一次再重试（写摘要的请求自己也超长，就丢掉最老的一半回合再写，最多 3 次）；自动压缩失败不中断这一轮，连续失败 3 次熔断（只清理不压缩，`/compact` 成功后恢复）；`/compact` 手动压缩 |
 | **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，用 `read_file` 按行号分页读（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，会话目录已经有了（`Session.root`），放在它下面的 `tool-results/` |
 | **长期记忆** | 已实现：`memory.py` + `remember` / `read_memory` | 记忆多到索引放不下时，再加 Claude Code 那种「每轮用小模型按摘要挑几条」；自动从对话里提取（Codex 的后台合并）等评测证明漏记再做 |
-| **RAG** | 检索已实现：`rag/`（见「FinanceBench」一节） | 接进 Agent：`search_docs` / `read_doc` 两个工具，让模型自己决定搜什么、搜几次；增量更新（内容哈希、按文档存索引、嵌入缓存）；MinerU 作为对照解析器；图检索先留接口 |
+| **RAG** | 检索和增量更新已实现：`rag/`（见「FinanceBench」一节） | 接进 Agent：`search_docs` / `read_doc` 两个工具，让模型自己决定搜什么、搜几次；MinerU 作为对照解析器；图检索先留接口 |
 | **画图、统计** | 已实现：`tools/python/`、`tools/r/` | `run_python` / `run_r` 在沙箱里跑，图存进 `work/figures/`；meta 分析有 RevMan 5 模板 |
 | **沙箱表格编号** | 已实现：`tools/sql/results.py` + 两个内核的 `save_result()` | Python / R 里 `save_result(df, "标题")` 把表发给宿主，存进同一个结果仓库、接着 r 号往下编；回答里 `{{r5}}` 引用、`/save r5` 导出（没有 SQL 可重跑，直接写存下的行）、`load_result("r5")` 取回 |
 | **流式输出** | `llm/` 各 provider 加 `stream_chat()` | `LLMResponse` 不变，只是分块 yield |

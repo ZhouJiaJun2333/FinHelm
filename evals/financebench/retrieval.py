@@ -5,7 +5,8 @@
         --search bm25 --search dense --search bm25+dense --search "bm25+dense>BAAI/bge-reranker-v2-m3"
     python -m evals.financebench.retrieval --chunk fixed --chunk page --chunk structure     几种分片一起比
 
-建索引时的配置（--parser --chunk --max-tokens --no-context --embedder）每种组合建一次索引（有缓存），
+建索引时的配置（--parser --chunk --max-tokens --no-context --embedder）每种组合一个索引，增量同步：
+只处理新增、改过、删掉的 PDF（--docs 换了范围，索引也跟着增删），
 查询时的配置（--search）在每个索引上都跑一遍。两种范围：
     doc  只在这道题问的那份文档里找（相当于元数据过滤做对了）
     all  全部文档混在一起找（368 份）
@@ -91,7 +92,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--embedder", default="", help="比如 BAAI/bge-m3；不写就只建 BM25")
     ap.add_argument("--search", action="append", help="bm25 / dense / bm25+dense / bm25+dense>重排模型")
     ap.add_argument("--scope", default="doc,all")
-    ap.add_argument("--docs", choices=["all", "used"], default="all", help="all = 368 份都建索引；used = 只建题目用到的 84 份")
+    ap.add_argument("--docs", choices=["all", "used"], default="all",
+                    help="all = 368 份都建索引；used = 只建题目用到的 84 份（索引会删成这 84 份）")
     ap.add_argument("--label", default="")
     args = ap.parse_args(argv)
 
@@ -107,8 +109,8 @@ def main(argv: list[str] | None = None) -> None:
         spec = IndexSpec(args.parser, ChunkSpec(kind, max_tokens=args.max_tokens, contextualize=not args.no_context),
                          args.embedder)
         t = time.perf_counter()
-        index = Index.build(spec, pdfs, RAG / "index", parsed, meta, progress=True)
-        print(f"索引 {spec.label}：{len(index.chunks)} 片，{time.perf_counter() - t:.0f}s")
+        index = Index.sync(spec, pdfs, RAG / "index", parsed, meta, progress=True)
+        print(f"索引 {spec.label}：{len(index.chunks)} 片，{index.changes}，{time.perf_counter() - t:.0f}s")
         for search in searches:
             for scope in scopes:
                 r = evaluate(index, qs, search, scope)

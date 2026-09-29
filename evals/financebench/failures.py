@@ -61,8 +61,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--k", type=int, default=5)
     args = ap.parse_args(argv)
 
-    folder = args.index or max((d for d in (RAG / "index").glob("structure*") if (d / "vectors.npy").is_file()),
-                               key=lambda d: d.stat().st_mtime)
+    with_vectors = [d for d in (RAG / "index").glob("structure*") if next((d / "docs").glob("*.npy"), None)]
+    folder = args.index or max(with_vectors, key=lambda d: (d / "manifest.json").stat().st_mtime)
     index = Index.load(folder)
     print(f"索引 {index.spec.label}（{len(index.chunks)} 片）")
     pages: dict[tuple[str, int], str] = {}
