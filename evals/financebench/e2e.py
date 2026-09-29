@@ -4,13 +4,18 @@
     python -m evals.financebench.e2e                              四种都跑（50 道数值题，4 路并发）
     python -m evals.financebench.e2e --modes rag,oracle --limit 5 先拿便宜的试几道
     python -m evals.financebench.e2e --resume evals/runs/<目录>   断了接着跑（跑完的不重跑）
+    python -m evals.financebench.e2e --resume evals/runs/<目录> --modes rag_all,rag_rewrite   往上一轮里追加做法
 
-四种做法（--modes）：
+做法（--modes，默认前四种）：
     agentic   Agent + list_docs / search_docs / read_doc + run_python：自己找文档、决定搜什么搜几次（Agentic RAG）
     rag       传统 RAG：拿题目原文在题目那份文档里检索一次（BM25 + bge-m3 → 重排，前 5 片），一次调用回答。
               已知是哪份文档 = 元数据过滤做对了，比 agentic 占便宜（agentic 要自己用 list_docs 找）
     oracle    直接给证据页（数据集标注的那几页，我们自己解析的整页文字）：检索满分时的上限
     fulldoc   整份 10-K 放进上下文（平均约 12 万 token，最大约 29 万）：不检索，看长上下文够不够
+  不告诉是哪份文档（agentic 本来就没告诉它，自己用 list_docs 找）：
+    rag_all      拿题目原文在全部 368 份里检索一次，前 5 片
+    rag_rewrite  查询改写：先调一次模型把问题改成检索计划（公司、年份、类型 → 元数据过滤；再写 2~4 条用报表措辞的查询，
+                 要几个数就拆成几条），每条取前 3 片、轮流合并到最多 8 片，再调一次回答。固定两次调用，不能看了结果再搜
 
 题目：metrics-generated 那 50 道（答案都是一个数，都来自 10-K）。另外 100 道答案是文字，要用大模型判，以后再做。
 判分见 grade.py：只看最后一行「Final answer: <数>」，容差 max(1%, 标准答案末位的一半)。
@@ -23,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import threading
 import time
@@ -46,14 +52,29 @@ from . import data
 from .grade import grade
 from .retrieval import RERANKER, RUNS
 
-MODES = ("agentic", "rag", "oracle", "fulldoc")
+MODES = ("agentic", "rag", "oracle", "fulldoc", "rag_all", "rag_rewrite")
+DEFAULT_MODES = MODES[:4]
+RETRIEVAL_MODES = ("rag", "rag_all", "rag_rewrite")
 EMBEDDER = "BAAI/bge-m3"
 TOP_K = 5
+REWRITE_K = 3                         # rag_rewrite：每条查询取前几片
+REWRITE_MAX = 8                       # rag_rewrite：合并后最多几片
 MAX_STEPS = 20
 WAITS = (10, 30, 60, 120)             # 单次调用出错（网络、限流）后等多久重试
 
 SUFFIX = ("\n\nAnswer in the units the question asks for. End your reply with exactly one line:\n"
           "Final answer: <number>\n(only the number, with % if the question asks for a percentage)")
+REWRITE_SYSTEM = """You turn a question about company filings into a search plan for a library of SEC filings.
+Companies in the library: {companies}.
+Document types: 10k (annual report), 10q (quarterly report), 8k, Earnings (earnings call), 10k_annualreport.
+Reply with JSON only:
+{"company": <exactly one name from the list, or null>, "period": <fiscal year of the filing to search, integer, or null>,
+ "doc_type": <one type, or null>, "queries": [<2 to 4 search queries>]}
+- For questions spanning several years, period is the latest year (its annual report shows the earlier years too).
+- Word the queries the way the filing itself does: statement titles and line items
+  (e.g. "Consolidated Balance Sheets total current liabilities"), not the question's wording.
+- If the answer needs several figures (a ratio, a margin, a growth rate, an average), write one query per statement
+  or line item needed."""
 SYSTEM = ("You are a careful financial analyst. Answer the question using only the document content provided "
           "by the user. Numbers in parentheses in financial statements are negative. Show the figures you used "
           "and your calculation briefly.")
@@ -82,43 +103,105 @@ class Result:
     usage: dict = field(default_factory=dict)
     steps: int = 0                    # agentic：请求了几次模型
     tools: list[str] = field(default_factory=list)
+    extra: dict = field(default_factory=dict)   # 检索的几种：证据页覆盖了没有、改写出来的计划
 
 
-# ---------------------------------------------------------------- 上下文
-def context(mode: str, q: data.Question, collection) -> str:
-    """单次调用的三种：给模型看的文档内容。"""
+# ---------------------------------------------------------------- 检索
+def plan_query(q: data.Question, llm, collection) -> tuple[dict, Usage]:
+    """查询改写（rag_rewrite）：一次调用把问题改成检索计划 —— 元数据过滤条件（公司、年份、类型）+ 几条检索查询。"""
+    companies = sorted({str(e["meta"].get("company")) for e in collection.index().docs.values()})
+    system = REWRITE_SYSTEM.replace("{companies}", ", ".join(companies))
+    resp = _chat(llm, [Message.user(q.question)], system, f"rag_rewrite {q.id} 改写")
+    match = re.search(r"\{.*\}", resp.text, re.S)
+    try:
+        plan = json.loads(match.group()) if match else {}
+    except json.JSONDecodeError:
+        plan = {}
+    queries = [s for s in plan.get("queries") or [] if isinstance(s, str) and s.strip()][:4]
+    plan["queries"] = queries or [q.question]              # 改写失败就退回原问题
+    return plan, resp.usage
+
+
+def filter_docs(plan: dict, collection) -> list[str] | None:
+    """按改写出来的公司、年份、类型挑文档。类型对不上就放宽类型，还是没有就不过滤。"""
+    docs = collection.index().docs
+    same = lambda e, key: plan.get(key) in (None, "") or str(e["meta"].get(key)).lower() == str(plan[key]).lower()  # noqa: E731
+    if not plan.get("company"):
+        return None
+    for keys in (("company", "period", "doc_type"), ("company", "period")):
+        found = [name for name, e in docs.items() if all(same(e, k) for k in keys)]
+        if found:
+            return found
+    return None
+
+
+def retrieve(mode: str, q: data.Question, collection, llm) -> tuple[list, dict, Usage]:
+    """三种检索：rag 已知文档、rag_all 全库、rag_rewrite 先改写再检索。返回 (片, 记录, 改写花的 token)。"""
+    spec = lambda k: SearchSpec(("bm25", "dense"), reranker=RERANKER, top_k=k)  # noqa: E731
+    extra: dict = {}
+    usage = Usage()
     if mode == "rag":
-        hits = collection.search(q.question, SearchSpec(("bm25", "dense"), reranker=RERANKER, top_k=TOP_K), [q.doc])
+        hits = collection.search(q.question, spec(TOP_K), [q.doc])
+    elif mode == "rag_all":
+        hits = collection.search(q.question, spec(TOP_K), None)
+    else:
+        plan, usage = plan_query(q, llm, collection)
+        docs = filter_docs(plan, collection)
+        runs = [collection.search(query, spec(REWRITE_K), docs) for query in plan["queries"]]
+        hits, seen = [], set()
+        for rank in range(REWRITE_K):                       # 几条查询轮流取：每条的第 1 名先进，再第 2 名…
+            for run in runs:
+                if rank < len(run) and run[rank].chunk.id not in seen and len(hits) < REWRITE_MAX:
+                    seen.add(run[rank].chunk.id)
+                    hits.append(run[rank])
+        extra.update(plan=plan, filter=len(docs) if docs else None, doc_in_filter=bool(docs) and q.doc in docs)
+    got = {(h.chunk.doc, p) for h in hits for p in h.chunk.pages}
+    gold = set(q.evidence)
+    extra.update(evidence="全" if gold <= got else "部分" if gold & got else "无",
+                 right_doc=any(h.chunk.doc == q.doc for h in hits))
+    return hits, extra, usage
+
+
+def context(mode: str, q: data.Question, collection, llm=None) -> tuple[str, dict, Usage]:
+    """单次调用的几种：给模型看的文档内容。返回 (内容, 检索记录, 改写花的 token)。"""
+    if mode in RETRIEVAL_MODES:
+        hits, extra, usage = retrieve(mode, q, collection, llm)
         return "\n\n".join(f"[Excerpt {n}] {h.chunk.doc}, page {h.chunk.page + 1}"
                            + (f" | {' > '.join(h.chunk.section)}" if h.chunk.section else "") + f"\n{h.chunk.text}"
-                           for n, h in enumerate(hits, 1))
+                           for n, h in enumerate(hits, 1)), extra, usage
     doc = collection.document(q.doc)
     pages = sorted({p for d, p in q.evidence if d == q.doc}) if mode == "oracle" else range(doc.pages)
-    return "\n\n".join(f"=== {q.doc}, page {p + 1} ===\n{doc.page_text(p)}" for p in pages)
+    return "\n\n".join(f"=== {q.doc}, page {p + 1} ===\n{doc.page_text(p)}" for p in pages), {}, Usage()
 
 
 def prompt(mode: str, q: data.Question, ctx: str) -> str:
+    if mode in ("rag_all", "rag_rewrite"):                  # 不告诉是哪份文档
+        return f"Excerpts retrieved from a library of SEC filings:\n\n{ctx}\n\n---\n\nQuestion: {q.question}{SUFFIX}"
     what = {"rag": "Excerpts retrieved from", "oracle": "Relevant pages of", "fulldoc": "Full text of"}[mode]
     return f"{what} the document {q.doc}:\n\n{ctx}\n\n---\n\nQuestion: {q.question}{SUFFIX}"
 
 
 # ---------------------------------------------------------------- 跑一题
+def _chat(llm, messages: list[Message], system: str, what: str):
+    """调一次模型，网络、限流出错就等一会儿重试。"""
+    for n, wait in enumerate((*WAITS, None)):
+        try:
+            return llm.chat(messages=messages, system=system)
+        except Exception as exc:              # noqa: BLE001
+            if wait is None:
+                raise
+            print(f"  {what} 第 {n + 1} 次出错（{type(exc).__name__}），{wait}s 后重试", flush=True)
+            time.sleep(wait)
+
+
 def run_single(mode: str, q: data.Question, settings: Settings, collection) -> Result:
     r = Result(mode, q.id, q.doc, q.question, q.answer)
     started = time.perf_counter()
-    ctx = context(mode, q, collection)
-    r.context_tokens = approx_tokens(ctx)
     llm = build_provider(settings)
-    for n, wait in enumerate((*WAITS, None)):
-        try:
-            resp = llm.chat(messages=[Message.user(prompt(mode, q, ctx))], system=SYSTEM)
-            r.reply, r.usage, r.steps = resp.text, asdict(resp.usage), 1
-            break
-        except Exception as exc:              # noqa: BLE001 网络、限流：等一会儿再试
-            if wait is None:
-                raise
-            print(f"  {mode} {q.id} 第 {n + 1} 次出错（{type(exc).__name__}），{wait}s 后重试", flush=True)
-            time.sleep(wait)
+    ctx, r.extra, usage = context(mode, q, collection, llm)
+    r.context_tokens = approx_tokens(ctx)
+    resp = _chat(llm, [Message.user(prompt(mode, q, ctx))], SYSTEM, f"{mode} {q.id}")
+    r.reply, r.usage, r.steps = resp.text, asdict(usage + resp.usage), 1 + (mode == "rag_rewrite")
     r.seconds = time.perf_counter() - started
     return r
 
@@ -155,7 +238,7 @@ def run_one(mode: str, q: data.Question, settings: Settings, agent_settings: Set
 def main(argv: list[str] | None = None) -> None:
     load_dotenv(data.ROOT / ".env")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--modes", default=",".join(MODES))
+    ap.add_argument("--modes", default=",".join(DEFAULT_MODES), help=f"可选 {','.join(MODES)}")
     ap.add_argument("--workers", type=int, default=4, help="同时跑几题（几种做法共用）")
     ap.add_argument("--limit", type=int, default=0, help="只跑前几题（试跑用）")
     ap.add_argument("--only", default="", help="只跑这几题，逗号隔开的 financebench_id")
@@ -190,6 +273,9 @@ def main(argv: list[str] | None = None) -> None:
     meta = {"started": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "model": settings.openai_model
             if settings.provider == "openai" else settings.anthropic_model, "modes": modes, "questions": len(qs),
             "embedder": EMBEDDER, "reranker": RERANKER, "top_k": TOP_K, "max_steps": MAX_STEPS}
+    if (folder / "meta.json").is_file():       # --resume 追加别的做法：开始时间、模型按原来的，做法并起来
+        old = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+        meta = {**meta, **old, "modes": [m for m in MODES if m in {*old.get("modes", []), *modes}]}
     (folder / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"{len(qs)} 题 × {len(modes)} 种，要跑 {len(jobs)} 个（已完成 {len(done)}），结果在 {folder}", flush=True)
 
@@ -205,7 +291,7 @@ def main(argv: list[str] | None = None) -> None:
             mark = "出错" if r.error else ("✓" if r.ok else "✗")
             print(f"[{n}/{len(jobs)}] {r.mode:8s} {r.id} {mark} 答 {r.got} / 标准 {r.gold}"
                   f"（{r.seconds:.0f}s）{r.error[:80]}", flush=True)
-    write_report(folder, meta, qs, modes)
+    write_report(folder, meta, qs, meta["modes"])        # 目录里跑过的做法都进报告
 
 
 def dry_run(modes: list[str], qs: list[data.Question], collection, agent_settings: Settings) -> None:
@@ -218,12 +304,32 @@ def dry_run(modes: list[str], qs: list[data.Question], collection, agent_setting
             finally:
                 app.close()
             continue
-        sizes = [approx_tokens(context(mode, q, collection)) for q in qs]
+        if mode == "rag_rewrite":
+            print("  rag_rewrite：改写要调模型，dry-run 不跑")
+            continue
+        sizes = [approx_tokens(context(mode, q, collection)[0]) for q in qs]
         print(f"  {mode:8s} 上下文平均 {sum(sizes) // len(sizes):,} token，最大 {max(sizes):,}，合计 {sum(sizes):,}")
-    print(f"\n示例（rag，{qs[0].id}）：\n{prompt('rag', qs[0], context('rag', qs[0], collection))[:1500]}…")
+    print(f"\n示例（rag，{qs[0].id}）：\n{prompt('rag', qs[0], context('rag', qs[0], collection)[0])[:1500]}…")
 
 
 # ---------------------------------------------------------------- 报告
+def _retrieval_lines(latest: dict, ids: list[str], modes: list[str]) -> list[str]:
+    """检索的几种：证据页有没有都拿到、有没有拿到对的文档；改写的还看过滤定没定到对的文档。"""
+    out = []
+    for m in (m for m in modes if m in RETRIEVAL_MODES):
+        rs = [latest[(m, i)] for i in ids if (m, i) in latest and latest[(m, i)].get("extra")]
+        if not rs:
+            continue
+        ev = [r["extra"]["evidence"] for r in rs]
+        line = (f"- {m}：证据页全拿到 {ev.count('全')}、拿到一部分 {ev.count('部分')}、一页没有 {ev.count('无')}；"
+                f"片里有对的文档 {sum(r['extra']['right_doc'] for r in rs)}/{len(rs)}")
+        if m == "rag_rewrite":
+            line += (f"；过滤定到了对的文档 {sum(bool(r['extra'].get('doc_in_filter')) for r in rs)}，"
+                     f"没过滤 {sum(r['extra'].get('filter') is None for r in rs)}")
+        out.append(line)
+    return ["", "## 检索", "", *out] if out else []
+
+
 def _cell(r: dict | None) -> str:
     if r is None:
         return "—"
@@ -266,6 +372,7 @@ def write_report(folder: Path, meta: dict, qs: list[data.Question], modes: list[
                      f"{sum(bool(r['error']) for r in rs)} | {sum(r['note'] == '没写最终答案' for r in rs)} | "
                      f"{sum(prompt_tokens) // n:,} | {sum(r['usage'].get('output', 0) for r in rs) // n:,} | "
                      f"{sum(r['seconds'] for r in rs) / n:.0f} | {sum(r['steps'] for r in rs) / n:.1f} |")
+    lines += _retrieval_lines(latest, ids, modes)
     lines += ["", "## 逐题", "", "| 题 | 标准答案 | " + " | ".join(modes) + " |",
               "|:--|--:|" + "--:|" * len(modes)]
     for q in qs:
