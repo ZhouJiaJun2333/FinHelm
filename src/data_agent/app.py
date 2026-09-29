@@ -29,6 +29,7 @@ from .tools.sql.run_sql import RunSqlTool
 from .tools.paths import SandboxPaths
 from .tools.read_file import ReadFileTool
 from .tools.view_image import ViewImageTool
+from .tools.ask_user import AskUserTool
 from .tools.load_skill import LoadSkillTool
 from .tools.memory import ReadMemoryTool, RememberTool
 from .memory import Memory
@@ -176,6 +177,9 @@ def build_application(
     if memory:
         tools.register(RememberTool(memory))
         tools.register(ReadMemoryTool(memory))
+    # 中途问用户：界面拿到 AwaitingUser 去问，回答用 agent.resume() 接回来。没人可问的场合关掉
+    if settings.ask_user:
+        tools.register(AskUserTool())
 
     # --- 上下文 ---
     # 触发线不超过「窗口 - 余量」：换成小窗口的模型时不能等到 10 万才动手

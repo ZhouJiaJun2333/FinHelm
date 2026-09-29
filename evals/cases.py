@@ -39,6 +39,14 @@
 
 记忆文件拼成一段文字再匹配，每个文件前面一行「=== user/名字」或「=== project/名字」，要限定作用域就把它写进正则。
 
+中途提问（ask_user）：评测里没有真人，模型问了就按顺序拿 replies 当回答，用完了（或者没写）就回「用户没有回答，
+自己判断」。ask 写了就检查该问的问了、不该问的没问，和回答对不对分开统计。
+
+    {"id": "ask-001", "question": "我们现在有多少个大客户？",
+     "ask": true, "replies": ["累计实付超过 30 万元的客户"],    该问：口径查不到、几种理解差很多
+     "match": "answer", "answer_sql": "..."}                     按回答里给的口径判
+    {"id": "ask-004", "question": "2024 年华东区的销售额是多少？", "ask": false, ...}   不该问：项目约定写清楚了
+
 上传文件的题（research 题库，不连数据库）：先把文件传上去再提问，按回答和做了什么判分。
 
     {"id": "rs-01",
@@ -86,6 +94,8 @@ class Case:
     new_session: bool = False          # 这一轮开始前换一个新会话（长期记忆的题）
     memory_has: tuple[str, ...] = ()   # 这一轮之后记忆文件里必须有（正则）
     memory_lacks: tuple[str, ...] = ()  # 这一轮之后记忆文件里不能有
+    ask: bool | None = None            # 该不该问用户（ask_user）；None = 不检查
+    replies: tuple[str, ...] = ()      # 模型问了就按顺序拿这些当用户的回答
     # 上传文件的题（见开头）
     files: tuple[str, ...] = ()
     gold_values: tuple[float, ...] = ()
@@ -193,6 +203,8 @@ def _case(d: dict, case_id: str) -> Case:
         new_session=d.get("new_session", False),
         memory_has=tuple(d.get("memory_has", ())),
         memory_lacks=tuple(d.get("memory_lacks", ())),
+        ask=d.get("ask"),
+        replies=tuple(d.get("replies", ())),
         files=tuple(d.get("files", ())),
         gold_values=tuple(float(v) for v in d.get("gold_values", ())),
         expect_code=tuple(d.get("expect_code", ())),

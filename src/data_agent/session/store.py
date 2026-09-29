@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..core.agent import InterruptedTurn
+from ..core.agent import InterruptedTurn, PendingQuestion
 from ..core.context import Entry
 from .codec import decode, encode
 
@@ -122,6 +122,9 @@ class Session:
             self._append([])          # 第一轮就断了：先把会话建起来，--resume 才找得到
         data = {"version": VERSION, "base": self._written, "steps": turn.steps, "reason": turn.reason,
                 "entries": [encode(e) for e in turn.entries]}
+        if (q := turn.pending) is not None:        # 停在提问上：重启之后还要接着问
+            data["pending"] = {"call_id": q.call_id, "name": q.name, "question": q.question,
+                               "options": list(q.options)}
         tmp = self.checkpoint_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
         os.replace(tmp, self.checkpoint_path)     # 写到一半崩了也不会留下半个文件
@@ -133,7 +136,10 @@ class Session:
         try:
             data = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
             if data.get("version") == VERSION and data["base"] == self._written:
-                return InterruptedTurn(tuple(decode(e) for e in data["entries"]), data["steps"], data["reason"])
+                q = data.get("pending")
+                pending = PendingQuestion(q["call_id"], q["name"], q["question"], tuple(q["options"])) if q else None
+                return InterruptedTurn(tuple(decode(e) for e in data["entries"]), data["steps"], data["reason"],
+                                       pending)
         except (ValueError, KeyError):
             pass
         self.checkpoint_path.unlink()

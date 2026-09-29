@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     # 长期记忆：用户级在 <MEMORY_DIR>/memory/，项目级在 <MEMORY_DIR>/projects/<项目路径>/memory/
     memory_enabled: bool = True
     memory_dir: str = "~/.finhelm"
+    # 注册 ask_user：一轮做到一半问用户（口径有歧义、记忆和现在说的矛盾）。批处理这类没人回答的场合关掉
+    ask_user: bool = True
     db_statement_timeout_ms: int = 30_000
     # 每次对话一个子目录：日志、查询结果、导出的 CSV
     sessions_dir: str = "sessions"

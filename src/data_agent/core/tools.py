@@ -3,6 +3,7 @@
     · 参数用 pydantic 声明，JSON Schema 自动生成，模型传回的参数先过校验
     · 结果有两个读者：content 发给模型，details 只给界面（学 pi）
     · 工具失败就抛异常，execute() 变成 is_error 的结果喂回模型，不中断 Agent
+    · 要用户回答了才能继续（ask_user）就抛 NeedsUserInput：execute() 不兜它，Agent 把这一轮停在这里
     · 依赖在 __init__ 注入，不用全局变量
 """
 
@@ -17,6 +18,16 @@ from pydantic import BaseModel, ValidationError
 from .messages import INVALID_JSON_ARGS, Image
 
 MAX_OUTPUT_CHARS = 6000  # 单个工具结果的上限，防止一条结果吃掉半个上下文
+
+
+class NeedsUserInput(Exception):
+    """工具要用户回答一个问题才能继续。不是出错：Agent 把这一轮暂停（进度存成检查点），
+    用户的回答作为这次调用的结果接回去，同一轮接着跑。"""
+
+    def __init__(self, question: str, options: tuple[str, ...] = ()) -> None:
+        super().__init__(question)
+        self.question = question
+        self.options = options
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +109,8 @@ class Tool(ABC):
             if not isinstance(out, ToolOutput):
                 out = ToolOutput(str(out))
             return out.capped(self.max_output_chars)
+        except NeedsUserInput:
+            raise
         except Exception as exc:  # noqa: BLE001 —— 故意兜住所有异常喂回模型
             return ToolOutput.error(f"{type(exc).__name__}: {exc}").capped(self.max_output_chars)
 

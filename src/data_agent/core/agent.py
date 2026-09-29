@@ -34,12 +34,13 @@ from .events import (
     ToolStarted,
     TurnContinued,
     TurnResumed,
+    UserAsked,
     noop_sink,
 )
 from .messages import LLMResponse, Message, ToolCall, Usage
 from .provider import LLMProvider
 from .tokens import ContextEstimate, estimate_context, estimate_overhead
-from .tools import ToolRegistry
+from .tools import NeedsUserInput, ToolOutput, ToolRegistry
 
 # 执行工具前的审批钩子：返回 (是否放行, 拒绝理由)
 ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]
@@ -63,6 +64,30 @@ WRAP_UP = ("[步数用完了（{n} 步），不能再调用工具。请根据上
 INTERRUPTED_RESULT = "[中断：这次调用没有执行完，结果未知（可能已经执行了一部分）。需要的话先确认状态再继续。]"
 CONTINUE_NUDGE = "请从中断的地方继续完成上面的任务。"
 
+# 问了用户（ask_user）之后：回答就是那次调用的结果。没回答（/continue 不带话、评测里没有用户）就让它自己判断
+ANSWER = "用户回答：{answer}"
+NO_ANSWER = "[用户没有回答这个问题。按你认为最合理的理解继续，并在最后的回答里说明你做了什么假设。]"
+ONE_QUESTION = "[没有问出去：一次只能问一个问题。先等上一个问题的回答，还需要的话再问。]"
+
+
+@dataclass(frozen=True, slots=True)
+class PendingQuestion:
+    """一轮停下来等用户回答的那个问题。call_id 是那次工具调用，用户的回答就是它的结果。"""
+
+    call_id: str
+    name: str                      # 哪个工具问的
+    question: str
+    options: tuple[str, ...] = ()
+
+
+class AwaitingUser(Exception):
+    """run() / resume() 停下来等用户回答（工具抛了 NeedsUserInput）。不是出错：
+    历史照样回滚，进度在 agent.interrupted（pending 就是这个问题），resume(回答) 接着跑同一轮。"""
+
+    def __init__(self, pending: PendingQuestion) -> None:
+        super().__init__(pending.question)
+        self.pending = pending
+
 
 @dataclass(frozen=True, slots=True)
 class InterruptedTurn:
@@ -70,11 +95,13 @@ class InterruptedTurn:
 
     正式历史照样回滚、只放完整的回合；进度另外放在这里。entries 的形状一定合法：
     没执行完的工具调用补了「结果未知」，接回去不会出现没配对的 tool_call。
+    唯一的例外是 pending：停下来问用户的那次调用没有结果，resume() 用用户的回答补上。
     """
 
     entries: tuple[Entry, ...]     # 这一轮已有的条目，第一条是提问
     steps: int                     # 已经完成了几步（模型回复了几次）
     reason: str = ""               # 为什么断的；每一步存的检查点是空的
+    pending: PendingQuestion | None = None   # 停下来等用户回答的问题
 
     @property
     def question(self) -> str:
@@ -154,7 +181,10 @@ class Agent:
 
     # ------------------------------------------------------------------
     def run(self, user_input: str) -> str:
-        """跑一轮对话，返回最终回答。上一轮没跑完的进度作废。"""
+        """跑一轮对话，返回最终回答。上一轮没跑完的进度作废。
+
+        模型中途问用户（ask_user）时抛 AwaitingUser：拿到回答后 resume(回答)。
+        """
         self.interrupted = None
         return self._transaction(lambda: self._run_turn(user_input))
 
@@ -162,6 +192,7 @@ class Agent:
         """接着跑上一轮没跑完的（self.interrupted），从下一步开始，步数用剩下的。
 
         message：用户接着说的话（「别按月拆了，直接算全年」），接在进度后面；不给就直接接着跑。
+        停在提问上时（interrupted.pending），message 就是用户的回答，作为那次调用的结果；不给 = 没回答，让它自己判断。
         """
         turn = self.interrupted
         if turn is None:
@@ -180,19 +211,24 @@ class Agent:
         try:
             return body()
         except BaseException as exc:
-            progress = self._progress(type(exc).__name__ + (f": {exc}" if str(exc) else ""))
+            if isinstance(exc, AwaitingUser):
+                progress = self._progress("等用户回答", exc.pending)
+            else:
+                progress = self._progress(type(exc).__name__ + (f": {exc}" if str(exc) else ""))
             self.interrupted = progress if progress.entries else None
             if self.interrupted is not None:
                 self._save(self.interrupted)
             self.context.restore(self._turn_snapshot)
             raise
 
-    def _progress(self, reason: str = "") -> InterruptedTurn:
-        """这一轮到现在的进度，形状修成合法的：可以原样接回历史。"""
+    def _progress(self, reason: str = "", pending: PendingQuestion | None = None) -> InterruptedTurn:
+        """这一轮到现在的进度，形状修成合法的：可以原样接回历史（pending 那次调用留给回答）。"""
         entries = self.context.since(self._turn_snapshot)
         last = next((e for e in reversed(entries) if isinstance(e, Message) and e.role == "assistant"), None)
         if last is not None and last.tool_calls:
             answered = {e.tool_call_id for e in entries if isinstance(e, Message) and e.role == "tool"}
+            if pending is not None:
+                answered.add(pending.call_id)
             entries += [Message.tool_result(c.id, INTERRUPTED_RESULT, is_error=True)
                         for c in last.tool_calls if c.id not in answered]
         # 断在收尾那次请求上：收尾提示不留，接着跑时会重新收尾、重新加
@@ -200,7 +236,7 @@ class Agent:
         if entries and isinstance(entries[-1], Message) and entries[-1].meta.synthetic \
                 and entries[-1].content == wrap_up:
             entries.pop()
-        return InterruptedTurn(tuple(entries), self._steps_done, reason)
+        return InterruptedTurn(tuple(entries), self._steps_done, reason, pending)
 
     def _checkpoint(self) -> None:
         if self.checkpoint_hook is not None:
@@ -220,11 +256,20 @@ class Agent:
         return self._loop(1)
 
     def _resume_turn(self, turn: InterruptedTurn, message: str) -> str:
-        for entry in turn.entries:
+        entries = list(turn.entries)
+        if (asked := turn.pending) is not None:
+            # 回答就是提问那次调用的结果，放回同一批工具结果里（重启后补的提醒在更后面）
+            answer = Message.tool_result(asked.call_id, ANSWER.format(answer=message) if message else NO_ANSWER)
+            entries.insert(_after_tool_results(entries), answer)
+        for entry in entries:
             self.context.add(entry)
         self._steps_done = turn.steps
         self._calls_this_turn = Counter(_call_key(c) for e in turn.entries if isinstance(e, Message)
                                         for c in e.tool_calls)
+        if asked is not None:
+            self.on_event(TurnResumed(turn.steps, message))
+            self.on_event(ToolFinished(name=asked.name, content=answer.content, is_error=False, elapsed_ms=0))
+            return self._loop(turn.steps + 1)
         last = turn.entries[-1]
         if not message and turn.steps < self.max_steps and isinstance(last, Message) and last.role == "assistant":
             message = CONTINUE_NUDGE          # 历史不能以 assistant 结尾再请求
@@ -245,8 +290,12 @@ class Agent:
             self._steps_done = step
 
             requested_tools = bool(response.tool_calls)
+            asked: PendingQuestion | None = None
             for call in response.tool_calls:
-                self._execute(call)
+                asked = self._execute(call, asked) or asked
+            if asked is not None:
+                # 同一批的其它调用照常执行完了；停下来等回答，进度由 _transaction 存成检查点
+                raise AwaitingUser(asked)
 
             decision = self._decide_next(TurnOutcome(step, response, requested_tools))
             if decision.action == "end":
@@ -379,7 +428,9 @@ class Agent:
             return TurnDecision.keep_going() if outcome.requested_tools else TurnDecision.end()
         return self.finish_turn_hook(outcome)
 
-    def _execute(self, call: ToolCall) -> None:
+    def _execute(self, call: ToolCall, asked: PendingQuestion | None = None) -> PendingQuestion | None:
+        """执行一次调用，结果进历史。工具要问用户（NeedsUserInput）就返回这个问题，结果先空着。
+        asked：同一批里已经有一个问题在等了，再问的直接回绝。"""
         self.on_event(ToolStarted(name=call.name, arguments=call.arguments))
 
         if self.approval_hook is not None:
@@ -388,10 +439,16 @@ class Agent:
                 # 被拒绝也要给模型一条结果，否则 tool_call 没有配对，它也不知道发生了什么
                 self.context.add(Message.tool_result(call.id, f"用户拒绝执行：{reason}", is_error=True))
                 self.on_event(ToolDenied(name=call.name, reason=reason))
-                return
+                return None
 
         started = time.perf_counter()
-        result = self.tools.invoke(call.name, call.arguments)
+        try:
+            result = self.tools.invoke(call.name, call.arguments)
+        except NeedsUserInput as ask:
+            if asked is None:
+                self.on_event(UserAsked(call.name, ask.question, ask.options))
+                return PendingQuestion(call.id, call.name, ask.question, ask.options)
+            result = ToolOutput.error(ONE_QUESTION)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
         key = _call_key(call)
@@ -409,6 +466,7 @@ class Agent:
         ))
         if count >= REPEAT_WARN_AT:
             self.on_event(ToolCallRepeated(call.name, count))
+        return None
 
     def _render_system_prompt(self) -> str:
         """固定人设 + 会话上下文。一个会话只算一次：系统提示词一变，后面整段缓存都废了。"""
@@ -436,6 +494,14 @@ class Agent:
         self._system = None
         self._compaction_failures = 0
         self.interrupted = None
+
+
+def _after_tool_results(entries: list[Entry]) -> int:
+    """最后一条 assistant 消息和紧跟着它的那批工具结果之后的位置。"""
+    at = max(i for i, e in enumerate(entries) if isinstance(e, Message) and e.role == "assistant") + 1
+    while at < len(entries) and isinstance(entries[at], Message) and entries[at].role == "tool":
+        at += 1
+    return at
 
 
 def _call_key(call: ToolCall) -> str:

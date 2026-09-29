@@ -132,9 +132,24 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
         "按标签": {tag: {**rates(ts), "trials": len(ts)} for tag, ts in sorted(by_tag.items())},
         "逐题": per_case,
         **({"上传文件": file_stats(files)} if (files := [t for t in trials if t.no_sql]) else {}),
+        "提问": ask_stats(cases, trials),
         "技能": {"加载了技能的trial": sum(bool(t.skills) for t in trials),
                  "按技能": dict(Counter(s for t in trials for s in dict.fromkeys(t.skills)))},
         "只看最终答案": bool(trials) and all(t.official for t in trials),
+    }
+
+
+def ask_stats(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
+    """ask_user：问了几次；题目标了该不该问的，分开数问对没有。"""
+    expect = {c.id: c.ask for c in cases}
+    should = [t for t in trials if expect.get(t.case_id) is True]
+    should_not = [t for t in trials if expect.get(t.case_id) is False]
+    return {
+        "问了的trial": sum(bool(t.asks) for t in trials),
+        "提问次数": sum(len(t.asks) for t in trials),
+        "该问": len(should), "该问的问了": sum(bool(t.asks) for t in should),
+        "不该问": len(should_not), "不该问的问了": sum(bool(t.asks) for t in should_not),
+        "问题": [f"{t.case_id} #{t.trial}：{q}" for t in trials for q in t.asks],
     }
 
 
@@ -263,6 +278,13 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
           if s.get("重复调用提醒") else []),
         "",
     ]
+    if (ask := s.get("提问")) and (ask["提问次数"] or ask["该问"] or ask["不该问"]):
+        out += ["## 提问（ask_user）", "",
+                f"- {ask['问了的trial']} / {s['trials']} 个 trial 问了用户，共 {ask['提问次数']} 次",
+                *([f"- 该问的题：问了 {ask['该问的问了']} / {ask['该问']}"] if ask["该问"] else []),
+                *([f"- 不该问的题：问了 {ask['不该问的问了']} / {ask['不该问']}（越少越好）"] if ask["不该问"] else []),
+                *[f"- {q}" for q in ask["问题"][:30]],
+                *([f"- ……还有 {len(ask['问题']) - 30} 个"] if len(ask["问题"]) > 30 else []), ""]
     if mem := s.get("长期记忆"):
         out += ["## 长期记忆", "",
                 f"- 记忆文件检查（该记的记了、不该记的没记、该删的删了）：通过 {mem['记忆检查通过']} / {mem['记忆检查']}",

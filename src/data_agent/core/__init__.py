@@ -3,15 +3,15 @@
 core 不 import 包外的任何模块（tests/test_imports.py 守着）。
 """
 
-from .agent import Agent, InterruptedTurn
+from .agent import Agent, AwaitingUser, InterruptedTurn, PendingQuestion
 from .context import BaseContext, ClearOldToolResults, Context, ContextEdit, KeepRecentTurns
 from .messages import LLMResponse, Message, ToolCall, Usage
 from .provider import LLMProvider
-from .tools import Tool, ToolOutput, ToolRegistry
+from .tools import NeedsUserInput, Tool, ToolOutput, ToolRegistry
 
 __all__ = [
-    "Agent", "InterruptedTurn",
+    "Agent", "AwaitingUser", "InterruptedTurn", "PendingQuestion",
     "BaseContext", "Context", "ContextEdit", "ClearOldToolResults", "KeepRecentTurns",
     "Message", "ToolCall", "LLMResponse", "Usage",
-    "LLMProvider", "Tool", "ToolOutput", "ToolRegistry",
+    "LLMProvider", "NeedsUserInput", "Tool", "ToolOutput", "ToolRegistry",
 ]

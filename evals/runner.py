@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from data_agent.app import build_application
+from data_agent.core.agent import AwaitingUser
 from data_agent.core.events import (
     ContextEdited,
     ContextEditFailed,
@@ -37,6 +38,7 @@ from data_agent.core.events import (
     ToolFinished,
     ToolStarted,
     TurnResumed,
+    UserAsked,
     collect_sink,
 )
 from data_agent.core.messages import Message, Usage
@@ -136,6 +138,8 @@ class Trial:
     memory_reads: int = 0
     memory_ok: bool | None = None         # None = 这一轮没有 memory_has / memory_lacks
     memory_problems: str = ""
+    asks: list[str] = field(default_factory=list)       # ask_user 问了什么（评测里用 replies 回答）
+    ask_ok: bool | None = None            # 该问的问了、不该问的没问；None = 这题不检查
     final_answer: str = ""                # DABstep：回答最后「最终答案：」那一行，提交文件用它
     wrote_final: bool = False             # 写了「最终答案：」这一行（空列表的正确写法是后面留空）
     official: bool = False                # DABstep 的题：只按「最终答案」判
@@ -237,7 +241,7 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database | None,
             app.attach([CASES_DIR / f for f in case.files])
             question = app.with_uploads(question)
         try:
-            t.answer = answer(app.agent, question, resume=resume)
+            t.answer = answer(app.agent, question, replies=case.replies, resume=resume)
         finally:
             t.usage = app.agent.session_usage
             t.transcript = _transcript(app.agent.context.history)
@@ -253,21 +257,28 @@ def run_trial(case: Case, trial: int, settings: Settings, db: Database | None,
     if app is not None:
         app.close()                       # 沙箱是个容器
     digest(t, answered)
+    check_ask(t, case)
     show(t, results)
     grade(t, case, db, gold)
     return t
 
 
-def answer(agent, question: str, *, resume: bool = True, waits: tuple[float, ...] = RESUME_WAITS) -> str:
+def answer(agent, question: str, *, replies: tuple[str, ...] = (), resume: bool = True,
+           waits: tuple[float, ...] = RESUME_WAITS) -> str:
     """回答一道题。出错了等一会儿从断的地方接着跑（检查点），不整题重来。
 
     接着跑之后多走了几步就重新计数；同一步上连续失败 len(waits) + 1 次才放弃，抛出最后那个异常。
-    注入的错误不用等。
+    注入的错误不用等。模型问用户（ask_user）就按顺序拿 replies 当回答，用完了回空（= 没回答，自己判断）。
+    问一次占一步，问不停也会被步数上限挡住。
     """
     attempt, failures, last = (lambda: agent.run(question)), 0, -1
+    pending = iter(replies)
     while True:
         try:
             return attempt()
+        except AwaitingUser:
+            reply = next(pending, "")
+            attempt = lambda: agent.resume(reply)      # noqa: E731
         except Exception as exc:
             turn = agent.interrupted
             if not resume or turn is None:
@@ -324,12 +335,13 @@ def digest(t: Trial, events: list[Event]) -> None:
     t.wrapped_up = any(e.wrapped_up for e in limits)
     t.wrap_up_failure = next((e.failure for e in limits if e.failure), "")
     t.repeat_warnings = sum(isinstance(e, ToolCallRepeated) for e in events)
-    t.resumes = sum(isinstance(e, TurnResumed) for e in events)
+    t.resumes = _error_resumes(events)
     succeeded = [c for c in t.sql_calls if c.ok]
     t.final_sql = succeeded[-1].sql if succeeded else ""
     digest_sandbox(t, events)
     digest_skills(t, events)
     digest_memory(t, events)
+    digest_asks(t, events)
 
 
 SANDBOX_TOOLS = ("run_python", "run_r")
@@ -345,6 +357,27 @@ def digest_skills(t: Trial, events: list[Event]) -> None:
             if pending.name == "load_skill" and not e.is_error:
                 t.skills.append(str(pending.arguments.get("name", "")))
             pending = None
+
+
+def _error_resumes(events: list[Event]) -> int:
+    """出错后接着跑了几次。回答了提问之后的接着跑不算：那不是断了。"""
+    n, asked = 0, False
+    for e in events:
+        if isinstance(e, UserAsked):
+            asked = True
+        elif isinstance(e, TurnResumed):
+            n += not asked
+            asked = False
+    return n
+
+
+def digest_asks(t: Trial, events: list[Event]) -> None:
+    t.asks = [e.question for e in events if isinstance(e, UserAsked)]
+
+
+def check_ask(t: Trial, case: Case) -> None:
+    if case.ask is not None:
+        t.ask_ok = bool(t.asks) == case.ask
 
 
 def digest_memory(t: Trial, events: list[Event]) -> None:
@@ -501,7 +534,7 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
         start, before, t0 = len(events), app.agent.session_usage, time.perf_counter()
         injected = llm.injected if llm else 0
         try:
-            t.answer = answer(app.agent, case.question, resume=resume)
+            t.answer = answer(app.agent, case.question, replies=case.replies, resume=resume)
         except Exception as exc:  # noqa: BLE001
             t.error = f"{type(exc).__name__}: {exc}"
         t.elapsed_s = round(time.perf_counter() - t0, 1)
@@ -509,6 +542,7 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
         t.usage = _minus(app.agent.session_usage, before)
         turn_events = events[start:]
         digest(t, turn_events)
+        check_ask(t, case)
         if case.graded:
             show(t, app.results)     # 整段会话的结果：回答可以引用前面几轮的编号
         st.edits += [{"turn": n, "kind": e.kind, "before": e.tokens_before, "after": e.tokens_after}

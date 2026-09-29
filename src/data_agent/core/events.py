@@ -45,6 +45,15 @@ class ToolDenied:
 
 
 @dataclass(slots=True)
+class UserAsked:
+    """工具（ask_user）要用户回答一个问题，这一轮停在这里等。回答之后 TurnResumed、再补上这次调用的 ToolFinished。"""
+
+    name: str
+    question: str
+    options: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
 class TurnContinued:
     """finish_turn_hook 判定「还没完，接着干」，并补了一条推动消息。"""
 
@@ -113,7 +122,8 @@ class ContextOverflowed:
 
 
 Event = (
-    LLMResponded | ToolStarted | ToolFinished | ToolDenied | ToolCallRepeated | TurnContinued | TurnResumed
+    LLMResponded | ToolStarted | ToolFinished | ToolDenied | ToolCallRepeated | UserAsked
+    | TurnContinued | TurnResumed
     | StepLimitReached
     | ContextEdited | ContextEditFailed | AutoCompactionPaused | ContextOverflowed
 )

@@ -14,7 +14,7 @@ from typing import Any, Callable
 from dotenv import load_dotenv
 
 from .app import Application, build_application
-from .core.agent import InterruptedTurn
+from .core.agent import AwaitingUser, InterruptedTurn, PendingQuestion
 from .core.context import Entry, turn_starts
 from .core.errors import AgentError
 from .core.events import (
@@ -99,6 +99,9 @@ def make_console_sink(verbose: bool, results: ResultStore):
                         print(f"\n🤖 {results.expand(text, _show_table)}")
                     print(f"   ↳ 调用：{', '.join(calls)}")
                 print(f"   📊 {_usage_line(usage, window)}")
+
+            case ToolStarted(name="ask_user"):
+                pass                                  # 问题由 _ask 打印
 
             case ToolStarted(name=name, arguments=args):
                 shown = _preview(args, 400 if verbose else 200)
@@ -267,7 +270,10 @@ def handle_command(cmd: str, app: Application) -> bool:
             if app.agent.interrupted is None:
                 print("没有暂停或出错的回合可以接着跑。")
             else:
-                _run(app, lambda: app.agent.resume(arg.strip()))
+                answer = arg.strip()
+                if (q := app.agent.interrupted.pending) is not None:
+                    answer = pick_option(answer, q.options)
+                _run(app, lambda: app.agent.resume(answer))
 
         case "/context":
             _print_context(app)
@@ -346,12 +352,32 @@ def open_session(base: Path, resume: str | None) -> tuple[Session, list[Entry]]:
 
 
 def _handle(user_input: str, app: Application) -> None:
-    """处理一次输入：斜杠命令，或者让 Agent 跑一轮。"""
+    """处理一次输入：斜杠命令，回答它刚问的问题，或者让 Agent 跑一轮。"""
     if user_input.startswith("/"):
         if not handle_command(user_input, app):
             print(f"未知命令：{user_input}")
         return
+    turn = app.agent.interrupted
+    if turn is not None and turn.pending is not None:
+        answer = pick_option(user_input, turn.pending.options)
+        _run(app, lambda: app.agent.resume(answer))
+        return
     _run(app, lambda: app.agent.run(app.with_uploads(user_input)))
+
+
+def pick_option(text: str, options: tuple[str, ...]) -> str:
+    """回答提问：输入编号就是选那个选项，别的原样当回答。"""
+    if text.isdigit() and 1 <= int(text) <= len(options):
+        return options[int(text) - 1]
+    return text
+
+
+def _ask(q: PendingQuestion) -> None:
+    print(f"\n❓ {q.question}")
+    for n, option in enumerate(q.options, 1):
+        print(f"   {n}. {option}")
+    how = "输入编号选一个，或者直接写你的回答" if q.options else "直接写你的回答"
+    print(f"   （{how}；/continue 不回答、让它自己判断；/reset 放弃这一轮）")
 
 
 def _run(app: Application, turn: Callable[[], str]) -> None:
@@ -359,6 +385,8 @@ def _run(app: Application, turn: Callable[[], str]) -> None:
     try:
         answer = turn()
         print(f"\n💬 {app.results.expand(answer, _show_table)}")
+    except AwaitingUser as asked:
+        _ask(asked.pending)
     except KeyboardInterrupt:
         print("\n⏸ 已暂停本轮。" + _resume_hint(app.agent.interrupted))
     except AgentError as exc:
@@ -444,7 +472,10 @@ def _repl(app: Application, session: Session, results: ResultStore, settings: Se
     print(f"会话：{session.root}（下次 python run.py --resume {session.id} 接着聊）")
     if history:
         print(f"已恢复 {len(turn_starts(history))} 轮对话、{len(results.refs())} 个查询结果")
-    if (turn := app.agent.interrupted) is not None:
+    if (turn := app.agent.interrupted) is not None and turn.pending is not None:
+        print(f"⏸ 上次那一轮停在一个问题上：{_preview(turn.question, 60)}")
+        _ask(turn.pending)
+    elif turn is not None:
         why = f"（{turn.reason}）" if turn.reason else "（程序被关掉了）"
         print(f"⏸ 上次有一轮没跑完{why}：{_preview(turn.question, 60)}" + _resume_hint(turn))
 

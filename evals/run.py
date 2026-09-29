@@ -83,7 +83,8 @@ def main(argv: list[str] | None = None) -> None:
     overrides = {"openai_model": args.model} if args.model else {}
     # 优先级：.env < 题库级配置（项目目录、schema、工具开关）< --model / --set
     # 长期记忆默认关：本机的记忆不能混进评测。要测记忆的题库自己打开，每个 trial 一个空的记忆目录（runner）
-    settings = Settings(**{"memory_enabled": False, **case_set.settings, **overrides, **forced})
+    # ask_user 照产品默认开着（不看本机 .env）：评测里没人回答，runner 按题目的 replies 回，没写就回「自己判断」
+    settings = Settings(**{"memory_enabled": False, "ask_user": True, **case_set.settings, **overrides, **forced})
     model = settings.openai_model if settings.provider == "openai" else settings.anthropic_model
     graded = case_set.graded_cases
     # 会话覆盖的配置名写错了，model_copy 会悄悄忽略 —— 门槛没调低，整段会话就白跑了
@@ -129,6 +130,7 @@ def main(argv: list[str] | None = None) -> None:
         "db_schema": settings.db_schema,
         "prompt_sha1": prompt_sha1,
         "skills": skills,
+        "ask_user": settings.ask_user,
         "max_steps": settings.max_steps,
         "inject_errors": args.inject_errors,
         "resume": not args.no_resume,
