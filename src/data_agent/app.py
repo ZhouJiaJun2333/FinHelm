@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from .core.agent import WRAP_UP, Agent, ApprovalHook, FinishTurnHook, InterruptedTurn
+from .core.messages import ToolCall
 from .core.context import ClearOldToolResults, CompactHistory, Context, llm_summarizer
 from .core.events import Event, noop_sink
 from .core.messages import Message
@@ -31,6 +32,7 @@ from .tools.read_file import ReadFileTool
 from .tools.view_image import ViewImageTool
 from .tools.ask_user import AskUserTool
 from .tools.docs import ListDocsTool, ReadDocTool, SearchDocsTool
+from .mcp import Decision, McpApproval, McpClient, McpTool, connect, load_config
 from .tools.load_skill import LoadSkillTool
 from .tools.memory import ReadMemoryTool, RememberTool
 from .memory import Memory
@@ -57,6 +59,9 @@ class Application:
     skill_problems: list[str] = field(default_factory=list)       # 写坏了、被跳过的 SKILL.md
     memory: Memory | None = None                                  # 关了长期记忆是 None
     pending_uploads: list[Path] = field(default_factory=list)     # 上传了、还没告诉模型的文件
+    mcp_clients: dict[str, McpClient] = field(default_factory=dict)  # 这次起的 MCP 服务器（共用的不在这里）
+    mcp_tools: list[McpTool] = field(default_factory=list)
+    mcp_problems: list[str] = field(default_factory=list)            # 连不上的 MCP 服务器
 
     def attach(self, paths: list[Path]) -> list[Path]:
         """把用户的文件复制进 work_dir/inputs/（原件不给沙箱碰），返回复制后的路径。"""
@@ -86,13 +91,16 @@ class Application:
         return f"[程序重启过，{'、'.join(used)} 的内核是新的：之前定义的变量都没了，要用就重新读取或计算。]"
 
     def reset(self) -> None:
-        """清空对话，内核也换个空的：新对话不该看到上一段留下的变量。"""
+        """清空对话，内核也换个空的：新对话不该看到上一段留下的变量。MCP 服务器不用重起。"""
         self.agent.reset()
-        self.close()
+        for sandbox in self.sandboxes.values():
+            sandbox.close()
 
     def close(self) -> None:
         for sandbox in self.sandboxes.values():
             sandbox.close()
+        for client in self.mcp_clients.values():
+            client.close()
 
 
 def _size(path: Path) -> str:
@@ -110,12 +118,16 @@ def build_application(
     results: ResultStore | None = None,
     export_dir: Path | None = None,
     work_dir: Path | None = None,
+    mcp_clients: dict[str, McpClient] | None = None,
+    ask_mcp: Callable[[ToolCall, McpTool], Decision] | None = None,
 ) -> Application:
     """把所有零件拼成一个能跑的 Agent。
 
     settings 不传就从 .env 读；llm 可以塞假的（测试）。results 由界面先建好传进来
     （打印事件的 sink 要用它展开 {{r3}}）；export_dir、work_dir 不传用 settings 里的。
-    用完要 close()：沙箱是个容器。
+    mcp_clients：已经连好的 MCP 服务器（评测里几个 Agent 共用一个），按名字替代配置里的；
+    ask_mcp：外部工具第一次调用时怎么问用户，不给就只放行 autoApprove 里的。
+    用完要 close()：沙箱是个容器，MCP 服务器是子进程。
     """
     settings = settings or Settings()
     # 只有一个 Agent：项目的约定来自 AGENTS.md，有哪些工具只看环境里配了什么
@@ -176,6 +188,18 @@ def build_application(
         tools.register(ListDocsTool(collections))
         tools.register(SearchDocsTool(collections, SearchSpec(retrievers, reranker=settings.rag_reranker)))
         tools.register(ReadDocTool(collections))
+    # MCP：外部服务器的工具。连不上的记下来给界面提示，不让整个程序起不来
+    mcp_owned: dict[str, McpClient] = {}
+    mcp_tools: list[McpTool] = []
+    mcp_problems: list[str] = []
+    if settings.mcp_enabled:
+        config = Path(settings.mcp_config) if settings.mcp_config else project / ".mcp.json"
+        mcp_owned, mcp_tools, mcp_problems = connect(load_config(config), settings.mcp_timeout_s, mcp_clients)
+        for tool in mcp_tools:
+            tools.register(tool)
+    if mcp_tools:
+        approval_hook = _chain(McpApproval({t.name: t for t in mcp_tools}, ask_mcp), approval_hook)
+    mcp_servers = {t.server: t.client for t in mcp_tools}
     # 技能：项目的（.agents/skills/）盖过内置的；要的工具不在就不列，一个都没有就不注册 load_skill
     found, skill_problems = load_skills([project / ".agents" / "skills", BUILTIN])
     skills = usable(found, [t.name for t in tools])
@@ -219,7 +243,8 @@ def build_application(
         system_prompt=build_system_prompt([t.name for t in tools], rules=rules,
                                           data_dir=data_dir is not None, skills=skills,
                                           memory=memory is not None,
-                                          collections=[(c.name, len(c.files())) for c in collections]),
+                                          collections=[(c.name, len(c.files())) for c in collections],
+                                          mcp=[(name, c.instructions) for name, c in mcp_servers.items()]),
         context=context,
         max_steps=settings.max_steps,
         approval_hook=approval_hook,
@@ -233,8 +258,19 @@ def build_application(
         agent=agent, db=db, inspector=inspector,
         tools=tools, llm=llm, settings=settings, results=results, export_dir=export_dir,
         work_dir=work_dir, sandboxes=sandboxes, skills=skills, skill_problems=skill_problems,
-        memory=memory,
+        memory=memory, mcp_clients=mcp_owned, mcp_tools=mcp_tools, mcp_problems=mcp_problems,
     )
+
+
+def _chain(first: ApprovalHook, then: ApprovalHook | None) -> ApprovalHook:
+    """两道审批都过了才执行。"""
+    if then is None:
+        return first
+
+    def hook(call: ToolCall) -> tuple[bool, str]:
+        allowed, reason = first(call)
+        return then(call) if allowed else (allowed, reason)
+    return hook
 
 
 def _collections(settings: Settings) -> list[Collection]:

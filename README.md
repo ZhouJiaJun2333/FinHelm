@@ -427,6 +427,36 @@ Python 和 R 能做的事比 SQL 多得多，所以不在代码层面拦（拦�
 | 能力开关 | `OPENAI_VISION`：deepseek-flash 能看，deepseek-v4-pro 不能 —— 它收到图片不报错，只在回答里说 Unsupported Image，只能靠配置。关掉就不注册工具，提示词里那句也跟着没了；历史里已有的图发送时换成一句说明 |
 | 上下文 | 按面积估 token（宽×高/750，1568×980 ≈ 2000；DeepSeek 实测约 1000，宁可高估）；清理旧结果时图片一起换成占位；写摘要前换成 `[图片]` |
 
+### MCP：外部工具服务器
+
+项目目录放一个 `.mcp.json`（格式和 Claude Code 一样），外部 MCP 服务器的工具就注册进来，名字是 `mcp__服务器__工具`：
+
+```json
+{"mcpServers": {"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:/data"],
+                       "env": {"TOKEN": "${MY_TOKEN}"}, "autoApprove": ["read_text_file"]}}}
+```
+
+客户端是手写的（`src/data_agent/mcp/client.py`，只支持 stdio）：子进程 + JSON-RPC 2.0，每行一条消息，
+`initialize` → `notifications/initialized` → `tools/list`（分页）→ `tools/call`。一个读线程按 id 把响应交给等它的调用，
+服务器反过来发的 `ping` 就地回；stderr 另一个线程读掉（不读的话管道满了子进程会卡住），崩溃时报错带上最后几行。
+没用官方 SDK：它是异步的（anyio），我们的 Agent 是同步的，包一层事件循环反而更绕。
+
+外部服务器给的东西都当不可信输入：
+
+| 环节 | 怎么做 |
+|---|---|
+| 工具描述 | 进模型的工具表 = 别人往我们的提示词里写字：标上「外部 MCP 服务器 X 的工具」，截到 1500 字 |
+| 服务器说明 | 握手时给的 `instructions` 拼进系统提示词单独一节，说明是外部写的、只当用法参考 |
+| 参数 | 按服务器给的 JSON Schema 校验（手写：类型、必填、enum、上下限、嵌套）；顶层多传的参数也拒掉 —— 拼错的可选参数服务器多半悄悄忽略 |
+| 调用 | 第一次调用问用户：这次允许 / 本会话都允许 / 拒绝；`autoApprove` 里的不问；没人能问（评测、测试）的只放行 `autoApprove` |
+| 上下文清理 | 服务器自称只读（`readOnlyHint`）的旧结果才能被清掉 |
+| 连不上 | 程序照样起来，启动时和 `/mcp` 里提示原因 |
+
+反过来，FinHelm 也是一个 MCP 服务器：`python -m data_agent.mcp.server --docs-dir <目录>` 把知识库的
+`list_docs` / `search_docs` / `read_doc` 给任何 MCP 客户端用（Claude Code：`claude mcp add finhelm -- python -m data_agent.mcp.server --docs-dir ...`），
+用法说明作为 `instructions` 发过去，和我们自己提示词里的是同一段话。验收：FinanceBench 端到端的 `agentic_mcp` 做法关掉原生知识库工具、
+全走 MCP（`python -m evals.financebench.e2e --modes agentic_mcp`），分数应该和原生的一样。
+
 ---
 
 ## 数据库里有什么
@@ -864,10 +894,10 @@ python -m evals.financebench.e2e --resume evals/runs/<目录> --modes rag_all,ra
 | **中途问用户** | 已实现：`tools/ask_user.py`，`AwaitingUser` + `Agent.resume(回答)` | 以后 Web 界面：拿到 `AwaitingUser` 就把问题发给前端，下一个请求带着回答调 `resume` |
 | **轮内检查点** | 已实现：`Agent.resume` + `session/store.py` | 回滚照旧，进度另外存（`checkpoint.json`），`/continue` 从断的地方接着跑。以后要「整个评测跑到一半接着跑」（跳过做完的 trial），是另一件事 |
 | **Skills** | 已实现：`skills/` + `load_skill` | 系统提示词里只放目录（名字 + 一句话），模型需要时再读全文；以后要带脚本、参考文件，挂进沙箱的 /skills/ |
-| **MCP 客户端** | 把外部 MCP 工具包装成 `Tool` 注册进来 | 外部工具的描述是不可信输入（可能夹带提示词注入），要能审批、按需开；参数照样过严格校验 |
+| **MCP** | 已实现：`mcp/`（见「MCP：外部工具服务器」一节） | HTTP 传输（Streamable HTTP）；服务器发来的「工具列表变了」通知；resources / prompts |
 | **统一运行状态** | 从事件推导，学 pi 的 `AgentState` | 是否在运行、正在执行的工具调用、最近的错误；做 Web 界面时要用 |
 
-接下来的顺序：~~轮内检查点~~ → ~~Skills~~ → ~~长期记忆~~ → RAG（配 FinanceBench）→ MCP 客户端 → 统一运行状态 + 流式输出 + Web 界面。
+接下来的顺序：~~轮内检查点~~ → ~~Skills~~ → ~~长期记忆~~ → ~~RAG（配 FinanceBench）~~ → ~~MCP~~ → 统一运行状态 + 流式输出 + Web 界面。
 每一样都要有评测证明它有用。
 
 加**新工具**是最简单的扩展，三步：

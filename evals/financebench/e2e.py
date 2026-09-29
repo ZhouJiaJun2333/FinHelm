@@ -14,6 +14,9 @@
     fulldoc   整份 10-K 放进上下文（平均约 12 万 token，最大约 29 万）：不检索，看长上下文够不够
   不告诉是哪份文档（agentic 本来就没告诉它，自己用 list_docs 找）：
     rag_all      拿题目原文在全部 368 份里检索一次，前 5 片
+  走 MCP：
+    agentic_mcp  和 agentic 一样，但知识库工具不是原生注册的，而是起一个 FinHelm 的 MCP 服务器（python -m data_agent.mcp.server）、
+                 走 stdio 协议调用。验收 MCP 客户端：分数应该和 agentic 一样。几题并发共用一个服务器进程
     rag_rewrite  查询改写：先调一次模型把问题改成检索计划（公司、年份、类型 → 元数据过滤；再写 2~4 条用报表措辞的查询，
                  要几个数就拆成几条），每条取前 3 片、轮流合并到最多 8 片，再调一次回答。固定两次调用，不能看了结果再搜
 
@@ -28,8 +31,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -43,6 +48,7 @@ from dotenv import load_dotenv
 from data_agent.app import build_application
 from data_agent.core.events import Event, LLMResponded, ToolStarted
 from data_agent.core.messages import Message, Usage
+from data_agent.mcp import McpClient, load_config
 from data_agent.rag import IndexSpec, SearchSpec
 from data_agent.rag.chunk import approx_tokens
 from data_agent.settings import Settings, build_provider
@@ -52,7 +58,8 @@ from . import data
 from .grade import grade
 from .retrieval import RERANKER, RUNS
 
-MODES = ("agentic", "rag", "oracle", "fulldoc", "rag_all", "rag_rewrite")
+MODES = ("agentic", "rag", "oracle", "fulldoc", "rag_all", "rag_rewrite", "agentic_mcp")
+AGENT_MODES = ("agentic", "agentic_mcp")
 DEFAULT_MODES = MODES[:4]
 RETRIEVAL_MODES = ("rag", "rag_all", "rag_rewrite")
 EMBEDDER = "BAAI/bge-m3"
@@ -206,11 +213,12 @@ def run_single(mode: str, q: data.Question, settings: Settings, collection) -> R
     return r
 
 
-def run_agentic(q: data.Question, settings: Settings, work: Path) -> Result:
-    r = Result("agentic", q.id, q.doc, q.question, q.answer)
+def run_agentic(mode: str, q: data.Question, settings: Settings, work: Path,
+                mcp_clients: dict[str, McpClient] | None = None) -> Result:
+    r = Result(mode, q.id, q.doc, q.question, q.answer)
     events: list[Event] = []
     started = time.perf_counter()
-    app = build_application(settings, on_event=events.append, work_dir=work / q.id)
+    app = build_application(settings, on_event=events.append, work_dir=work / f"{mode}-{q.id}", mcp_clients=mcp_clients)
     try:
         r.reply = answer(app.agent, q.question + SUFFIX)
     finally:
@@ -222,10 +230,13 @@ def run_agentic(q: data.Question, settings: Settings, work: Path) -> Result:
     return r
 
 
-def run_one(mode: str, q: data.Question, settings: Settings, agent_settings: Settings, collection,
-            work: Path) -> Result:
+def run_one(mode: str, q: data.Question, settings: Settings, agent_settings: dict[str, Settings], collection,
+            work: Path, mcp_clients: dict[str, McpClient]) -> Result:
     try:
-        r = run_agentic(q, agent_settings, work) if mode == "agentic" else run_single(mode, q, settings, collection)
+        if mode in AGENT_MODES:
+            r = run_agentic(mode, q, agent_settings[mode], work, mcp_clients)
+        else:
+            r = run_single(mode, q, settings, collection)
     except Exception as exc:                  # noqa: BLE001 一题出错不影响别的，记下来，--resume 会重跑
         return Result(mode, q.id, q.doc, q.question, q.answer, error=f"{type(exc).__name__}: {exc}",
                       note=traceback.format_exc(limit=3))
@@ -261,12 +272,38 @@ def main(argv: list[str] | None = None) -> None:
 
     collection = data.collection(IndexSpec(embedder=EMBEDDER))
     settings = Settings(database_url="", memory_enabled=False, ask_user=False)
-    agent_settings = Settings(**AGENT_SETTINGS)
     if args.dry_run:
-        return dry_run(modes, qs, collection, agent_settings)
+        folder = Path(tempfile.mkdtemp(prefix="finhelm-e2e-"))
+    else:
+        folder = args.resume or RUNS / f"{datetime.now():%Y%m%d-%H%M%S}_financebench_e2e{'_' + args.label if args.label else ''}"
+        folder.mkdir(parents=True, exist_ok=True)
+    mcp_config = write_mcp_config(folder)
+    agent_settings = {"agentic": Settings(**AGENT_SETTINGS),
+                      "agentic_mcp": Settings(**{**AGENT_SETTINGS, "docs_dirs": "", "mcp_config": str(mcp_config)})}
+    mcp_clients = {}
+    if "agentic_mcp" in modes:                 # 几题共用一个服务器进程：各起一个的话每个都要加载索引和模型
+        mcp_clients = {c.name: McpClient(c, timeout=600).start() for c in load_config(mcp_config)}
+    try:
+        if args.dry_run:
+            return dry_run(modes, qs, collection, agent_settings, mcp_clients)
+        run_all(args, folder, modes, qs, settings, agent_settings, collection, mcp_clients)
+    finally:
+        for client in mcp_clients.values():
+            client.close()
 
-    folder = args.resume or RUNS / f"{datetime.now():%Y%m%d-%H%M%S}_financebench_e2e{'_' + args.label if args.label else ''}"
-    folder.mkdir(parents=True, exist_ok=True)
+
+def write_mcp_config(folder: Path) -> Path:
+    """agentic_mcp 用的 .mcp.json：起我们自己的服务器，路径、Python 都按这台机器的写。三个工具都自动放行（评测没人审批）。"""
+    path = folder / "mcp.json"
+    env = {"PYTHONPATH": os.pathsep.join([str(data.ROOT / "src"), str(data.ROOT)])}
+    server = {"command": sys.executable, "args": ["-X", "utf8", "-m", "data_agent.mcp.server", "--docs-dir", str(data.PDFS)],
+              "env": env, "cwd": str(data.ROOT), "autoApprove": ["list_docs", "search_docs", "read_doc"]}
+    path.write_text(json.dumps({"mcpServers": {"finhelm": server}}, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
+def run_all(args, folder: Path, modes: list[str], qs: list[data.Question], settings: Settings,
+            agent_settings: dict[str, Settings], collection, mcp_clients: dict[str, McpClient]) -> None:
     results_file = folder / "results.jsonl"
     done = {(d["mode"], d["id"]) for d in _read(results_file) if not d["error"]}
     jobs = [(m, q) for q in qs for m in modes if (m, q.id) not in done]      # 按题交错：几种做法一起往前走
@@ -279,10 +316,11 @@ def main(argv: list[str] | None = None) -> None:
     (folder / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"{len(qs)} 题 × {len(modes)} 种，要跑 {len(jobs)} 个（已完成 {len(done)}），结果在 {folder}", flush=True)
 
-    collection.index(progress=True)            # 先在主线程加载好，不让第一批题一起等
+    if set(modes) - {"agentic_mcp"}:           # 先在主线程加载好，不让第一批题一起等（走 MCP 的由服务器进程加载）
+        collection.index(progress=True)
     lock = threading.Lock()
     with ThreadPoolExecutor(args.workers) as pool:
-        futures = [pool.submit(run_one, m, q, settings, agent_settings, collection, folder / "work")
+        futures = [pool.submit(run_one, m, q, settings, agent_settings, collection, folder / "work", mcp_clients)
                    for m, q in jobs]
         for n, f in enumerate(as_completed(futures), 1):
             r = f.result()
@@ -294,13 +332,14 @@ def main(argv: list[str] | None = None) -> None:
     write_report(folder, meta, qs, meta["modes"])        # 目录里跑过的做法都进报告
 
 
-def dry_run(modes: list[str], qs: list[data.Question], collection, agent_settings: Settings) -> None:
+def dry_run(modes: list[str], qs: list[data.Question], collection, agent_settings: dict[str, Settings],
+            mcp_clients: dict[str, McpClient]) -> None:
     print(f"{len(qs)} 题，判分器自检通过")
     for mode in modes:
-        if mode == "agentic":
-            app = build_application(agent_settings)
+        if mode in AGENT_MODES:
+            app = build_application(agent_settings[mode], mcp_clients=mcp_clients)
             try:
-                print(f"  agentic：工具 {[t.name for t in app.tools]}，最多 {MAX_STEPS} 步")
+                print(f"  {mode}：工具 {[t.name for t in app.tools]}，最多 {MAX_STEPS} 步")
             finally:
                 app.close()
             continue

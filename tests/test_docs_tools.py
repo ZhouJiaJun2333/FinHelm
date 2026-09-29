@@ -134,3 +134,28 @@ def test_文档目录不存在_或者重名(tmp_path):
     a.mkdir(parents=True), b.mkdir(parents=True)
     with pytest.raises(ValueError, match="同名"):
         build_application(_settings(tmp_path, docs_dirs=f"{a};{b}"), llm=ScriptedProvider())
+
+
+# ================================================================ 通过 MCP
+def test_知识库的MCP服务器_子进程起起来_客户端连上去搜(tmp_path):
+    """真的起 python -m data_agent.mcp.server，用我们的客户端走 stdio 协议。只用 BM25，不加载模型。"""
+    import os
+    import sys
+
+    from data_agent.mcp import McpClient, McpTool, ServerConfig
+
+    docs = _library(tmp_path)
+    root = Path(__file__).resolve().parents[1]
+    env = {"PYTHONPATH": os.pathsep.join([str(root / "src"), str(root)]), "RAG_DIR": str(tmp_path / "rag"),
+           "RAG_EMBEDDER": "", "RAG_RERANKER": ""}
+    client = McpClient(ServerConfig("finhelm", sys.executable, ("-X", "utf8", "-m", "data_agent.mcp.server",
+                                                                "--docs-dir", str(docs)), env), timeout=60).start()
+    try:
+        assert "知识库里的文档（reports，3 份）" in client.instructions
+        tools = {t.remote_name: t for t in (McpTool(client, s) for s in client.list_tools())}
+        assert set(tools) == {"list_docs", "search_docs", "read_doc"} and tools["search_docs"].rerunnable
+        out = tools["search_docs"].execute({"query": "purchases of property", "docs": ["3M_2018_10K"]})
+        assert not out.is_error and "[1] 3M_2018_10K 第 2 页" in out.content
+        assert tools["read_doc"].execute({"doc": "3M_2018_10K", "page": 9}).is_error
+    finally:
+        client.close()

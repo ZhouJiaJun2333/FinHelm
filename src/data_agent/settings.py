@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # 知识库（RAG）：要检索的文档目录（财报、合同…的 PDF），几个用 ; 隔开，知识库名 = 目录名。
     # 配了才有 list_docs / search_docs / read_doc。索引跟着目录走：几个项目挂同一个目录，共用一份索引
     docs_dirs: str = ""
+    # MCP：外部工具服务器（stdio）。配置默认读 <PROJECT_DIR>/.mcp.json，MCP_CONFIG 指定别的文件。
+    # 外部工具第一次调用要用户同意，配置里 autoApprove 的不用问
+    mcp_enabled: bool = True
+    mcp_config: str = ""
+    mcp_timeout_s: int = 120
     # 索引、解析缓存、向量缓存放哪（文档多了有几个 G，C 盘紧就改到别的盘）
     rag_dir: str = "~/.finhelm/rag"
     # 嵌入模型（sentence-transformers 能加载的），留空 = 只用 BM25；重排模型留空 = 不重排。没有显卡两个都建议留空

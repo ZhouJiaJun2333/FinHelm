@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shlex
 import sys
@@ -32,7 +33,8 @@ from .core.events import (
     TurnContinued,
     TurnResumed,
 )
-from .core.messages import Message, Usage
+from .core.messages import Message, ToolCall, Usage
+from .mcp import Decision, McpTool
 from .memory import SCOPES, age
 from .session import Session
 from .settings import Settings
@@ -56,6 +58,7 @@ BANNER = """
 │  /save    把最近的结果存成 CSV（/save r3 指定编号） │
 │  /skills  看有哪些技能        /skill:名字 按技能做  │
 │  /memory  看长期记忆（改、删直接动文件，或跟我说）  │
+│  /mcp     看外部 MCP 服务器和它们的工具             │
 │  /reset   清空对话            /exit    退出         │
 └─────────────────────────────────────────────────────┘"""
 
@@ -293,6 +296,9 @@ def handle_command(cmd: str, app: Application) -> bool:
         case "/memory":
             _print_memory(app)
 
+        case "/mcp":
+            _print_mcp(app)
+
         case _ if name.startswith("/skill:"):
             _run_skill(name.removeprefix("/skill:"), arg, app)
 
@@ -307,6 +313,34 @@ def handle_command(cmd: str, app: Application) -> bool:
         case _:
             return False
     return True
+
+
+def _print_mcp(app: Application) -> None:
+    if not app.mcp_tools and not app.mcp_problems:
+        print("没有配 MCP 服务器（项目目录的 .mcp.json，或者 MCP_CONFIG 指定的文件）。")
+    servers: dict[str, list] = {}
+    for tool in app.mcp_tools:
+        servers.setdefault(tool.server, []).append(tool)
+    for name, tools in servers.items():
+        auto = tools[0].client.config.auto_approve
+        print(f"  · {name}：{len(tools)} 个工具")
+        for t in tools:
+            print(f"      {t.remote_name}{'（自动放行）' if t.remote_name in auto else ''}")
+    for problem in app.mcp_problems:
+        print(f"  ⚠️ {problem}")
+
+
+def ask_mcp(call: ToolCall, tool: McpTool) -> Decision:
+    """外部工具第一次调用：给用户看参数，问一下。"""
+    args = json.dumps(call.arguments, ensure_ascii=False)
+    print(f"\n🔌 要调用外部 MCP 服务器 {tool.server} 的工具 {tool.remote_name}，参数：{_preview(args, 300)}")
+    while True:
+        try:
+            choice = input("   1. 这次允许　2. 本会话都允许　3. 拒绝 > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return "deny"
+        if choice in ("1", "2", "3"):
+            return {"1": "once", "2": "session", "3": "deny"}[choice]
 
 
 def _print_memory(app: Application) -> None:
@@ -421,7 +455,7 @@ def main() -> None:
     try:
         app = build_application(settings, on_event=make_console_sink(args.verbose, results),
                                 results=results, export_dir=session.exports_dir,
-                                work_dir=session.work_dir)
+                                work_dir=session.work_dir, ask_mcp=ask_mcp)
     except Exception as exc:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")
@@ -469,6 +503,10 @@ def _repl(app: Application, session: Session, results: ResultStore, settings: Se
         print(f"技能：{', '.join(s.name for s in app.skills)}（/skills 查看）")
     for problem in app.skill_problems:
         print(f"⚠️ 跳过了一个技能 {problem}")
+    if app.mcp_tools:
+        print(f"MCP：{', '.join(sorted({t.server for t in app.mcp_tools}))}（/mcp 查看）")
+    for problem in app.mcp_problems:
+        print(f"⚠️ MCP 服务器没连上：{_preview(problem, 200)}")
     print(f"会话：{session.root}（下次 python run.py --resume {session.id} 接着聊）")
     if history:
         print(f"已恢复 {len(turn_starts(history))} 轮对话、{len(results.refs())} 个查询结果")

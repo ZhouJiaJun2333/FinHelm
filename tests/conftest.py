@@ -12,4 +12,5 @@ def _isolated_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMORY_DIR", str(tmp_path / "finhelm-home"))
     monkeypatch.setenv("ASK_USER", "false")
     monkeypatch.setenv("DOCS_DIRS", "")
+    monkeypatch.setenv("MCP_ENABLED", "false")
     monkeypatch.setenv("RAG_DIR", str(tmp_path / "finhelm-rag"))
