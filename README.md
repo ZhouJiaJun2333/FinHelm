@@ -757,6 +757,44 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 
 ---
 
+### FinanceBench：财报文档检索（RAG，进行中）
+
+[FinanceBench](https://github.com/patronus-ai/financebench) 开源的 150 题：美股公司的 10-K / 10-Q / 8-K，
+每题标了证据在哪份文档的哪一页。先只测检索（证据页有没有被搜出来），不调大模型、不花钱；
+端到端（Agent 用检索工具答题）是下一步。代码在 `src/data_agent/rag/`，评测在 `evals/financebench/`。
+
+每一环都可配置，配置分两类：**建索引时**（解析器、分片、嵌入模型）改了要重建，按指纹各存一个目录；
+**查询时**（召回路数、RRF、重排、返回几条）改了立刻生效。
+
+- **解析**（学 Unstructured / Docling 的元素模型）：PDF → 一串有类型的元素（标题、段落、表格、页眉页脚），
+  带页码和章节路径（`PART II > Item 8 > Consolidated Statement of Cash Flows`）。手写的版面分析：
+  同一水平线的文字拼成一行、空隙大的分列（直接 `get_text()` 会把表格一格一行打散，科目和数字对不上）；
+  在很多页边缘重复出现的是页眉页脚；数字右对齐，按右边缘定列（某年没数不会错位）。368 份 PDF 两分钟。
+- **分片**：`fixed`（朴素滑窗）/ `page`（一页一片）/ `structure`（学 Docling 的 HybridChunker：同章节合并到
+  512 token，表格按行拆、每块带表头，标题跟着内容走）。每片前面加「文档名 > 章节路径」（简化版 Contextual Retrieval）。
+- **召回**：BM25（手写倒排，分词学 Lucene 英文分析器）+ bge-m3 向量，RRF 融合；按文档过滤；
+  bge-reranker-v2-m3 重排。模型本地跑（RTX 5070，15.8 万片编码 23 分钟）。
+
+结果（证据页在前 5 片里的比例，hit@5；「本文档」= 只在题目问的那份里找，「全部」= 368 份混在一起）：
+
+| 做法 | 本文档 hit@5 | 本文档 hit@10 | 全部 hit@5 |
+|:--|--:|--:|--:|
+| 朴素滑窗 + BM25（最初的分词） | 30% | 39% | 10% |
+| 同上，分词改成 Lucene 的（停用词、字母数字拆开、词形还原） | 38% | 49% | 13% |
+| 按结构分片 + BM25 | 47% | 59% | 15% |
+| + bge-m3 向量（只用向量） | 55% | 71% | 34% |
+| BM25 + 向量，RRF 融合 | 65% | 75% | 34% |
+| **+ 重排** | **76%** | **85%** | **54%** |
+
+- BM25 败在用词不匹配：问题说「capital expenditure」，财报写「Purchases of property, plant and equipment」。
+  向量补上了这块，分析师口吻的题（domain-relevant）从 24% 到 64%（加重排后）。
+- 融合比任何单独一路都好：两路找到的是不同的页。重排是提升最大的一步，代价是每题 0.3 秒 → 0.9 秒。
+- 全部混在一起时最好也只有 54%，第一片来自正确文档的 71%：先按公司、年份定到那份文档最值钱。
+
+```bash
+python -m evals.financebench.retrieval --embedder BAAI/bge-m3 --search bm25 --search dense --search bm25+dense --search "bm25+dense>"
+```
+
 ## 下一步扩展（插槽都留好了）
 
 | 想加的东西 | 动哪里 | 大致做法 |
@@ -764,7 +802,7 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 | **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 两层都已实现：10 万时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）；清理后还超 15 万，把较早的回合交给模型写成滚动摘要，保留最近约 2 万 token 原文（`CompactHistory`）。API 报上下文超长时强制整理一次再重试（写摘要的请求自己也超长，就丢掉最老的一半回合再写，最多 3 次）；自动压缩失败不中断这一轮，连续失败 3 次熔断（只清理不压缩，`/compact` 成功后恢复）；`/compact` 手动压缩 |
 | **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，用 `read_file` 按行号分页读（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，会话目录已经有了（`Session.root`），放在它下面的 `tool-results/` |
 | **长期记忆** | 已实现：`memory.py` + `remember` / `read_memory` | 记忆多到索引放不下时，再加 Claude Code 那种「每轮用小模型按摘要挑几条」；自动从对话里提取（Codex 的后台合并）等评测证明漏记再做 |
-| **RAG** | 优先做成一个 `retrieve` 工具 | 让模型自己决定何时检索，比自动注入更灵活；向量可以直接存在这个 pgvector 库里 |
+| **RAG** | 检索已实现：`rag/`（见「FinanceBench」一节） | 接进 Agent：`search_docs` / `read_doc` 两个工具，让模型自己决定搜什么、搜几次；增量更新（内容哈希、按文档存索引、嵌入缓存）；MinerU 作为对照解析器；图检索先留接口 |
 | **画图、统计** | 已实现：`tools/python/`、`tools/r/` | `run_python` / `run_r` 在沙箱里跑，图存进 `work/figures/`；meta 分析有 RevMan 5 模板 |
 | **沙箱表格编号** | 已实现：`tools/sql/results.py` + 两个内核的 `save_result()` | Python / R 里 `save_result(df, "标题")` 把表发给宿主，存进同一个结果仓库、接着 r 号往下编；回答里 `{{r5}}` 引用、`/save r5` 导出（没有 SQL 可重跑，直接写存下的行）、`load_result("r5")` 取回 |
 | **流式输出** | `llm/` 各 provider 加 `stream_chat()` | `LLMResponse` 不变，只是分块 yield |
