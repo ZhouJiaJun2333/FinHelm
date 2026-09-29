@@ -806,6 +806,30 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 python -m evals.financebench.retrieval --embedder BAAI/bge-m3 --search bm25 --search dense --search bm25+dense --search "bm25+dense>"
 ```
 
+**端到端**（`evals/financebench/e2e.py`）：同一批题、同一个模型（deepseek-flash）、同一种判法，比四种给模型看文档的做法。
+题目是 metrics-generated 那 50 道（答案都是一个数，都来自 10-K）；只判最后一行「Final answer」，
+容差 max(1%, 标准答案末位的一半)。
+
+| 做法 | 答对 | 平均输入 token | 平均步数 |
+|:--|--:|--:|--:|
+| 传统 RAG（已知文档，检索一次，前 5 片） | 40/50 = 80% | 3.0k | 1 |
+| 直接给证据页（检索满分的上限） | 48/50 = 96% | 1.3k | 1 |
+| 整份 10-K 放进上下文（平均 12 万、最大 30 万 token） | 48/50 = 96% | 141k | 1 |
+| **Agentic RAG**（自己 list_docs 找文档、搜几次、要时读整页、run_python 算） | **48/50 = 96%** | **24.9k** | 3.9 |
+
+- Agentic RAG 追平了「直接给证据页」这个上限，输入只有整份放进去的 1/6；它还得自己找是哪份文档，传统 RAG 是直接告诉它的。
+- 传统 RAG 错的 8 题（去掉下面两题）都是证据没搜全：这类指标要两张表（比如固定资产周转率 = 利润表的收入 ÷ 资产负债表的固定资产），
+  题目原文检索一次，前 5 片常常只命中一张表。50 题里证据页全被覆盖的只有 27 题。另有 1 题上下文不够，模型思考到输出上限，回答为空。
+  Agentic 平均搜 1.9 次，缺哪张表就再搜哪张。
+- 四种做法都错的 2 题不是检索的问题：一题标准答案舍入有误（股息 389 百万美元 = 0.389 十亿，标准答案写 0.40）；
+  一题是净利润的口径（标准答案用归属母公司的，模型用了合并口径）。
+- 这 50 题对强模型已经不难：找到对的页就基本能答对，拉不开「给证据页 / 整份文档 / Agentic」的差距。
+  真正区分做法的是另外 100 道文字题（要大模型判分）、不告诉是哪份文档的设定，以及整份放不进上下文的多文档问题。
+
+```bash
+python -m evals.financebench.e2e --label 首轮          # 四种一起跑，4 路并发约 6 分钟；--modes / --limit / --resume
+```
+
 ## 下一步扩展（插槽都留好了）
 
 | 想加的东西 | 动哪里 | 大致做法 |
@@ -813,7 +837,7 @@ python -m evals.financebench.retrieval --embedder BAAI/bge-m3 --search bm25 --se
 | **上下文压缩** | `core/context/` 写一个新的 `ContextEdit`，加进 `app.py` 的工序列表 | 两层都已实现：10 万时把较早的工具结果换成带线索的占位（`ClearOldToolResults`）；清理后还超 15 万，把较早的回合交给模型写成滚动摘要，保留最近约 2 万 token 原文（`CompactHistory`）。API 报上下文超长时强制整理一次再重试（写摘要的请求自己也超长，就丢掉最老的一半回合再写，最多 3 次）；自动压缩失败不中断这一轮，连续失败 3 次熔断（只清理不压缩，`/compact` 成功后恢复）；`/compact` 手动压缩 |
 | **大结果落盘（tool-results/）** | `core/tools.py` 的 `ToolOutput.capped()` | 通用兜底层：工具自己没缩小、结果还超上限时，不再截掉，而是把全文存进 `会话目录/tool-results/<调用id>.txt`，给模型开头一段 + 路径，用 `read_file` 按行号分页读（学 Claude Code / pi）。给**结果不能重拿**的工具用（网页、实时 API、Python 输出）；run_sql 能重查，在工具里自己处理。等第一个这类工具来了再做，会话目录已经有了（`Session.root`），放在它下面的 `tool-results/` |
 | **长期记忆** | 已实现：`memory.py` + `remember` / `read_memory` | 记忆多到索引放不下时，再加 Claude Code 那种「每轮用小模型按摘要挑几条」；自动从对话里提取（Codex 的后台合并）等评测证明漏记再做 |
-| **RAG** | 已实现：`rag/` + `tools/docs.py`（见「FinanceBench」一节） | 端到端评测（传统 RAG vs Agentic RAG vs 给证据页 vs 整份放进上下文）；MinerU 作为对照解析器；图检索先留接口 |
+| **RAG** | 已实现：`rag/` + `tools/docs.py`（见「FinanceBench」一节） | 端到端评测扩到文字题（大模型判分）和不告诉文档的设定；MinerU 作为对照解析器；图检索先留接口 |
 | **画图、统计** | 已实现：`tools/python/`、`tools/r/` | `run_python` / `run_r` 在沙箱里跑，图存进 `work/figures/`；meta 分析有 RevMan 5 模板 |
 | **沙箱表格编号** | 已实现：`tools/sql/results.py` + 两个内核的 `save_result()` | Python / R 里 `save_result(df, "标题")` 把表发给宿主，存进同一个结果仓库、接着 r 号往下编；回答里 `{{r5}}` 引用、`/save r5` 导出（没有 SQL 可重跑，直接写存下的行）、`load_result("r5")` 取回 |
 | **流式输出** | `llm/` 各 provider 加 `stream_chat()` | `LLMResponse` 不变，只是分块 yield |
