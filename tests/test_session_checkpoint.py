@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from data_agent.app import build_application
-from data_agent.cli import _pending_turn
 from data_agent.core.agent import InterruptedTurn
 from data_agent.core.messages import LLMResponse, Message, ToolCall, Usage
 from data_agent.session import Session
@@ -118,6 +117,6 @@ def test_这一轮用过沙箱_重启后接着跑要提醒内核是新的(tmp_pa
     session = Session.create(tmp_path)
     session.save_checkpoint(used)
     session = Session.open(tmp_path)
-    session.load()
-    turn = _pending_turn(session, app)
+    app.restore(session.load(), session.load_checkpoint())
+    turn = app.agent.interrupted
     assert turn.entries[-1].meta.synthetic and "内核是新的" in turn.entries[-1].content

@@ -7,7 +7,6 @@ import json
 import re
 import shlex
 import sys
-from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable
@@ -36,7 +35,7 @@ from .core.events import (
     TurnEnded,
     TurnResumed,
 )
-from .core.messages import Message, ToolCall, Usage
+from .core.messages import ToolCall, Usage
 from .mcp import Decision, McpTool
 from .memory import SCOPES, age
 from .session import Session
@@ -511,25 +510,12 @@ def main() -> None:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")
         return
-    app.agent.context.restore(history)
+    app.restore(history, session.load_checkpoint() if args.resume is not None else None)
     app.agent.checkpoint_hook = session.save_checkpoint     # 每走一步存一次：进程被杀了也能接着跑
-    if args.resume is not None:
-        app.agent.interrupted = _pending_turn(session, app)
     try:
         _repl(app, session, results, settings, history)
     finally:
         app.close()
-
-
-def _pending_turn(session: Session, app: Application) -> InterruptedTurn | None:
-    """上次没跑完的那一轮。程序重启过，沙箱内核是新的，要的话补一句提醒接在进度后面。"""
-    turn = session.load_checkpoint()
-    if turn is None:
-        return None
-    note = app.fresh_kernel_note(turn)
-    if note:
-        turn = replace(turn, entries=(*turn.entries, Message.user(note).with_meta(synthetic=True)))
-    return turn
 
 
 def _repl(app: Application, session: Session, results: ResultStore, settings: Settings,

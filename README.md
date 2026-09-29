@@ -52,6 +52,15 @@ copy .env.example .env
 python run.py
 ```
 
+或者用 Web 界面（第一次要先构建前端，需要 Node 18+）：
+
+```bash
+cd web && npm install && npm run build && cd ..
+python run_web.py            # 打开 http://127.0.0.1:8765
+```
+
+改前端时用 `cd web && npm run dev`（5173 端口，`/api` 转给 `run_web.py`，改了立刻刷新）。
+
 只有一个 Agent，不分场景。它能做什么只看环境：`.env` 里配了 `DATABASE_URL` 就有 SQL 工具，
 开着沙箱就有 `run_python` / `run_r`，`DATA_DIR` 挂一个只读数据目录。数据是什么、业务口径怎么算，
 写在项目目录（`PROJECT_DIR`，默认示例是 `examples/demo`）的 `AGENTS.md` 里，原样拼进系统提示词 ——
@@ -111,6 +120,8 @@ pytest
 ```
 .
 ├── run.py                      入口（薄壳，真正逻辑在 src/）
+├── run_web.py                  Web 界面入口
+├── web/                        Web 前端（React + Vite + TypeScript），npm run build 生成 web/dist
 ├── docker/
 │   ├── docker-compose.yml      Postgres（端口 5433，避开常用的 5432）
 │   ├── sandbox/Dockerfile      run_python 的沙箱镜像（pandas / scipy / statsmodels / matplotlib + 中文字体）
@@ -126,6 +137,7 @@ pytest
 │   ├── skills/                 ★ 技能目录（catalog.py）和内置技能（builtin/<名字>/SKILL.md）
 │   ├── memory.py               ★ 长期记忆：两层目录、一条一个文件、索引
 │   ├── cli.py                  终端界面（只管显示）
+│   ├── web/                    Web 后端（FastAPI）：runner.py 一个会话一个后台线程，事件 SSE 推给浏览器
 │   │
 │   ├── core/                   ★ Agent 运行时（不 import 包外任何模块，tests/test_imports.py 守着）
 │   │   ├── messages.py           统一消息结构 = 整个项目的「通用语」
@@ -403,6 +415,26 @@ CLI 里每走一步还写一次 `checkpoint.json`），`resume()` 接回历史�
 - 终端：正文边来边打，`{{r3}}` 先原样出来，这一步说完补上表格；思考默认只显示「💭 思考中…」，`--verbose` 暗色原样打。
   最终回答改成在 `TurnEnded` 时打（流式打过就不再打），`_run` 不再管打印 —— 界面就是一个订阅事件的 sink。
 - 配置 `STREAM`（默认开）。评测强制关：不需要看，也不想每题收几千个增量事件；请求本身和不流式一样，没重跑评测。
+
+### Web 界面
+
+`python run_web.py`。布局学 Claude desktop（左边会话列表、中间对话、右边结果面板），配色和标是自己的。
+Web 界面就是换了一个事件订阅者，`core/` 没动。
+
+- **后端**（FastAPI，`src/data_agent/web/`）：一个打开的会话 = 一套 `Application` + 一个跑回合的后台线程（Agent 是同步的）。
+  事件从那个线程出来，经 `loop.call_soon_threadsafe` 交给各个页面的 asyncio 队列，SSE 推出去；发消息、回答、停止是普通 POST。
+  页面连上时先拿一份快照（历史换成时间线条目 + `agent.state`），之后接着收事件。快照和推送用同一把锁：
+  快照之前的事件已经在快照里，之后的一定进队列。
+- **前端**（React + Vite + TS，`web/`）：`timeline.ts` 是 TypeScript 版的 reduce，(条目, 事件) → 新条目；
+  状态栏（思考中 / 执行工具 / 等你回答、第几步、上下文用量）直接读服务器随事件带来的 `state`。
+- **停止**：点停止后，下一个事件上抛 `Stopped`（和 Ctrl-C 一样是 `BaseException`，不会被「尽力而为」的 `except Exception` 吞掉），
+  走原来的事务回滚 + 检查点，页面上是「已停止 · 做完了 n 步 · 继续」。模型每吐一个字就是一个事件，所以回答中途能马上停；
+  工具正在跑的要等它跑完。
+- **ask_user**：问题是一张带编号选项的卡片，点选项或者直接在输入框里写就是回答（`resume`），「让它自己判断」= 不回答。
+- **MCP 审批**：外部工具第一次调用时，跑回合的线程等页面点「这次允许 / 本会话都允许 / 拒绝」（10 分钟没人点当拒绝）。
+- **结果**：`{{r3}}` 在回答里是一张可展开的表格卡片，右边面板看全部行、看 SQL、下载 CSV（和 `/save` 同一个函数）；
+  沙箱画的图显示在工具卡片里，回答里用相对路径引用的图（`figures/a.png`）换成会话 work 目录的地址。
+- 只监听 127.0.0.1：没有登录，连上的人能让 Agent 跑 SQL、跑代码。文件接口只给会话 work 目录里的文件（防 `../`）。
 
 ---
 
@@ -932,7 +964,7 @@ python -m evals.financebench.e2e --resume evals/runs/<目录> --modes rag_all,ra
 | **流式输出** | 已实现：`LLMProvider.stream()` + `TextDelta` 事件 | 见「运行状态和流式输出」一节。工具参数的流式（边生成边显示 SQL）没做 |
 | **人工审批** | 已实现：`build_application(approval_hook=...)` | 传个函数，工具执行前弹确认 |
 | **自定义结束条件** | 已实现：`build_application(finish_turn_hook=...)` | 见概念 8 |
-| **Web 界面** | 换一个 `EventSink` | `core/` 一行不用动，这就是 `events.py` 存在的意义 |
+| **Web 界面** | 已实现：`web/`（后端 `src/data_agent/web/`） | 见「Web 界面」一节。没做：多用户和登录、工具执行到一半的取消、会话改名和删除 |
 | **多 Agent** | 把 `Agent` 包成一个 `Tool` | 子 Agent 就是一个工具，天然递归 |
 | **持久化会话** | 已实现：`session/` | 每轮成功之后把新增的历史追加进 `session.jsonl`，`--resume` 读回来。以后要分支（从某一轮重来），学 pi 给每条记录加 id / parentId |
 | **中途问用户** | 已实现：`tools/ask_user.py`，`AwaitingUser` + `Agent.resume(回答)` | 以后 Web 界面：拿到 `AwaitingUser` 就把问题发给前端，下一个请求带着回答调 `resume` |
@@ -941,7 +973,7 @@ python -m evals.financebench.e2e --resume evals/runs/<目录> --modes rag_all,ra
 | **MCP** | 已实现：`mcp/`（见「MCP：外部工具服务器」一节） | HTTP 传输（Streamable HTTP）；服务器发来的「工具列表变了」通知；resources / prompts |
 | **统一运行状态** | 已实现：`core/state.py` | 程序重启后从 `checkpoint.json` 恢复的那一轮不在状态里（没有事件），Web 界面时再补 |
 
-接下来的顺序：~~轮内检查点~~ → ~~Skills~~ → ~~长期记忆~~ → ~~RAG（配 FinanceBench）~~ → ~~MCP~~ → ~~统一运行状态 + 流式输出~~ → Web 界面。
+接下来的顺序：~~轮内检查点~~ → ~~Skills~~ → ~~长期记忆~~ → ~~RAG（配 FinanceBench）~~ → ~~MCP~~ → ~~统一运行状态 + 流式输出~~ → ~~Web 界面~~。
 每一样都要有评测证明它有用。
 
 加**新工具**是最简单的扩展，三步：

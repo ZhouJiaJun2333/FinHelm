@@ -13,3 +13,5 @@ outputs/
 
 sessions/
 data/
+node_modules/
+*.tsbuildinfo

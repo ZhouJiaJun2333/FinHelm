@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import shutil
 from datetime import date
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
 from .core.agent import WRAP_UP, Agent, ApprovalHook, FinishTurnHook, InterruptedTurn
 from .core.messages import ToolCall
-from .core.context import ClearOldToolResults, CompactHistory, Context, llm_summarizer
+from .core.context import ClearOldToolResults, CompactHistory, Context, Entry, llm_summarizer
 from .core.events import Event, noop_sink
 from .core.messages import Message
 from .core.provider import LLMProvider
@@ -89,6 +89,14 @@ class Application:
         if not used:
             return ""
         return f"[程序重启过，{'、'.join(used)} 的内核是新的：之前定义的变量都没了，要用就重新读取或计算。]"
+
+    def restore(self, history: list[Entry], turn: InterruptedTurn | None) -> None:
+        """接着以前的会话：历史接回去，上次没跑完的那一轮放回 agent.interrupted。
+        程序重启过，沙箱内核是新的，要的话补一句提醒接在进度后面。"""
+        self.agent.context.restore(history)
+        if turn is not None and (note := self.fresh_kernel_note(turn)):
+            turn = replace(turn, entries=(*turn.entries, Message.user(note).with_meta(synthetic=True)))
+        self.agent.interrupted = turn
 
     def reset(self) -> None:
         """清空对话，内核也换个空的：新对话不该看到上一段留下的变量。MCP 服务器不用重起。"""
