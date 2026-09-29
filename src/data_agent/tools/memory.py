@@ -17,6 +17,7 @@ from ..memory import Memory
 Scope = Literal["project", "user"]
 _SCOPE = "project：这个项目的口径、定义、事实；user：跨项目通用的个人偏好（回答风格、单位）"
 _NAME = "英文小写字母、数字、连字符，比如 active-customer。改一条记忆就用它原来的 name"
+MAX_LISTED = 30        # 新建时列出的已有记忆最多几条
 
 
 class RememberTool(Tool):
@@ -34,7 +35,7 @@ class RememberTool(Tool):
         description: str = Field(default="", description=(
             "save 时必填。一行摘要，以后每次会话都会出现在记忆目录里，要写出关键内容，"
             "比如「活跃客户 = 近 90 天内下过单的客户」"))
-        content: str = Field(default="", description="正文：细节和来由（用户哪天怎么说的）。不写就只有摘要")
+        content: str = Field(default="", description="正文：细节和来由（用户怎么说的）。不用写日期，程序会记。不写就只有摘要")
 
     def __init__(self, memory: Memory) -> None:
         self.memory = memory
@@ -48,8 +49,21 @@ class RememberTool(Tool):
         if not args.description.strip():
             raise ValueError("save 要写 description：一行摘要，以后的会话靠它知道记了什么")
         created = store.save(args.name, args.description.strip(), args.content or args.description, date.today())
-        return ToolOutput(f"已{'新建' if created else '更新'}记忆 {key}：{args.description.strip()}",
-                          summary=f"{'新建' if created else '更新'}了记忆 {key}")
+        text = f"已{'新建' if created else '更新'}记忆 {key}：{args.description.strip()}"
+        if created:
+            text += self._others(args.scope, args.name)
+        return ToolOutput(text, summary=f"{'新建' if created else '更新'}了记忆 {key}")
+
+    def _others(self, scope: str, name: str) -> str:
+        """新建时把已有的记忆列出来：换了个 name 记同一件事，两条就会互相矛盾（程序兜底，不只靠提示词）。"""
+        others = [e for e in self.memory.entries() if (e.scope, e.name) != (scope, name)]
+        if not others:
+            return ""
+        lines = [f"- {e.scope}/{e.name}：{e.description}" for e in others[:MAX_LISTED]]
+        more = [f"……还有 {len(others) - MAX_LISTED} 条"] if len(others) > MAX_LISTED else []
+        return ("\n\n已有的记忆：\n" + "\n".join(lines + more) +
+                "\n如果其中有一条和这条说的是同一件事（换了说法也算），两条会互相矛盾：删掉旧的那条，"
+                "或者删掉这条、改用旧的 name 覆盖。没有就不用管。")
 
 
 class ReadMemoryTool(Tool):

@@ -125,3 +125,46 @@ def test_评测_记忆文件按作用域拼起来检查(tmp_path):
     assert check(memory_has=(r"(?s)=== user/[^=]*万元",), memory_lacks=("华东",)) == (True, "")
     ok, why = check(memory_has=(r"(?s)=== project/[^=]*万元",), memory_lacks=(r"35\s*%",))
     assert not ok and "万元" in why and "35" in why
+
+
+# ================================================================ 冲突
+def test_新建时列出已有记忆_防止换个名字记同一件事(tmp_path):
+    memory = _memory(tmp_path)
+    remember = RememberTool(memory)
+    first = remember.run(remember.Args(action="save", scope="project", name="big-customer",
+                                       description="大客户 = 累计实付超过 30 万"))
+    assert "已有的记忆" not in first.content, "没有别的记忆就不啰嗦"
+    out = remember.run(remember.Args(action="save", scope="project", name="key-account",
+                                     description="KA 门槛 40 万")).content
+    assert "project/big-customer：大客户 = 累计实付超过 30 万" in out and "同一件事" in out
+    assert "key-account：" not in out.split("已有的记忆")[1], "不列自己"
+    again = remember.run(remember.Args(action="save", scope="project", name="key-account", description="KA 门槛 45 万"))
+    assert "已有的记忆" not in again.content, "覆盖同名的就是在改同一条，不用再提醒"
+
+
+def test_冲突规则_有ask_user就问_没有就按新的并指出来():
+    from data_agent.prompts import build_system_prompt
+
+    ask = build_system_prompt(["run_sql", "remember", "read_memory", "ask_user"], memory=True)
+    no_ask = build_system_prompt(["run_sql", "remember", "read_memory"], memory=True)
+    assert "用 `ask_user` 问用户以哪条为准" in ask and "ask_user" not in no_ask
+    assert "按更新的那条算" in no_ask
+    assert "project 更具体" in ask and "记忆不动" in ask
+
+
+def test_评测_数有几条记忆匹配_预先写入的记忆(tmp_path):
+    from evals.runner import seed_memory
+
+    seed_memory(tmp_path, tmp_path / "project", (
+        {"scope": "project", "name": "big-customer", "description": "门槛 30 万", "days_ago": 6},
+        {"scope": "project", "name": "key-account", "description": "门槛 40 万"}))
+    memory = Memory.open(tmp_path, tmp_path / "project")
+    assert [(e.name, (date.today() - e.updated).days) for e in memory.entries()] == [("key-account", 0),
+                                                                                    ("big-customer", 6)]
+    files = memory_files(tmp_path)
+    t = Trial("m/1", 1)
+    check_memory(t, Case("m/1", "q", (), memory_count=((r"[34]0\s*万", 1),)), files)
+    assert not t.memory_ok and "应该有 1 条，现在 2 条" in t.memory_problems
+    memory.store("project").delete("big-customer")
+    check_memory(t, Case("m/1", "q", (), memory_count=((r"[34]0\s*万", 1),)), memory_files(tmp_path))
+    assert t.memory_ok

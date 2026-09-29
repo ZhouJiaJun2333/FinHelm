@@ -23,6 +23,7 @@ import tempfile
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,7 @@ from data_agent.core.events import (
 )
 from data_agent.core.messages import Message, Usage
 from data_agent.db.connection import Database
+from data_agent.memory import Memory
 from data_agent.settings import Settings, build_provider
 from data_agent.tools.sandbox import Execution
 from data_agent.tools.sql.results import REF, ResultStore, markdown_table
@@ -405,13 +407,26 @@ def memory_files(root: Path) -> dict[str, str]:
     return out
 
 
+def seed_memory(root: Path, project_dir: Path, seed: tuple[dict, ...]) -> None:
+    """会话开始前先写进去的记忆。days_ago：几天前写的（索引里显示「N 天前」）。"""
+    memory = Memory.open(root, project_dir)
+    for m in seed:
+        memory.store(m["scope"]).save(m["name"], m["description"], m.get("content") or m["description"],
+                                      date.today() - timedelta(days=m.get("days_ago", 0)))
+
+
 def check_memory(t: Trial, case: Case, files: dict[str, str]) -> None:
-    """memory_has / memory_lacks：拼成一段文字匹配，每个文件前面一行「=== 作用域/名字」。"""
-    if not (case.memory_has or case.memory_lacks):
+    """memory_has / memory_lacks：拼成一段文字匹配，每个文件前面一行「=== 作用域/名字」。
+    memory_count：一个个文件匹配，数有几个。"""
+    if not (case.memory_has or case.memory_lacks or case.memory_count):
         return
     text = "\n".join(f"=== {k}\n{v}" for k, v in files.items())
     problems = [f"记忆里没有 {p}" for p in case.memory_has if not re.search(p, text)]
     problems += [f"记忆里不该有 {p}" for p in case.memory_lacks if re.search(p, text)]
+    for p, n in case.memory_count:
+        hits = [k for k, v in files.items() if re.search(p, v)]
+        if len(hits) != n:
+            problems.append(f"匹配 {p} 的记忆应该有 {n} 条，现在 {len(hits)} 条（{', '.join(hits) or '无'}）")
     t.memory_ok, t.memory_problems = not problems, "；".join(problems)
 
 
@@ -517,6 +532,7 @@ def run_session(session: Session, trial: int, settings: Settings, db: Database,
     memory_root = Path(tempfile.mkdtemp(prefix="finhelm-memory-")) if settings.memory_enabled else None
     if memory_root:
         settings = settings.model_copy(update={"memory_dir": str(memory_root)})
+        seed_memory(memory_root, Path(settings.project_dir), session.memory_seed)
     llm = FlakyProvider(build_provider(settings), faults, f"{session.id}-{trial}") if faults else None
     try:
         app = build_application(settings, on_event=collect_sink(events), llm=llm)

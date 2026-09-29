@@ -39,6 +39,12 @@
 
 记忆文件拼成一段文字再匹配，每个文件前面一行「=== user/名字」或「=== project/名字」，要限定作用域就把它写进正则。
 
+        memory_count: {"30\\s*万|40\\s*万": 1}           这一轮之后，内容匹配这个正则的记忆文件正好有几个
+                                                      （同一件事只能留一条：换了说法记成两条就会互相矛盾）
+    会话级 memory_seed：第一轮之前先写进记忆目录的记忆（考「已经有两条矛盾的记忆」这种靠对话造不出来的情况）
+
+        "memory_seed": [{"scope": "project", "name": "big-customer", "description": "...", "days_ago": 5}]
+
 中途提问（ask_user）：评测里没有真人，模型问了就按顺序拿 replies 当回答，用完了（或者没写）就回「用户没有回答，
 自己判断」。ask 写了就检查该问的问了、不该问的没问，和回答对不对分开统计。
 
@@ -94,6 +100,7 @@ class Case:
     new_session: bool = False          # 这一轮开始前换一个新会话（长期记忆的题）
     memory_has: tuple[str, ...] = ()   # 这一轮之后记忆文件里必须有（正则）
     memory_lacks: tuple[str, ...] = ()  # 这一轮之后记忆文件里不能有
+    memory_count: tuple[tuple[str, int], ...] = ()  # 这一轮之后内容匹配正则的记忆文件正好几个
     ask: bool | None = None            # 该不该问用户（ask_user）；None = 不检查
     replies: tuple[str, ...] = ()      # 模型问了就按顺序拿这些当用户的回答
     # 上传文件的题（见开头）
@@ -126,6 +133,7 @@ class Session:
     settings: dict[str, object] = field(default_factory=dict)
     tags: tuple[str, ...] = ()
     note: str = ""
+    memory_seed: tuple[dict, ...] = ()     # 第一轮之前先写进记忆目录的记忆
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +177,7 @@ def load_cases(name: str, only: set[str] | None = None) -> CaseSet:
                     settings=d.get("settings", {}),
                     tags=tuple(d.get("tags", ())),
                     note=d.get("note", ""),
+                    memory_seed=tuple(d.get("memory_seed", ())),
                 )
                 if only is None or s.id in only:
                     sessions.append(s)
@@ -203,6 +212,7 @@ def _case(d: dict, case_id: str) -> Case:
         new_session=d.get("new_session", False),
         memory_has=tuple(d.get("memory_has", ())),
         memory_lacks=tuple(d.get("memory_lacks", ())),
+        memory_count=tuple(d.get("memory_count", {}).items()),
         ask=d.get("ask"),
         replies=tuple(d.get("replies", ())),
         files=tuple(d.get("files", ())),
