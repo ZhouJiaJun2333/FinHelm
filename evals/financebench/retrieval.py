@@ -5,8 +5,8 @@
         --search bm25 --search dense --search bm25+dense --search "bm25+dense>BAAI/bge-reranker-v2-m3"
     python -m evals.financebench.retrieval --chunk fixed --chunk page --chunk structure     几种分片一起比
 
-建索引时的配置（--parser --chunk --max-tokens --no-context --embedder）每种组合一个索引，增量同步：
-只处理新增、改过、删掉的 PDF（--docs 换了范围，索引也跟着增删），
+建索引时的配置（--parser --chunk --max-tokens --no-context --embedder）每种组合一个索引，增量同步
+（只处理新增、改过、删掉的 PDF）；索引就是 Agent 的 financebench 知识库那份（RAG_DIR 下），
 查询时的配置（--search）在每个索引上都跑一遍。两种范围：
     doc  只在这道题问的那份文档里找（相当于元数据过滤做对了）
     all  全部文档混在一起找（368 份）
@@ -29,17 +29,15 @@ import time
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime
-from pathlib import Path
 
 from dotenv import load_dotenv
 
-from data_agent.rag import ChunkSpec, Index, IndexSpec, ParsedCache, SearchSpec
+from data_agent.rag import ChunkSpec, Index, IndexSpec, SearchSpec
 from data_agent.rag.chunk import approx_tokens
 
 from . import data
 
 RUNS = data.ROOT / "evals" / "runs"
-RAG = data.ROOT / "data" / "rag"
 KS = (1, 3, 5, 10)
 RERANKER = "BAAI/bge-reranker-v2-m3"
 
@@ -92,24 +90,19 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--embedder", default="", help="比如 BAAI/bge-m3；不写就只建 BM25")
     ap.add_argument("--search", action="append", help="bm25 / dense / bm25+dense / bm25+dense>重排模型")
     ap.add_argument("--scope", default="doc,all")
-    ap.add_argument("--docs", choices=["all", "used"], default="all",
-                    help="all = 368 份都建索引；used = 只建题目用到的 84 份（索引会删成这 84 份）")
     ap.add_argument("--label", default="")
     args = ap.parse_args(argv)
 
     qs = data.questions()
-    meta = data.doc_meta()
-    pdfs = data.pdfs(None if args.docs == "all" else {q.doc for q in qs})
     searches = [parse_search(s) for s in (args.search or ["bm25"])]
     scopes = args.scope.split(",")
-    parsed = ParsedCache(RAG / "parsed")
 
     results = []
     for kind in args.chunk or ["structure"]:
         spec = IndexSpec(args.parser, ChunkSpec(kind, max_tokens=args.max_tokens, contextualize=not args.no_context),
                          args.embedder)
         t = time.perf_counter()
-        index = Index.sync(spec, pdfs, RAG / "index", parsed, meta, progress=True)
+        index = data.collection(spec).index(progress=True)
         print(f"索引 {spec.label}：{len(index.chunks)} 片，{index.changes}，{time.perf_counter() - t:.0f}s")
         for search in searches:
             for scope in scopes:
@@ -119,7 +112,7 @@ def main(argv: list[str] | None = None) -> None:
                       f"hit@10 {s['hit@10']:.0%}  MRR {s['MRR']:.3f}  tokens@5 {s['tokens@5']}")
                 results.append({"index": asdict(spec), "index_label": spec.label, "chunks": len(index.chunks),
                                 "search": asdict(search), "search_label": search.label, "scope": scope, **r})
-    write(results, args, len(pdfs), len(qs))
+    write(results, args, len(index.docs), len(qs))
 
 
 def write(results: list[dict], args, n_docs: int, n_q: int) -> None:

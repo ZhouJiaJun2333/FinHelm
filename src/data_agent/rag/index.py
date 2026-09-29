@@ -3,19 +3,18 @@
     IndexSpec   建索引时的配置：解析器、分片、嵌入模型。改了要重建，按指纹各存一个目录，几套可以并存
     SearchSpec  查询时的配置：用哪几路召回、候选多少、RRF 参数、重排模型、返回几条。改了立刻生效
 
-增量更新：索引是一个文件夹里 PDF 的镜像，Index.sync 只处理新增、改过、删掉的文档（按文件内容哈希判断），
+增量更新：索引是一批文档的镜像，Index.sync 只处理新增、改过、删掉的文档（按文件内容哈希判断），
 没变的文档连片带向量原样留着。三层缓存各管一段：
 
     解析    ParsedCache      按文件内容哈希：同名换了内容会重新解析
     嵌入    EmbeddingCache   按「模型 + 片文本」：改了分片或解析规则，文字没变的片不用重新编码
     BM25    不存盘，加载时现建：全局 IDF 总是最新的，15 万片几秒钟
 
-    <root>/<分片方式>-<指纹>/
+    <索引目录>/                 放在哪由调用方定（知识库放在 collections/<文档目录>/<spec.folder_name>）
         spec.json       这个索引是怎么建的
-        manifest.json   每份文档：内容哈希、大小和修改时间（没变就不用重新算哈希，学 git 的 index）、元数据、片数
+        manifest.json   每份文档：内容哈希、大小和修改时间（没变就不用重新算哈希，学 git 的 index）、元数据、页数、片数
         docs/<文档>.jsonl   这份文档的片（id 从 0 数，加载时再按文档名顺序排成全局 id）
         docs/<文档>.npy     这份文档每片一个向量（float16，归一化）；没配嵌入模型就没有
-    <root>/embeddings/  嵌入缓存，几个索引共用
 
 换嵌入模型、分片方式、解析规则（版本号）会改指纹，是一个新的索引目录；但解析和嵌入缓存照样能用上。
 """
@@ -26,7 +25,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -56,6 +55,11 @@ class IndexSpec:
     def label(self) -> str:
         model = self.embedder.split("/")[-1] if self.embedder else "bm25only"
         return f"{self.parser}-{self.chunk.label}-{model}"
+
+    @property
+    def folder_name(self) -> str:
+        """索引目录名：同一批文档，不同配置的索引各一个目录。"""
+        return f"{self.chunk.label}-{self.fingerprint}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +97,7 @@ class Index:
     def __init__(self, spec: IndexSpec, chunks: list[Chunk], vectors: np.ndarray | None) -> None:
         self.spec, self.chunks, self.vectors = spec, chunks, vectors
         self.changes = Changes()
+        self.docs: dict[str, dict] = {}              # 从清单读的：文档名 → 内容哈希、元数据、页数、片数
         self.bm25 = BM25(c.search_text for c in chunks)
         self._by_doc: dict[str, list[int]] = {}
         for c in chunks:
@@ -100,17 +105,14 @@ class Index:
 
     # ------------------------------------------------------------ 建、读
     @classmethod
-    def sync(cls, spec: IndexSpec, pdfs: Iterable[Path], root: Path, parsed: ParsedCache,
-             meta: dict[str, dict] | None = None, progress: bool = False) -> "Index":
-        """让索引和这批 PDF 一致：新增、改过（内容或元数据变了）的重新解析（有缓存）→ 分片 → 嵌入（有缓存），
-        不在这批里的删掉，没变的不动。每处理完一份就更新清单，中途断了下次从断的地方接着做。
-
-        同名算同一份文档（文档名 = 文件名去掉扩展名），名字要唯一。"""
-        folder = root / f"{spec.chunk.label}-{spec.fingerprint}"
+    def sync(cls, spec: IndexSpec, pdfs: Mapping[str, Path], folder: Path, parsed: ParsedCache,
+             embeddings: Path, meta: Mapping[str, dict] | None = None, progress: bool = False) -> "Index":
+        """让 folder 里的索引和这批文档（文档名 → 文件）一致：新增、改过（内容或元数据变了）的
+        重新解析（有缓存）→ 分片 → 嵌入（embeddings 目录下的缓存），不在这批里的删掉，没变的不动。
+        每处理完一份就更新清单，中途断了下次从断的地方接着做。文档名可以带 /（子目录）。"""
         (folder / "docs").mkdir(parents=True, exist_ok=True)
         (folder / "spec.json").write_text(json.dumps(asdict(spec), ensure_ascii=False, indent=1), encoding="utf-8")
         manifest = _read_manifest(folder)
-        pdfs = {p.stem: p for p in pdfs}
         changes = Changes()
 
         for name in sorted(set(manifest) - set(pdfs)):
@@ -120,7 +122,7 @@ class Index:
                 (folder / "docs" / f"{name}{suffix}").unlink(missing_ok=True)
             changes.removed.append(name)
 
-        cache = EmbeddingCache(root / "embeddings", Embedder(spec.embedder, spec.max_length)) if spec.embedder else None
+        cache = EmbeddingCache(embeddings, Embedder(spec.embedder, spec.max_length)) if spec.embedder else None
         for n, (name, pdf) in enumerate(sorted(pdfs.items()), 1):
             stat = pdf.stat()
             old = manifest.get(name)
@@ -133,16 +135,18 @@ class Index:
                     _write_manifest(folder, manifest)
                 continue
             doc = parsed.get(pdf, spec.parser, doc_meta, sha=sha)
+            doc.name = name                                 # 子目录里的文档名带路径，片上记的也要是它
             chunks = chunk_document(doc, spec.chunk)
             vectors, encoded = cache.embed([c.search_text for c in chunks]) if cache is not None else (None, 0)
             if old:                                         # 先从清单里拿掉再写文件：断在写文件中间，下次当新增重做
                 del manifest[name]
                 _write_manifest(folder, manifest)
+            (folder / "docs" / name).parent.mkdir(parents=True, exist_ok=True)
             _write_chunks(folder / "docs" / f"{name}.jsonl", chunks)
             if vectors is not None:
                 np.save(folder / "docs" / f"{name}.npy", vectors)
             manifest[name] = {"sha": sha, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
-                              "meta": doc_meta, "chunks": len(chunks)}
+                              "meta": doc_meta, "pages": doc.pages, "chunks": len(chunks)}
             _write_manifest(folder, manifest)
             (changes.changed if old else changes.added).append(name)
             if progress:
@@ -157,9 +161,10 @@ class Index:
     def load(cls, folder: Path) -> "Index":
         d = json.loads((folder / "spec.json").read_text(encoding="utf-8"))
         spec = IndexSpec(d["parser"], ChunkSpec(**d["chunk"]), d["embedder"], d["max_length"])
+        manifest = _read_manifest(folder)
         chunks: list[Chunk] = []
         vectors: list[np.ndarray] = []
-        for name in sorted(_read_manifest(folder)):
+        for name in sorted(manifest):
             for line in (folder / "docs" / f"{name}.jsonl").read_text(encoding="utf-8").splitlines():
                 c = json.loads(line)
                 chunks.append(Chunk(len(chunks), c["doc"], tuple(c["pages"]), c["text"], c["context"],
@@ -167,7 +172,9 @@ class Index:
             if spec.embedder:
                 vectors.append(np.load(folder / "docs" / f"{name}.npy"))
         vectors = [v for v in vectors if len(v)]
-        return cls(spec, chunks, np.concatenate(vectors) if vectors else None)
+        index = cls(spec, chunks, np.concatenate(vectors) if vectors else None)
+        index.docs = manifest
+        return index
 
     # ------------------------------------------------------------ 查
     def search(self, query: str, spec: SearchSpec = SearchSpec(), docs: Sequence[str] | None = None) -> list[Hit]:

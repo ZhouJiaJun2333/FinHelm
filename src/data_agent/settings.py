@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     memory_dir: str = "~/.finhelm"
     # 注册 ask_user：一轮做到一半问用户（口径有歧义、记忆和现在说的矛盾）。批处理这类没人回答的场合关掉
     ask_user: bool = True
+    # 知识库（RAG）：要检索的文档目录（财报、合同…的 PDF），几个用 ; 隔开，知识库名 = 目录名。
+    # 配了才有 list_docs / search_docs / read_doc。索引跟着目录走：几个项目挂同一个目录，共用一份索引
+    docs_dirs: str = ""
+    # 索引、解析缓存、向量缓存放哪（文档多了有几个 G，C 盘紧就改到别的盘）
+    rag_dir: str = "~/.finhelm/rag"
+    # 嵌入模型（sentence-transformers 能加载的），留空 = 只用 BM25；重排模型留空 = 不重排。没有显卡两个都建议留空
+    rag_embedder: str = "BAAI/bge-m3"
+    rag_reranker: str = "BAAI/bge-reranker-v2-m3"
     db_statement_timeout_ms: int = 30_000
     # 每次对话一个子目录：日志、查询结果、导出的 CSV
     sessions_dir: str = "sessions"

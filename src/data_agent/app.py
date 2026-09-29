@@ -30,9 +30,11 @@ from .tools.paths import SandboxPaths
 from .tools.read_file import ReadFileTool
 from .tools.view_image import ViewImageTool
 from .tools.ask_user import AskUserTool
+from .tools.docs import ListDocsTool, ReadDocTool, SearchDocsTool
 from .tools.load_skill import LoadSkillTool
 from .tools.memory import ReadMemoryTool, RememberTool
 from .memory import Memory
+from .rag import Collection, IndexSpec, SearchSpec
 from .skills import BUILTIN, Skill, load_skills, usable
 
 
@@ -167,6 +169,13 @@ def build_application(
         tools.register(ReadFileTool(paths))
         if llm.vision:
             tools.register(ViewImageTool(paths))
+    # 知识库：配了文档目录才有。第一次搜的时候才加载索引（有新文档才解析、编码）
+    collections = _collections(settings)
+    if collections:
+        retrievers = ("bm25", "dense") if settings.rag_embedder else ("bm25",)
+        tools.register(ListDocsTool(collections))
+        tools.register(SearchDocsTool(collections, SearchSpec(retrievers, reranker=settings.rag_reranker)))
+        tools.register(ReadDocTool(collections))
     # 技能：项目的（.agents/skills/）盖过内置的；要的工具不在就不列，一个都没有就不注册 load_skill
     found, skill_problems = load_skills([project / ".agents" / "skills", BUILTIN])
     skills = usable(found, [t.name for t in tools])
@@ -209,7 +218,8 @@ def build_application(
         tools=tools,
         system_prompt=build_system_prompt([t.name for t in tools], rules=rules,
                                           data_dir=data_dir is not None, skills=skills,
-                                          memory=memory is not None),
+                                          memory=memory is not None,
+                                          collections=[(c.name, len(c.files())) for c in collections]),
         context=context,
         max_steps=settings.max_steps,
         approval_hook=approval_hook,
@@ -225,6 +235,19 @@ def build_application(
         work_dir=work_dir, sandboxes=sandboxes, skills=skills, skill_problems=skill_problems,
         memory=memory,
     )
+
+
+def _collections(settings: Settings) -> list[Collection]:
+    """DOCS_DIRS（; 隔开）→ 知识库，名字是目录名。"""
+    dirs = [Path(d.strip()) for d in settings.docs_dirs.split(";") if d.strip()]
+    if missing := [str(d) for d in dirs if not d.is_dir()]:
+        raise FileNotFoundError(f"文档目录不存在：{'、'.join(missing)}（在项目根目录下运行？）")
+    names = [d.resolve().name for d in dirs]
+    if len(set(names)) < len(names):
+        raise ValueError(f"DOCS_DIRS 里有同名的目录：{names}（知识库名 = 目录名，要不一样）")
+    spec = IndexSpec(embedder=settings.rag_embedder)
+    root = Path(settings.rag_dir).expanduser()
+    return [Collection(name, d.resolve(), root, spec) for name, d in zip(names, dirs)]
 
 
 def _session_context(inspector: SchemaInspector | None, memory: Memory | None) -> Callable[[], str] | None:

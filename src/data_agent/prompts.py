@@ -31,6 +31,11 @@ _PYTHON_AFTER_SQL = """\
 
 _R_STEP = "统计分析、统计图 → `run_r`。"
 
+_DOCS_STEP = """知识库里的文档（{collections}）：先 `list_docs` 找到是哪一份，再用 `search_docs` 限定在那份里搜；
+   片段不全（表格被拆开、要看前后文、要核对数字）就 `read_doc` 读整页。
+   搜不到就换说法再搜：用文档里会出现的写法（报表科目名、英文原词）；比率、增长率这类派生指标文档里往往没有，
+   分别搜它的组成项再自己算。"""
+
 _SKILLS = """
 ## 技能
 做下面这些任务之前，先用 `load_skill` 读它的全文，照着里面的做法和默认口径来：
@@ -98,12 +103,16 @@ WRAP_UP_BEST_GUESS = (
 
 
 def build_system_prompt(tools: Collection[str], *, rules: str = "", data_dir: bool = False,
-                        skills: Sequence[Skill] = (), memory: bool = False) -> str:
+                        skills: Sequence[Skill] = (), memory: bool = False,
+                        collections: Sequence[tuple[str, int]] = ()) -> str:
     """tools：实际注册了的工具名；rules：项目约定原文；data_dir：有没有只读挂在 /data/ 的数据；
-    skills：能用的技能，只列名字和描述，正文靠 load_skill 读；memory：开没开长期记忆（目录由应用附在最后）。"""
+    skills：能用的技能，只列名字和描述，正文靠 load_skill 读；memory：开没开长期记忆（目录由应用附在最后）；
+    collections：挂上的知识库 (名字, 文档数)，有 search_docs 时才讲。"""
     sql = "run_sql" in tools
     sandbox = bool({"run_python", "run_r"} & set(tools))
     steps = list(_SQL_STEPS) if sql else []
+    if "search_docs" in tools:
+        steps.append(_DOCS_STEP.format(collections="、".join(f"{n}，{k} 份" for n, k in collections)))
     if data_dir:
         steps.append(_DATA_STEP + (_READ_DOCS if "read_file" in tools else ""))
     if sandbox:
@@ -116,6 +125,7 @@ def build_system_prompt(tools: Collection[str], *, rules: str = "", data_dir: bo
 
     principles = [
         "只基于实际查出来、算出来的数字下结论，绝不编造。",
+        *(["用知识库里的内容回答时，写明出处（文档名、页码）。"] if "search_docs" in tools else []),
         "事情做完了才说做完了：调用工具之前不要说「已导出」「已查到」，等工具返回成功再说。",
         *(["聚合在 SQL 里做完再返回，不要拉全量明细到上下文里自己算。"] if sql else []),
         "文档、手册给了定义的（某个指标怎么算、某个词指什么），按定义算，**结论也按定义下**，不要换成常识里的意思。"

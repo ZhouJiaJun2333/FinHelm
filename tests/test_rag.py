@@ -180,6 +180,11 @@ def _fake_docs(monkeypatch, tmp_path, docs: dict[str, Document]) -> list[Path]:
     return pdfs
 
 
+def _sync(spec: IndexSpec, pdfs: list[Path], tmp_path: Path) -> Index:
+    return Index.sync(spec, {p.stem: p for p in pdfs}, tmp_path / "index" / spec.folder_name,
+                      ParsedCache(tmp_path), tmp_path / "embeddings")
+
+
 def _one(text: str, name: str) -> Document:
     return Document(name, [Element("paragraph", text, 0)], pages=1)
 
@@ -188,13 +193,13 @@ def test_建索引_再同步没变的不动_按文档过滤检索(tmp_path, monk
     docs = {"A_2018_10K": _doc(), "B_2018_10K": _one("Line item capital purchases for company B.", "B_2018_10K")}
     pdfs = _fake_docs(monkeypatch, tmp_path, docs)
     spec = IndexSpec(chunk=ChunkSpec("structure", max_tokens=80))
-    index = Index.sync(spec, pdfs, tmp_path / "index", ParsedCache(tmp_path))
+    index = _sync(spec, pdfs, tmp_path)
     assert sorted(index.changes.added) == ["A_2018_10K", "B_2018_10K"]
     assert [c.id for c in index.chunks] == list(range(len(index.chunks))), "全局 id 连续"
 
     chunked = []
     monkeypatch.setattr(index_mod, "chunk_document", lambda *a, **k: chunked.append(1) or [])
-    again = Index.sync(spec, pdfs, tmp_path / "index", ParsedCache(tmp_path))
+    again = _sync(spec, pdfs, tmp_path)
     assert not chunked and str(again.changes) == "新增 0、更新 0、删除 0", "没变的不重新分片"
     assert [c.text for c in again.chunks] == [c.text for c in index.chunks]
 
@@ -211,7 +216,7 @@ def test_增量同步_增删改_嵌入缓存复用(tmp_path, monkeypatch):
     spec = IndexSpec(chunk=ChunkSpec("page"), embedder="fake/model")
     docs = {n: _one(f"{n} revenue grew", n) for n in ("A", "B", "C")}
     pdfs = _fake_docs(monkeypatch, tmp_path, docs)
-    first = Index.sync(spec, pdfs, tmp_path / "index", ParsedCache(tmp_path))
+    first = _sync(spec, pdfs, tmp_path)
     assert len(FakeEmbedder.encoded) == 3 and first.vectors.shape == (3, 8)
     vec_a = first.vectors[0].copy()
 
@@ -220,7 +225,7 @@ def test_增量同步_增删改_嵌入缓存复用(tmp_path, monkeypatch):
     pdfs2 = _fake_docs(monkeypatch, tmp_path, docs2)
     (tmp_path / "pdfs" / "C.pdf").unlink()
     FakeEmbedder.encoded = []
-    second = Index.sync(spec, pdfs2, tmp_path / "index", ParsedCache(tmp_path))
+    second = _sync(spec, pdfs2, tmp_path)
     assert (second.changes.added, second.changes.changed, second.changes.removed) == (["D"], ["B"], ["C"])
     assert FakeEmbedder.encoded == ["B\nB margin fell", "D\nD cash flow"], "只编码新文本"
     assert [c.doc for c in second.chunks] == ["A", "B", "D"] and second.vectors.shape == (3, 8)
@@ -232,7 +237,7 @@ def test_增量同步_增删改_嵌入缓存复用(tmp_path, monkeypatch):
     # 换回 B 的旧内容：片文本和第一次一样，从嵌入缓存拿，不重新编码
     _fake_docs(monkeypatch, tmp_path, {**docs2, "B": docs["B"]})
     FakeEmbedder.encoded = []
-    third = Index.sync(spec, pdfs2, tmp_path / "index", ParsedCache(tmp_path))
+    third = _sync(spec, pdfs2, tmp_path)
     assert third.changes.changed == ["B"] and FakeEmbedder.encoded == []
     assert (third.vectors[1] == first.vectors[1]).all()
 

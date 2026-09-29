@@ -1,7 +1,7 @@
 """检索失败分析：证据页没进前 k 的题，错在哪一环。在项目根目录跑：
 
-    python -m evals.financebench.failures                          默认：最新的 bge-m3 结构化分片索引，BM25+向量+重排，本文档范围
-    python -m evals.financebench.failures --index data/rag/index/<目录> --k 5
+    python -m evals.financebench.failures                 默认：bge-m3 结构化分片索引，BM25+向量+重排，本文档范围
+    python -m evals.financebench.failures --k 5
 
 对每道没命中的题，逐环检查：
     解析    证据页的文字在不在我们解析出来的这一页里（拿 FinanceBench 给的证据原文比，按词算覆盖率）
@@ -19,16 +19,15 @@ import argparse
 import json
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 
 from dotenv import load_dotenv
 
-from data_agent.rag import Index, SearchSpec
+from data_agent.rag import Index, IndexSpec, SearchSpec
 from data_agent.rag.bm25 import tokenize
 from data_agent.rag.chunk import approx_tokens
 
 from . import data
-from .retrieval import RAG, RERANKER, RUNS
+from .retrieval import RERANKER, RUNS
 
 CANDIDATES = 50
 
@@ -57,13 +56,11 @@ def gold_rank(chunks_in_order, gold: set[tuple[str, int]]) -> int | None:
 def main(argv: list[str] | None = None) -> None:
     load_dotenv(data.ROOT / ".env")          # 按项目根目录找：从别处调用时也读得到模型目录（HF_HUB_CACHE）
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--index", type=Path, help="索引目录；不写就用最新的带向量的 structure 索引")
+    ap.add_argument("--embedder", default="BAAI/bge-m3")
     ap.add_argument("--k", type=int, default=5)
     args = ap.parse_args(argv)
 
-    with_vectors = [d for d in (RAG / "index").glob("structure*") if next((d / "docs").glob("*.npy"), None)]
-    folder = args.index or max(with_vectors, key=lambda d: (d / "manifest.json").stat().st_mtime)
-    index = Index.load(folder)
+    index = data.collection(IndexSpec(embedder=args.embedder)).index(progress=True)
     print(f"索引 {index.spec.label}（{len(index.chunks)} 片）")
     pages: dict[tuple[str, int], str] = {}
     for c in index.chunks:

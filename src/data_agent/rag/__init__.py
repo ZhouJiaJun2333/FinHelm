@@ -11,12 +11,13 @@
 
 索引存在本地目录，按文档分开存（片 .jsonl + 向量 .npy），几十万片暴力算点积就够快。
 增量更新：Index.sync 只处理新增、改过、删掉的文档；解析按文件内容缓存，嵌入按片文本缓存（embed_cache.py）。
-以后 Agent 的 search_docs 工具也用这套。
+知识库（collection.py）：一个文档目录一个索引，项目用 DOCS_DIRS 挂载，Agent 的 list_docs / search_docs / read_doc 用它。
 """
 
 from .chunk import Chunk, ChunkSpec
+from .collection import Collection
 from .document import Document, Element
 from .index import Hit, Index, IndexSpec, SearchSpec
 from .parsers import ParsedCache
 
-__all__ = ["Chunk", "ChunkSpec", "Document", "Element", "Hit", "Index", "IndexSpec", "ParsedCache", "SearchSpec"]
+__all__ = ["Chunk", "ChunkSpec", "Collection", "Document", "Element", "Hit", "Index", "IndexSpec", "ParsedCache", "SearchSpec"]
