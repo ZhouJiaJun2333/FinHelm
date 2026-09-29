@@ -45,13 +45,13 @@ class Embedder:
 
 
 def top_k(vectors: np.ndarray, query: np.ndarray, k: int, allowed: np.ndarray | None = None) -> list[tuple[int, float]]:
-    """点积最大的 k 个 (片序号, 分数)。allowed：布尔数组，只在为 True 的片里找。"""
-    scores = vectors.astype(np.float32) @ query.astype(np.float32)
-    if allowed is not None:
-        scores = np.where(allowed, scores, -np.inf)
-    k = min(k, int(np.isfinite(scores).sum()))
+    """点积最大的 k 个 (片序号, 分数)。allowed：布尔数组，只在为 True 的片里找。
+    先按 allowed 挑出那几行再算：只查一份文档时算几百行，不用把十几万行都转成 float32。"""
+    rows = np.flatnonzero(allowed) if allowed is not None else np.arange(len(vectors))
+    k = min(k, len(rows))
     if k <= 0:
         return []
-    idx = np.argpartition(-scores, k - 1)[:k]
-    idx = idx[np.argsort(-scores[idx])]
-    return [(int(i), float(scores[i])) for i in idx]
+    scores = vectors[rows].astype(np.float32) @ query.astype(np.float32)
+    best = np.argpartition(-scores, k - 1)[:k]
+    best = best[np.argsort(-scores[best])]
+    return [(int(rows[i]), float(scores[i])) for i in best]

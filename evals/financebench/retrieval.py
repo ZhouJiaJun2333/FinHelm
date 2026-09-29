@@ -82,7 +82,7 @@ def evaluate(index: Index, qs: list[data.Question], search: SearchSpec, scope: s
 
 
 def main(argv: list[str] | None = None) -> None:
-    load_dotenv()
+    load_dotenv(data.ROOT / ".env")          # 按项目根目录找：从别处调用时也读得到模型目录（HF_HUB_CACHE）
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--parser", default="pymupdf")
     ap.add_argument("--chunk", action="append", choices=["fixed", "page", "structure"])
