@@ -6,7 +6,8 @@
    直接 get_text() 会把表格的每一格各放一行，科目名和数字就对不上了。
 2. 页眉页脚：页面上下边缘、在很多页上重复出现的行（数字换成 # 再比），还有页面最后一行的孤立页码。
 3. 每一行分类：
-   表格行  至少两格，后面的格里有数（金额、百分比、年份、—）
+   表格行  至少两格，后面的格里有数（金额、百分比、年份、—）；或者是列名行：只有日期、年份、Level 1/2/3
+           （「May 31, 2020 ⎮ May 26, 2019」常常加粗，以前被当成标题，把表的章节「Consolidated Balance Sheets」顶掉了）
    标题    整行加粗或字号比正文大，不太长；或者是 10-K 的 PART / Item 开头
    正文    其它
 4. 合成元素：连续的表格行合成一张表（中间夹着的短小标签行，比如「Cash Flows from Investing Activities」、
@@ -32,6 +33,11 @@ _NUMERIC = re.compile(r"^[(\-–—]?\s*(?:US)?[$€£¥]?\s*[(\-–—]?\s*\d[\
 _YEAR = re.compile(r"^(19|20)\d\d$")
 _PART = re.compile(r"^PART\s+[IVX]+\b", re.IGNORECASE)
 _ITEM = re.compile(r"^ITEM\s+\d+[A-Z]?\b", re.IGNORECASE)
+_DATE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s+(?:19|20)\d\d"
+_HEADER_TOKEN = re.compile(rf"{_DATE}|\b(?:19|20)\d\d\b|\blevel\s+[1-3]\b", re.IGNORECASE)
+# 列名行里除了日期年份，只能有这些词；有 compared / vs 的是 MD&A 的小标题（「Fiscal 2020 Compared to Fiscal 2019」）
+_HEADER_FILLER = re.compile(r"\b(?:total|as|of|at|and|fiscal|year|years|ended|in|millions|thousands)\b|[,.\-–—()/&]",
+                            re.IGNORECASE)
 _PAGE_NO = re.compile(r"^(page\s+)?[\divxlc]+(\s+of\s+\d+)?$|^-\s*\d+\s*-$", re.IGNORECASE)
 
 MARGIN = 0.08             # 页面上下各 8% 算边缘
@@ -193,11 +199,21 @@ def _classify(r: _Row, body: float) -> str:
     if len(r.cells) >= 2 and any(_NUMERIC.match(c.text) for c in r.cells[1:]):
         return "table"
     text = r.text.strip()
+    if _column_header(text):                          # 列名行：几格的归进下面的表，一格的（副标题里的日期）当正文
+        return "table" if len(r.cells) >= 2 else "text"
     if len(text) <= TITLE_MAX_CHARS and (_PART.match(text) or _ITEM.match(text)):
         return "title"
     if len(text) <= TITLE_MAX_CHARS and (r.bold or r.size > body * 1.15) and not text.endswith((",", ";")):
         return "title"
     return "text"
+
+
+def _column_header(text: str) -> bool:
+    """「May 31, 2020 May 26, 2019」「December 31, 2022 and 2021」「Level 1 Level 2 Level 3 Total」：
+    至少两个日期 / 年份 / Level，除此之外只有 Total、Fiscal、Years Ended 这类词。"""
+    if len(_HEADER_TOKEN.findall(text)) < 2:
+        return False
+    return not _HEADER_FILLER.sub(" ", _HEADER_TOKEN.sub(" ", text)).strip()
 
 
 def _attach_table_headers(rows: list[_Row]) -> None:
@@ -308,8 +324,10 @@ def _grid(rows: list[_Row]) -> list[list[str]]:
     for r in rows:
         line = [""] * (len(anchors) + 1)
         label = []
+        header = _column_header(r.text)              # 列名行：日期、年份那几格对到列上（「(Millions)」还是标签）
         for c in r.cells:
-            if anchors and (_NUMERIC.match(c.text) or c.x0 > anchors[0] - 60) and c is not r.cells[0]:
+            if anchors and (header and _HEADER_TOKEN.search(c.text)
+                            or (_NUMERIC.match(c.text) or c.x0 > anchors[0] - 60) and c is not r.cells[0]):
                 k = min(range(len(anchors)), key=lambda a: abs(anchors[a] - c.x1))
                 line[k + 1] = (line[k + 1] + " " + c.text).strip()
             else:

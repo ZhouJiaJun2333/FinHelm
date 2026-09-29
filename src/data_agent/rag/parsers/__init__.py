@@ -17,7 +17,7 @@ from . import pymupdf_layout
 
 # 名字 → (解析函数, 版本)
 PARSERS: dict[str, tuple[Callable[[Path], Document], int]] = {
-    "pymupdf": (pymupdf_layout.parse, 2),
+    "pymupdf": (pymupdf_layout.parse, 3),         # v3：列名行（两列日期、Level 1/2/3）不再当标题
 }
 
 

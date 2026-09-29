@@ -74,6 +74,33 @@ def test_解析_页眉页码去掉_标题有章节路径_表格按列对齐(tmp_
     assert table.text.splitlines()[1] == "|---|---|---|---|"
 
 
+def test_解析_加粗的日期列名行是表头_不把报表名顶掉(tmp_path):
+    """General Mills 2020 的资产负债表：「May 31, 2020 ⎮ May 26, 2019」加粗，v2 当成了标题，表挂到它下面，
+    按「Consolidated Balance Sheets」就搜不到这张表。"""
+    import pymupdf
+
+    pdf = pymupdf.open()
+    page = pdf.new_page(width=612, height=792)
+    page.insert_text((57, 100), "Consolidated Balance Sheets", fontsize=9, fontname="hebo")
+    for x, cell in ((330, "May 31, 2020"), (430, "May 26, 2019")):
+        page.insert_text((x, 125), cell, fontsize=8, fontname="hebo")
+    page.insert_text((57, 140), "Current assets:", fontsize=8)
+    for i, (label, a, b) in enumerate([("Cash and cash equivalents", "1,677.8", "450.0"),
+                                       ("Total current assets", "5,121.3", "4,186.5")]):
+        y = 152 + i * 11
+        page.insert_text((57, y), label, fontsize=8)
+        for right, cell in ((390, a), (490, b)):
+            page.insert_text((right - pymupdf.get_text_length(cell, fontsize=8), y), cell, fontsize=8)
+    pdf.save(tmp_path / "GM.pdf")
+
+    doc = pymupdf_layout.parse(tmp_path / "GM.pdf")
+    assert [e.text for e in doc.elements if e.type == "title"] == ["Consolidated Balance Sheets"]
+    [table] = [e for e in doc.elements if e.type == "table"]
+    assert table.section == ("Consolidated Balance Sheets",)
+    assert table.rows[0] == ("", "May 31, 2020", "May 26, 2019"), "列名行的日期对到各自的列"
+    assert table.rows[-1] == ("Total current assets", "5,121.3", "4,186.5")
+
+
 def test_解析结果缓存_按内容不按文件名(tmp_path, monkeypatch):
     pdf = _pdf(tmp_path / "pdfs" / "X_2018_10K.pdf")
     cache = ParsedCache(tmp_path / "parsed")
