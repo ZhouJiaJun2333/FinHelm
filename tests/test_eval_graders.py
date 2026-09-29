@@ -187,9 +187,9 @@ def test_题库能读_match都合法_每题至少一条标准SQL():
         assert c.tags, f"{c.id} 没有标签，报告里没法分类"
 
 
-def test_BIRD题库_题库级配置选场景包_按去重集合判():
+def test_BIRD题库_题库级配置指定项目和schema_按去重集合判():
     cs = load_cases("bird_financial")
-    assert cs.settings == {"domain": "financial"}
+    assert cs.settings == {"project_dir": "evals/projects/financial", "db_schema": "financial", "r_sandbox": False}
     assert len(cs.cases) == 32
     assert all(c.match == "distinct" and "提示（外部知识）" in c.question for c in cs.cases)
 
@@ -531,12 +531,12 @@ def test_题库级配置_submit和不认识的键(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cases_mod, "CASES_DIR", tmp_path)
     (tmp_path / "x.jsonl").write_text(
-        '{"settings": {"domain": "financial"}, "submit": "交一条"}\n'
+        '{"settings": {"db_schema": "financial"}, "submit": "交一条"}\n'
         '{"id": "a", "question": "q", "gold_sql": "SELECT 1"}\n', encoding="utf-8")
     cs = load_cases("x")
-    assert cs.settings == {"domain": "financial"} and cs.submit == "交一条"
+    assert cs.settings == {"db_schema": "financial"} and cs.submit == "交一条"
 
-    (tmp_path / "y.jsonl").write_text('{"setting": {"domain": "financial"}}\n', encoding="utf-8")
+    (tmp_path / "y.jsonl").write_text('{"setting": {"db_schema": "financial"}}\n', encoding="utf-8")
     with pytest.raises(ValueError, match="不认识的键"):
         load_cases("y")
 

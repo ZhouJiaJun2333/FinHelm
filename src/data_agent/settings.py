@@ -33,12 +33,18 @@ class Settings(BaseSettings):
     openai_vision: bool = True
 
     # ---------------- 数据库 ----------------
-    # docker/docker-compose.yml 起的库，只读账号
+    # docker/docker-compose.yml 起的库，只读账号。留空 = 不连库，只分析文件
     database_url: str = (
         "postgresql://agent_ro:agent_ro_pwd@127.0.0.1:5433/analytics"
     )
-    # 场景包（domains/）：shop = 自己造的电商库，financial = BIRD 的银行库，research = 医学科研（只用上传的文件）
-    domain: str = "shop"
+    # 只看这个 schema（SQL 不带前缀也能找到表）。留空 = 库里所有有表的 schema
+    db_schema: str = ""
+
+    # ---------------- 项目 ----------------
+    # 项目目录：里面的 AGENTS.md（数据是什么、业务口径）原样拼进系统提示词，没有就不拼
+    project_dir: str = "."
+    # 只读挂进沙箱 /data/ 的数据目录（手册、CSV…），留空 = 没有
+    data_dir: str = ""
     db_statement_timeout_ms: int = 30_000
     # 每次对话一个子目录：日志、查询结果、导出的 CSV
     sessions_dir: str = "sessions"
@@ -49,7 +55,7 @@ class Settings(BaseSettings):
     # run_python 跑在 Docker 里（先 docker build -t finhelm-sandbox docker/sandbox）。没有 Docker 就关掉
     python_sandbox: bool = True
     sandbox_image: str = "finhelm-sandbox"
-    # run_r（先 docker build -t finhelm-sandbox-r docker/sandbox-r）。场景包要 r 才注册，比如 research
+    # run_r（先 docker build -t finhelm-sandbox-r docker/sandbox-r）。开着就注册，第一次调用才启动
     r_sandbox: bool = True
     sandbox_r_image: str = "finhelm-sandbox-r"
     sandbox_timeout_s: int = 60

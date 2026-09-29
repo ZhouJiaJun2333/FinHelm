@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from data_agent.domains import get_domain
 from data_agent.prompts import build_system_prompt
 from data_agent.tools.python import PYTHON_KERNEL
 from data_agent.tools.sandbox import Sandbox
@@ -19,8 +18,8 @@ from evals.runner import Trial, extract_final, grade
 
 # ================================================================ 场景包
 def test_payments_讲数据目录和读手册_没有SQL():
-    payments = get_domain("payments")
-    prompt = build_system_prompt(["run_python", "read_file"], rules=payments.rules, data_dir=True)
+    rules = Path("evals/projects/payments/AGENTS.md").read_text(encoding="utf-8")
+    prompt = build_system_prompt(["run_python", "read_file"], rules=rules, data_dir=True)
     assert "`/data/`" in prompt and "manual.md" in prompt and "`read_file` 读" in prompt
     assert "run_sql" not in prompt
 
@@ -37,10 +36,11 @@ def test_数据目录不存在_组装时就报错(monkeypatch, tmp_path):
     from data_agent.app import build_application
     from data_agent.settings import Settings
 
-    from fakes import ScriptedProvider
+    from fakes import ScriptedProvider, eval_settings
+    settings = eval_settings("dabstep_dev", project_dir=".")
     monkeypatch.chdir(tmp_path)
     with pytest.raises(FileNotFoundError, match="数据目录"):
-        build_application(Settings(domain="payments"), llm=ScriptedProvider())
+        build_application(settings, llm=ScriptedProvider())
 
 
 # ================================================================ 最终答案
@@ -89,7 +89,7 @@ def test_答案不公开的题不判分_但记下最终答案():
 
 def test_题库能加载_dev有答案_正式题没有():
     dev, full = load_cases("dabstep_dev"), load_cases("dabstep")
-    assert dev.settings["domain"] == "payments" == full.settings["domain"]
+    assert dev.settings == full.settings and dev.settings["project_dir"] == "evals/projects/payments"
     assert len(dev.cases) == 10 and all(c.official_answer is not None for c in dev.cases)
     assert len(full.cases) == 450 and not any(c.graded for c in full.cases)
     assert "最终答案：" in dev.cases[0].question

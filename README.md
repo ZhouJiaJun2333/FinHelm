@@ -33,7 +33,7 @@ cd docker && docker compose up -d
 ```
 
 **2. 建沙箱镜像**（`run_python` / `run_r` 在这两个容器里跑；没有 Docker 就在 `.env` 里设
-`PYTHON_SANDBOX=false`、`R_SANDBOX=false`。R 镜像只有医学科研场景用得到）
+`PYTHON_SANDBOX=false`、`R_SANDBOX=false`。R 镜像做统计分析（meta 分析）才用得到）
 
 ```bash
 docker build -t finhelm-sandbox docker/sandbox
@@ -51,6 +51,11 @@ copy .env.example .env
 ```bash
 python run.py
 ```
+
+只有一个 Agent，不分场景。它能做什么只看环境：`.env` 里配了 `DATABASE_URL` 就有 SQL 工具，
+开着沙箱就有 `run_python` / `run_r`，`DATA_DIR` 挂一个只读数据目录。数据是什么、业务口径怎么算，
+写在项目目录（`PROJECT_DIR`，默认示例是 `examples/demo`）的 `AGENTS.md` 里，原样拼进系统提示词 ——
+和 Codex、Claude Code 读项目说明文件是一个思路。换项目 = 换 `PROJECT_DIR`，代码不动。
 
 每次对话有一个会话目录 `sessions/<会话ID>/`：对话日志 `session.jsonl`、查询结果 `results.jsonl`、
 导出的 CSV `exports/`、沙箱的工作目录 `work/`（图在 `work/figures/`）。启动时会打印会话 ID，接着上次聊：
@@ -141,12 +146,6 @@ pytest
 │   │   ├── read_file.py        按行读文本文件、带行号（学 Claude Code 的 Read），一次能读完一份手册
 │   │   └── view_image.py       把一张图发给模型看（模型能看图时才注册）
 │   │
-│   ├── domains/                ★ 场景包：数据在哪、业务约定、要哪些工具，.env 里 DOMAIN= 选
-│   │   ├── shop.py               自己造的电商库
-│   │   ├── financial.py          BIRD 的捷克银行库
-│   │   ├── research.py           医学科研（系统评价 / meta 分析）：不连数据库，分析上传的文件
-│   │   └── payments.py           支付数据（DABstep）：数据文件只读挂进沙箱的 /data/
-│   │
 │   ├── session/                ★ 会话落盘（学 pi / Claude Code 的 JSONL 日志）
 │   │   ├── store.py              会话目录；每轮成功之后追加日志；读回历史（--resume）；没跑完那一轮的检查点
 │   │   └── codec.py              消息 + 标记 ↔ JSON
@@ -156,9 +155,11 @@ pytest
 │       └── introspection.py      读 schema（Agent 的「眼睛」）
 │
 ├── examples/
+│   ├── demo/AGENTS.md          默认项目（.env 的 PROJECT_DIR）：本地库里 shop、financial 两份数据的约定
 │   └── event_demo.py           事件/回调机制的最小演示
 ├── docs/                       可运行的「为什么这么写」说明（见上面的表）
 ├── evals/                      评测：真模型跑标准题、自动判分（见下面「评测」一节）
+│   ├── projects/<名字>/AGENTS.md 每套题库的项目约定（题库第一行 settings.project_dir 指过来）
 │   ├── cases/shop.jsonl          20 道题，答案存标准 SQL
 │   ├── runner.py / graders.py    跑一道题 / 判分（判分器有单元测试）
 │   ├── report.py / run.py        报告 / 命令行入口
@@ -402,8 +403,8 @@ Python 和 R 能做的事比 SQL 多得多，所以不在代码层面拦（拦�
 
 ## 医学科研：系统评价 / meta 分析
 
-同一个内核换一个场景包：`.env` 里 `DOMAIN=research`（或者启动时 `DOMAIN=research python run.py`）。
-不连数据库，工具只有 `run_python` 和 `run_r`，用户把 Excel 传上来，用一句话说要什么：
+还是同一个 Agent，不用切换什么：开着 R 沙箱就有 `run_r`，用户把 Excel 传上来，用一句话说要什么。
+这类项目的默认口径（效应量、合并方法）写在项目的 `AGENTS.md` 里，参考 `evals/projects/research/AGENTS.md`：
 
 ```
 你 > /attach D:\课题\纳入研究.xlsx
@@ -585,7 +586,7 @@ python -m evals.run --cases dabstep --trials 1          # 450 道正式题，答
 python -m evals.dabstep.submission <运行目录>            # 导出排行榜要的 submission.jsonl，去排行榜网页手动提交
 ```
 
-- **场景包 `payments`**：不连数据库，只有 Python 沙箱。数据文件只读挂进容器的 `/data/`（`Domain.data_dir`），不往每个 trial 复制。
+- **项目 `evals/projects/payments`**：不连数据库，只有 Python 沙箱。数据文件只读挂进容器的 `/data/`（设置里的 `data_dir`），不往每个 trial 复制。
   约定里只写文件是什么、先读手册，不写任何题的口径。
 - **答题格式**：题目原文后面附官方的格式要求，让模型最后一行写「最终答案：…」，评测只看这一行。
 - **判分**：官方的 `question_scorer` 原样拷贝在 `evals/dabstep/scorer.py`（官方的测试也一起搬了过来，保证和排行榜一致）。
@@ -641,8 +642,9 @@ python -m evals.bird.prepare
 题目用 Hugging Face 上 2025-07 修订过的版本（zip 里的是旧版）。BIRD 随库发的列说明写成了 `COMMENT ON COLUMN`，
 `describe_table` 会给模型看 —— 不然 `a2`~`a16`、捷克语编码只能猜。
 
-**跑**：`python -m evals.run --cases bird_financial --trials 3`。题库第一行 `{"settings": {"domain": "financial"}}`
-自动切到 financial 场景包（`domains/financial.py`），不用改 .env。
+**跑**：`python -m evals.run --cases bird_financial --trials 3`。题库第一行
+`{"settings": {"project_dir": "evals/projects/financial", "db_schema": "financial", ...}}`
+指定项目目录（读它的 `AGENTS.md`）和 schema，不用改 .env。
 
 和 BIRD 官方判法的两处不同，报告里两种分数都有：
 - **看哪条 SQL**：主分数看 Agent 跑过的任何一条；「只看最后一条 SQL」和「提交轮」两行是 BIRD 的判法。
@@ -653,7 +655,7 @@ python -m evals.bird.prepare
 对人是更好的回答，按 BIRD「结果集合完全一样」的规则却是错的 —— 首个基线里 29% 的作答是
 「值对了、格式不对」。所以题库第一行带了 `submit`：每题答完，评测再追问一句「交一条只返回所问列、
 不 ROUND 的 SQL」，BIRD 判法看这一条。这是评测的输出格式，放在评测里（`evals/bird/prepare.py` 的
-`SUBMIT`），不写进场景包，Agent 对人的回答不受影响；提交轮的步数和 token 单独统计，不算进主分数。
+`SUBMIT`），不写进 AGENTS.md，Agent 对人的回答不受影响；提交轮的步数和 token 单独统计，不算进主分数。
 
 **标注存疑**：5 道题的标准 SQL 确实错了（比如 q115 的居民数是文本列、按文本排序选错了区；
 q152 一个区有几个账户就被算几次），理由和我们补的写法在 `prepare.py` 的 `DISPUTED` 里，每条都在库里核对过。
@@ -719,7 +721,7 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 | **多 Agent** | 把 `Agent` 包成一个 `Tool` | 子 Agent 就是一个工具，天然递归 |
 | **持久化会话** | 已实现：`session/` | 每轮成功之后把新增的历史追加进 `session.jsonl`，`--resume` 读回来。以后要分支（从某一轮重来），学 pi 给每条记录加 id / parentId |
 | **轮内检查点** | 已实现：`Agent.resume` + `session/store.py` | 回滚照旧，进度另外存（`checkpoint.json`），`/continue` 从断的地方接着跑。以后要「整个评测跑到一半接着跑」（跳过做完的 trial），是另一件事 |
-| **Skills** | 和长期记忆共用一套机制 | 系统提示词里只放目录（名字 + 一句话），模型需要时再读全文；场景包的长约定（规则匹配、meta 分析流程）拆成 skill，提示词不再跟着场景膨胀 |
+| **Skills** | 和长期记忆共用一套机制 | 系统提示词里只放目录（名字 + 一句话），模型需要时再读全文；AGENTS.md 里的长约定（规则匹配、meta 分析流程）拆成 skill，提示词不再跟着项目膨胀 |
 | **MCP 客户端** | 把外部 MCP 工具包装成 `Tool` 注册进来 | 外部工具的描述是不可信输入（可能夹带提示词注入），要能审批、按需开；参数照样过严格校验 |
 | **统一运行状态** | 从事件推导，学 pi 的 `AgentState` | 是否在运行、正在执行的工具调用、最近的错误；做 Web 界面时要用 |
 

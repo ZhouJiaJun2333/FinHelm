@@ -37,10 +37,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from data_agent.domains import get_domain
 from data_agent.settings import Settings
 
 from ..cases import load_cases
+from ..run import run_schema
 
 ROOT = Path(__file__).resolve().parents[2]
 OFFICIAL = ROOT / "data" / "bird" / "official"
@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
 
     meta = json.loads((args.run_dir / "meta.json").read_text(encoding="utf-8"))
-    schema = get_domain(meta["domain"]).schema
+    schema = run_schema(meta, Settings())
     out, trials = export(args.run_dir)
     dsn = Settings().database_url
     if (check := evaluate(out, "gold", schema, dsn))["total"] != 100:

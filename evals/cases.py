@@ -28,7 +28,7 @@
 
 每一轮的 id 是「会话 id/轮次」，比如 multi-001/3。答错了会话照样往下问 —— 真实用户也会接着问。
 
-上传文件的题（research 场景，不连数据库）：先把文件传上去再提问，按回答和做了什么判分。
+上传文件的题（research 题库，不连数据库）：先把文件传上去再提问，按回答和做了什么判分。
 
     {"id": "rs-01",
      "files": ["research/files/xx.xlsx"],        相对 evals/cases/，每个 trial 复制进自己的工作目录
@@ -38,16 +38,16 @@
      "expect_text": ["Heard"],                     回答里必须出现（正则）：该指出的问题指出了没有
      "expect_figure": true}                        至少画出一张图
 
-DABstep（payments 场景，数据挂在 /data/，不上传文件）：回答最后一行写「最终答案：…」，按官方规则判。
+DABstep（数据挂在 /data/，不上传文件）：回答最后一行写「最终答案：…」，按官方规则判。
 
     {"id": "dab-1273", "question": "...", "official_answer": "0.120132"}
     {"id": "dab-1274", "question": "...", "answer_hidden": true}    正式题答案不公开：不判分，只导出提交文件
 
 题库级配置：没有 id 的一行，整个题库都用它。
-    settings   覆盖配置（优先级：.env < 这里 < 命令行 --set）。BIRD 的题库靠它选场景包
+    settings   覆盖配置（优先级：.env < 这里 < 命令行 --set）。题库靠它指定项目目录、schema、工具开关
     submit     提交轮：每题答完之后追问这句话，收一条 SQL 按 BIRD 官方规则判（见 runner.py）
 
-    {"settings": {"domain": "financial"}, "submit": "请交一条……"}
+    {"settings": {"project_dir": "evals/projects/financial", "db_schema": "financial"}, "submit": "请交一条……"}
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ class CaseSet:
     name: str
     cases: list[Case] = field(default_factory=list)
     sessions: list[Session] = field(default_factory=list)   # 多轮题库；和 cases 二选一
-    settings: dict[str, object] = field(default_factory=dict)  # 题库级配置（比如 domain）
+    settings: dict[str, object] = field(default_factory=dict)  # 题库级配置（比如 project_dir）
     submit: str = ""                   # 提交轮追问的话；空 = 不要提交轮
     sha1: str = ""                     # 题库文件的指纹，写进运行记录：题改过，分数就不能直接比
 

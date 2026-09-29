@@ -27,11 +27,9 @@ class DescribeTableTool(Tool):
             default=3, ge=0, le=20, description="附带几行样例数据，0 表示不要"
         )
 
-    def __init__(self, db: Database, inspector: SchemaInspector,
-                 default_schema: str = "shop") -> None:
+    def __init__(self, db: Database, inspector: SchemaInspector) -> None:
         self.db = db
         self.inspector = inspector
-        self.default_schema = default_schema
 
     def run(self, args: Args) -> ToolOutput:
         schema, table = self._split(args.table)
@@ -71,5 +69,10 @@ class DescribeTableTool(Tool):
         if "." in raw:
             schema, table = raw.split(".", 1)
             return schema.strip('"'), table.strip('"')
-        return self.default_schema, raw
+        # 不带前缀：看得到好几个 schema 时去找这张表在哪个里；找不到按第一个报错，报错里会列出已知的表
+        if len(self.inspector.schemas) > 1:
+            for t in self.inspector.list_tables():
+                if t.name == raw:
+                    return t.schema, raw
+        return self.inspector.schemas[0], raw
 

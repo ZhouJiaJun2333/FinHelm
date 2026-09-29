@@ -15,7 +15,6 @@ from .core.provider import LLMProvider
 from .core.tools import ToolRegistry
 from .db.connection import Database
 from .db.introspection import SchemaInspector
-from .domains import get_domain
 from .prompts import WRAP_UP_BEST_GUESS, build_system_prompt
 from .settings import Settings, build_provider
 from .tools.python import PYTHON_KERNEL, RunPythonTool
@@ -108,18 +107,21 @@ def build_application(
     用完要 close()：沙箱是个容器。
     """
     settings = settings or Settings()
-    # 场景包：数据在哪个 schema、业务约定是什么。内核的其余部分不知道行业
-    domain = get_domain(settings.domain)
+    # 只有一个 Agent：项目的约定来自 AGENTS.md，有哪些工具只看环境里配了什么
+    project = Path(settings.project_dir)
+    if not project.is_dir():
+        raise FileNotFoundError(f"项目目录 {project} 不存在")
+    agents_md = project / "AGENTS.md"
+    rules = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else ""
 
-    # --- 数据层 ---
+    # --- 数据层 --- 配了库才连。指定了 schema 就只看它（SQL 不带前缀也能找到表）；
+    # 没指定就看库里所有有表的 schema，表名带前缀写
     db = inspector = None
-    if domain.schema is not None and "sql" in domain.tools:
-        db = Database(
-            settings.database_url,
-            statement_timeout_ms=settings.db_statement_timeout_ms,
-            search_path=domain.schema,
-        )
-        inspector = SchemaInspector(db, schemas=(domain.schema,))
+    if settings.database_url:
+        schemas = (settings.db_schema,) if settings.db_schema else None
+        db = Database(settings.database_url, statement_timeout_ms=settings.db_statement_timeout_ms,
+                      search_path=schemas or ())
+        inspector = SchemaInspector(db, schemas=schemas)
 
     # --- 模型层 --- 放在工具前面：注册哪些工具要看模型能力（能不能看图）
     llm = llm or build_provider(settings)
@@ -131,19 +133,19 @@ def build_application(
     work_dir = work_dir or Path(settings.work_dir)
     tools = ToolRegistry()
     if db is not None:
-        for tool in (ListTablesTool(inspector), DescribeTableTool(db, inspector, default_schema=domain.schema),
+        for tool in (ListTablesTool(inspector), DescribeTableTool(db, inspector),
                      RunSqlTool(db, results), ExportCsvTool(db, results, export_dir)):
             tools.register(tool)
-    # 沙箱：场景包要、.env 里也开着才有。第一次调用才启动容器；两个容器挂同一个工作目录
+    # 沙箱：.env 里开着才有。第一次调用才启动容器；两个容器挂同一个工作目录
     sandboxes: dict[str, Sandbox] = {}
-    data_dir = Path(domain.data_dir) if domain.data_dir else None
+    data_dir = Path(settings.data_dir) if settings.data_dir else None
     if data_dir is not None and not data_dir.is_dir():
-        raise FileNotFoundError(f"场景包 {domain.name} 的数据目录 {data_dir} 不存在（在项目根目录下运行？数据下载了吗？）")
+        raise FileNotFoundError(f"数据目录 {data_dir} 不存在（在项目根目录下运行？数据下载了吗？）")
     for kind, enabled, image, kernel, tool_class in (
         ("python", settings.python_sandbox, settings.sandbox_image, PYTHON_KERNEL, RunPythonTool),
         ("r", settings.r_sandbox, settings.sandbox_r_image, R_KERNEL, RunRTool),
     ):
-        if kind in domain.tools and enabled:
+        if enabled:
             sandboxes[kind] = Sandbox.docker(
                 image, kernel, work_dir, result_resolver(results), timeout_s=settings.sandbox_timeout_s,
                 memory=settings.sandbox_memory, cpus=settings.sandbox_cpus, save=result_saver(results, kind),
@@ -183,7 +185,7 @@ def build_application(
     agent = Agent(
         llm=llm,
         tools=tools,
-        system_prompt=build_system_prompt([t.name for t in tools], rules=f"- 数据是{domain.subject}。\n{domain.rules}",
+        system_prompt=build_system_prompt([t.name for t in tools], rules=rules,
                                           data_dir=data_dir is not None),
         context=context,
         max_steps=settings.max_steps,

@@ -47,7 +47,7 @@ def test_没有标准值就不核对():
 # ================================================================ 题库
 def test_research题库能加载_文件都在():
     cs = load_cases("research")
-    assert cs.settings["domain"] == "research"
+    assert cs.settings["project_dir"] == "evals/projects/research"
     assert len(cs.cases) >= 10 and all(c.no_sql for c in cs.cases)
     for c in cs.cases:
         assert all((CASES_DIR / f).is_file() for f in c.files)
@@ -152,7 +152,8 @@ def test_步数耗尽就不算对_哪怕图画出来了():
 def test_提示词指纹跟着实际注册的工具变():
     from data_agent.settings import Settings
     from evals.run import prompt_fingerprint
-    base = {"domain": "research", "provider": "openai", "openai_api_key": "x"}
-    on, off = (prompt_fingerprint(Settings(**base, openai_vision=v)) for v in (True, False))
+    from fakes import eval_settings
+    base = {"provider": "openai", "openai_api_key": "x"}
+    on, off = (prompt_fingerprint(eval_settings("research", **base, openai_vision=v)) for v in (True, False))
     assert on != off, "view_image 注册与否，提示词和工具表都不一样"
-    assert on == prompt_fingerprint(Settings(**base, openai_vision=True))
+    assert on == prompt_fingerprint(eval_settings("research", **base, openai_vision=True))

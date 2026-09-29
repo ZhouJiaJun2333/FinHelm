@@ -1,4 +1,4 @@
-{"settings": {"domain": "research", "max_steps": 20}}
+{"settings": {"project_dir": "evals/projects/research", "database_url": "", "max_steps": 20}}
 {"id": "rs-01", "files": ["research/files/BCG疫苗_数据提取表.xlsx"], "question": "我上传了 BCG 疫苗预防结核的数据，帮我做个 meta 分析，看看疫苗有没有效。", "gold_values": [0.48959, 0.34478, 0.695223, 0.921346], "tags": ["二分类", "默认口径", "两行表头"], "note": "默认 RR + M-H + 随机效应（DL）。标准答案 RR 0.49（0.34–0.70），I² 92%"}
 {"id": "rs-02", "files": ["research/files/BCG疫苗_数据提取表.xlsx"], "question": "用这份数据做 meta 分析，效应量用 OR，固定效应模型。", "gold_values": [0.622874, 0.57477, 0.675004, 0.926804], "tags": ["二分类", "用户指定口径", "两行表头"], "note": "用户指定 OR + 固定效应，合并方法仍是 M-H"}
 {"id": "rs-03", "files": ["research/files/BCG疫苗_数据提取表.xlsx"], "question": "按分配方式做亚组分析，看各亚组的合并效应和亚组间有没有差异。", "gold_values": [0.366209, 0.17955, 0.746917, 0.58233, 0.335143, 1.011831, 0.644673, 0.348157, 1.193722, 0.465647], "tags": ["二分类", "亚组"], "note": "亚组顺序 随机、交替分配、系统分配，各亚组 RR 和 95% CI，最后是亚组间差异检验的 P（随机效应）"}

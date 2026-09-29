@@ -9,9 +9,8 @@ from data_agent.cli import _pending_turn
 from data_agent.core.agent import InterruptedTurn
 from data_agent.core.messages import LLMResponse, Message, ToolCall, Usage
 from data_agent.session import Session
-from data_agent.settings import Settings
 
-from fakes import ScriptedProvider, make_agent
+from fakes import ScriptedProvider, eval_settings, make_agent
 
 
 def call(n: int) -> LLMResponse:
@@ -104,7 +103,7 @@ def test_存盘不留临时文件(tmp_path):
 
 # ================================================================ 程序重启后沙箱内核是新的
 def _app(**kw):
-    return build_application(Settings(provider="openai", openai_api_key="x", domain="research", **kw),
+    return build_application(eval_settings("research", provider="openai", openai_api_key="x", **kw),
                              llm=ScriptedProvider())
 
 

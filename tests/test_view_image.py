@@ -31,7 +31,7 @@ from data_agent.settings import Settings, build_provider
 from data_agent.tools.paths import SandboxPaths
 from data_agent.tools.view_image import MAX_EDGE, ViewImageTool
 
-from fakes import ScriptedProvider, make_agent
+from fakes import ScriptedProvider, eval_settings, make_agent
 from test_context_compaction import FakeSummarizer, add_turn, compactor
 
 PNG = Image("image/png", "aGVsbG8=", 100, 50)
@@ -261,7 +261,7 @@ def test_会话日志里图片原样读回():
 def research_app(tmp_path, vision: bool, **settings):
     llm = ScriptedProvider()
     llm.vision = vision
-    return build_application(Settings(domain="research", **settings), llm=llm, work_dir=tmp_path / "work")
+    return build_application(eval_settings("research", **settings), llm=llm, work_dir=tmp_path / "work")
 
 
 def test_能看图_注册view_image_提示词叫它交付前看一眼(tmp_path):
@@ -281,7 +281,7 @@ def test_不能看图_不注册_提示词里也不提(tmp_path):
 def test_没有沙箱就没有图可看():
     llm = ScriptedProvider()
     llm.vision = True
-    app = build_application(Settings(domain="shop", python_sandbox=False), llm=llm)
+    app = build_application(eval_settings("shop", python_sandbox=False), llm=llm)
     assert "view_image" not in app.tools
 
 

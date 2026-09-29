@@ -21,6 +21,7 @@ from data_agent.core.events import Event, collect_sink
 from data_agent.core.messages import LLMResponse, Message
 from data_agent.core.provider import LLMProvider
 from data_agent.core.tools import Tool, ToolRegistry
+from data_agent.settings import Settings
 
 
 class ScriptedProvider(LLMProvider):
@@ -86,3 +87,10 @@ def make_agent(
         **agent_kw,
     )
     return agent, events
+
+
+def eval_settings(cases: str, **overrides) -> Settings:
+    """和评测题库第一行一样的配置（项目目录、schema、数据目录、工具开关），再覆盖几项。"""
+    from evals.cases import load_cases
+
+    return Settings(**{**load_cases(cases).settings, **overrides})

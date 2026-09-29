@@ -1,3 +1,4 @@
+{"settings": {"project_dir": "evals/projects/shop", "db_schema": "shop", "r_sandbox": false}}
 {"id": "shop-001", "match": "contains", "question": "一共有多少个客户？", "gold_sql": "SELECT COUNT(*) FROM shop.customers", "tags": ["简单聚合"]}
 {"id": "shop-002", "match": "contains", "question": "2024 年有多少笔订单被取消了？", "gold_sql": "SELECT COUNT(*) FROM shop.orders o WHERE o.status = 'cancelled' AND o.order_date >= DATE '2024-01-01' AND o.order_date < DATE '2025-01-01'", "tags": ["简单聚合", "时间范围"]}
 {"id": "shop-003", "match": "contains", "question": "2024 年的销售额是多少？", "gold_sql": "SELECT SUM(oi.quantity * oi.unit_price * (1 - oi.discount)) FROM shop.orders o JOIN shop.order_items oi ON oi.order_id = o.order_id WHERE o.status = 'completed' AND o.order_date >= DATE '2024-01-01' AND o.order_date < DATE '2025-01-01'", "tags": ["口径:completed", "口径:折扣", "时间范围"], "note": "销售额 = 已完成订单的实付金额，要扣折扣"}

@@ -8,15 +8,14 @@ import pytest
 
 from data_agent.app import build_application
 from data_agent.cli import parse_paths
-from data_agent.domains import get_domain
 from data_agent.prompts import build_system_prompt
 from data_agent.settings import Settings
 
-from fakes import ScriptedProvider
+from fakes import ScriptedProvider, eval_settings
 
 
 def research_app(tmp_path: Path, **settings):
-    return build_application(Settings(domain="research", **settings), llm=ScriptedProvider(),
+    return build_application(eval_settings("research", **settings), llm=ScriptedProvider(),
                              work_dir=tmp_path / "work")
 
 
@@ -39,7 +38,7 @@ def test_沙箱关掉的就不注册(tmp_path):
 
 
 def test_提示词_讲文件和模板_不讲SQL(tmp_path):
-    prompt = build_system_prompt(["run_python", "run_r"], rules=get_domain("research").rules)
+    prompt = build_system_prompt(["run_python", "run_r"], rules=Path("evals/projects/research/AGENTS.md").read_text(encoding="utf-8"))
     assert "inputs/" in prompt and "fh_help()" in prompt
     assert "RevMan 5" in prompt and "不要根据 I² 自动切换" in prompt
     for sql_only in ("run_sql", "list_tables", "SQL 里做完"):
@@ -50,7 +49,7 @@ def test_提示词_讲文件和模板_不讲SQL(tmp_path):
 
 def test_金融场景的提示词没有被R影响():
     assert "run_r" not in build_system_prompt(["list_tables", "describe_table", "run_sql", "run_python"],
-                                              rules=get_domain("shop").rules)
+                                              rules=Path("evals/projects/shop/AGENTS.md").read_text(encoding="utf-8"))
 
 
 def test_上传_复制进inputs_下一条消息带上文件清单(tmp_path):

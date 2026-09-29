@@ -38,7 +38,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from data_agent.db.connection import Database
-from data_agent.domains import get_domain
 from data_agent.app import build_application
 from data_agent.settings import Settings
 
@@ -82,9 +81,8 @@ def main(argv: list[str] | None = None) -> None:
 
     forced = _parse_sets(args.sets)
     overrides = {"openai_model": args.model} if args.model else {}
-    # 优先级：.env < 题库级配置（比如 BIRD 用 financial 场景包）< --model / --set
+    # 优先级：.env < 题库级配置（项目目录、schema、工具开关）< --model / --set
     settings = Settings(**{**case_set.settings, **overrides, **forced})
-    domain = get_domain(settings.domain)
     model = settings.openai_model if settings.provider == "openai" else settings.anthropic_model
     graded = case_set.graded_cases
     # 会话覆盖的配置名写错了，model_copy 会悄悄忽略 —— 门槛没调低，整段会话就白跑了
@@ -93,7 +91,7 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(f"{s.id} 的 settings 里有不认识的配置：{sorted(unknown)}")
 
     # 标准答案先全跑一遍：标准 SQL 本身有错，要在花钱跑 Agent 之前就发现
-    db = _database(settings, domain.schema, graded)
+    db = _database(settings, settings.db_schema, graded)
     gold = {c.id: run_gold(c, db) for c in graded}
     # 自检：标准答案和它自己比必须算对。不对说明判分器或者题目的 match 写错了
     for c in graded:
@@ -125,7 +123,8 @@ def main(argv: list[str] | None = None) -> None:
         "overrides": forced,
         "trials": args.trials,
         "started": f"{started:%Y-%m-%d %H:%M:%S}",
-        "domain": domain.name,
+        "project": settings.project_dir,
+        "db_schema": settings.db_schema,
         "prompt_sha1": prompt_fingerprint(settings),
         "max_steps": settings.max_steps,
         "inject_errors": args.inject_errors,
@@ -211,7 +210,7 @@ def _regrade(run_dir: Path, meta: dict, case_set: CaseSet, trials: list[Trial]) 
     if case_set.sessions:
         sys.exit("--regrade 只支持单题库：多轮会话的判分依赖每轮当时的上下文")
     settings = Settings(**case_set.settings)
-    db = _database(settings, get_domain(meta.get("domain", settings.domain)).schema, case_set.cases)
+    db = _database(settings, run_schema(meta, settings), case_set.cases)
     cases = {c.id: c for c in case_set.cases}
     gold = {cid: run_gold(c, db) for cid, c in cases.items()}
     for t in trials:
@@ -226,7 +225,7 @@ def _regrade(run_dir: Path, meta: dict, case_set: CaseSet, trials: list[Trial]) 
 def prompt_fingerprint(settings: Settings) -> str:
     """系统提示词 + 工具定义 + 收尾提示的指纹，按这次真正会组装出来的 Agent 算。
 
-    提示词按注册了哪些工具拼（沙箱、view_image 开没开），只按场景包算的话，
+    提示词按注册了哪些工具拼（沙箱、view_image 开没开），只按项目算的话，
     开关不同的两次运行指纹一样，报告里就看不出提示词变过。不启动沙箱（第一次调用才起容器）。
     """
     app = build_application(settings)
@@ -238,12 +237,19 @@ def prompt_fingerprint(settings: Settings) -> str:
     return hashlib.sha1(text.encode()).hexdigest()[:12]
 
 
-def _database(settings: Settings, schema: str | None, cases: list) -> Database | None:
-    """有 SQL 题才连库：research 场景不连数据库，数据库没开也能跑。"""
+def run_schema(meta: dict, settings: Settings) -> str:
+    """一次运行查的是哪个 schema。旧运行只记了场景包名（domain），场景包名和 schema 同名。"""
+    if "db_schema" in meta:
+        return meta["db_schema"]
+    return {"shop": "shop", "financial": "financial"}.get(meta.get("domain", ""), settings.db_schema)
+
+
+def _database(settings: Settings, schema: str, cases: list) -> Database | None:
+    """有 SQL 题才连库：只有上传文件的题库不连数据库，数据库没开也能跑。"""
     if not any(c.gold_sql or c.answer_sql for c in cases):
         return None
     return Database(settings.database_url, statement_timeout_ms=settings.db_statement_timeout_ms,
-                    search_path=schema)
+                    search_path=(schema,) if schema else ())
 
 
 def _write_json(path: Path, data: object) -> None:

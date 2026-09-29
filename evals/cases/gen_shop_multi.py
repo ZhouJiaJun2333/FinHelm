@@ -164,6 +164,9 @@ C = {
     ],
 }
 
+PROJECT = {"project_dir": "evals/projects/shop", "db_schema": "shop", "r_sandbox": False}
+
 with open("evals/cases/shop_multi.jsonl", "w", encoding="utf-8") as f:
+    f.write(json.dumps({"settings": PROJECT}, ensure_ascii=False) + "\n")
     for s in (A, B, C):
         f.write(json.dumps(s, ensure_ascii=False) + "\n")

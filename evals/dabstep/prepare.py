@@ -30,7 +30,8 @@ CONTEXT = ["acquirer_countries.csv", "fees.json", "manual.md", "merchant_categor
            "merchant_data.json", "payments-readme.md", "payments.csv"]
 
 # 步数用完时尽量交一个答案：排行榜上弃权和答错一样算错
-SETTINGS = {"domain": "payments", "max_steps": 25, "wrap_up": "best_guess"}
+SETTINGS = {"project_dir": "evals/projects/payments", "data_dir": "data/dabstep/context", "database_url": "",
+            "r_sandbox": False, "max_steps": 25, "wrap_up": "best_guess"}
 
 ASK = """{question}
 

@@ -258,7 +258,7 @@ def compute_gold() -> dict[str, list]:
 def main() -> None:
     files = make_files()
     gold = compute_gold()
-    lines = [json.dumps({"settings": {"domain": "research", "max_steps": 20}}, ensure_ascii=False)]
+    lines = [json.dumps({"settings": {"project_dir": "evals/projects/research", "database_url": "", "max_steps": 20}}, ensure_ascii=False)]
     lines += [json.dumps(c, ensure_ascii=False) for c in cases(files, gold)]
     OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"写了 {len(lines) - 1} 道题 → {OUT.relative_to(ROOT)}，{len(set(files.values()))} 个 Excel → {FILES.relative_to(ROOT)}")

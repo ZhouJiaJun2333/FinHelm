@@ -27,7 +27,7 @@ class Database:
     """很薄的 psycopg 封装，出了问题一眼能看到 SQL。"""
 
     def __init__(self, dsn: str, *, statement_timeout_ms: int = 30_000,
-                 search_path: str | None = None) -> None:
+                 search_path: tuple[str, ...] = ()) -> None:
         self._dsn = dsn
         self._statement_timeout_ms = statement_timeout_ms
         # SQL 不写 schema 前缀时去哪找表（BIRD 的标准 SQL 都不带前缀）
@@ -42,7 +42,8 @@ class Database:
             cur.execute("SET default_transaction_read_only = on")
             cur.execute(f"SET statement_timeout = {self._statement_timeout_ms}")
             if self._search_path:
-                cur.execute(pgsql.SQL("SET search_path = {}").format(pgsql.Identifier(self._search_path)))
+                names = pgsql.SQL(", ").join(map(pgsql.Identifier, self._search_path))
+                cur.execute(pgsql.SQL("SET search_path = {}").format(names))
         return conn
 
     def ping(self) -> str:

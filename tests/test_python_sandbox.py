@@ -17,12 +17,11 @@ import pytest
 
 from data_agent.app import build_application
 from data_agent.db.connection import QueryResult
-from data_agent.settings import Settings
 from data_agent.tools.python import PYTHON_KERNEL, RunPythonTool
 from data_agent.tools.sandbox import Execution, Sandbox, SandboxUnavailable
 from data_agent.tools.sql.results import ResultStore, encode_result, result_resolver
 
-from fakes import ScriptedProvider
+from fakes import ScriptedProvider, eval_settings
 
 MONTHLY = QueryResult(
     ["month", "gmv", "note"],
@@ -199,7 +198,7 @@ def test_run_python不参与清理():
 
 # ---------------------------------------------------------------- 组装
 def test_开沙箱时注册工具_提示词里多一步_容器不急着启动():
-    app = build_application(Settings(domain="shop", python_sandbox=True), llm=ScriptedProvider())
+    app = build_application(eval_settings("shop", python_sandbox=True), llm=ScriptedProvider())
     try:
         assert "run_python" in app.tools and "run_r" not in app.tools, "shop 场景包不要 R"
         assert "load_result" in app.agent.system_prompt
@@ -209,7 +208,7 @@ def test_开沙箱时注册工具_提示词里多一步_容器不急着启动():
 
 
 def test_关掉沙箱时只有SQL工具_提示词不讲沙箱():
-    app = build_application(Settings(domain="shop", python_sandbox=False), llm=ScriptedProvider())
+    app = build_application(eval_settings("shop", python_sandbox=False), llm=ScriptedProvider())
     assert "run_python" not in app.tools and app.sandboxes == {}
     prompt = app.agent.system_prompt
     assert "4. 用自然语言给结论" in prompt

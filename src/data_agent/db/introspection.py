@@ -29,9 +29,29 @@ class ColumnInfo:
 
 
 class SchemaInspector:
-    def __init__(self, db: Database, schemas: tuple[str, ...] = ("shop",)) -> None:
+    def __init__(self, db: Database, schemas: tuple[str, ...] | None = ("shop",)) -> None:
+        """schemas=None：库里所有有表的业务 schema，第一次用到时才查（组装时不碰数据库）。"""
         self.db = db
-        self.schemas = schemas
+        self._schemas = schemas
+
+    @property
+    def schemas(self) -> tuple[str, ...]:
+        if self._schemas is None:
+            self._schemas = self._user_schemas()
+        return self._schemas
+
+    def _user_schemas(self) -> tuple[str, ...]:
+        rows = self.db.query_dicts(
+            """
+            SELECT DISTINCT n.nspname AS schema
+            FROM pg_class AS c
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p', 'v', 'm')
+              AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema'
+            ORDER BY 1
+            """
+        )
+        return tuple(r["schema"] for r in rows)
 
     # ------------------------------------------------------------------
     def list_tables(self) -> list[TableInfo]:

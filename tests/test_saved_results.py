@@ -12,7 +12,6 @@ import subprocess
 import pytest
 
 from data_agent.db.connection import QueryResult
-from data_agent.domains import get_domain
 from data_agent.prompts import build_system_prompt
 from data_agent.tools.python import PYTHON_KERNEL
 from data_agent.tools.r import R_KERNEL

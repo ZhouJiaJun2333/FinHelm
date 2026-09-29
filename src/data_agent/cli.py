@@ -176,7 +176,7 @@ def parse_paths(arg: str) -> list[Path]:
 
 def _attach(arg: str, app: Application) -> None:
     if not app.sandboxes:
-        print("这个场景没有沙箱工具，上传了模型也读不了。")
+        print("没有开沙箱（PYTHON_SANDBOX / R_SANDBOX），上传了模型也读不了。")
         return
     paths = parse_paths(arg)
     if not paths:
@@ -254,7 +254,7 @@ def handle_command(cmd: str, app: Application) -> bool:
                 print(f"  · {tool.name}\n      {tool.description}")
 
         case "/tables":
-            print(app.inspector.overview() if app.inspector else "这个场景不连数据库。")
+            print(app.inspector.overview() if app.inspector else "没有连数据库（DATABASE_URL 为空）。")
 
         case "/attach":
             _attach(arg, app)
@@ -270,7 +270,7 @@ def handle_command(cmd: str, app: Application) -> bool:
 
         case "/save":
             if app.db is None:
-                print("这个场景不连数据库，没有查询结果可存。")
+                print("没有连数据库，也没有沙箱存下的结果可存。")
             else:
                 _save(arg, app)
 
@@ -391,7 +391,10 @@ def _repl(app: Application, session: Session, results: ResultStore, settings: Se
 
     print(BANNER)
     print(f"模型：{settings.provider} / {app.llm.model}")
-    print(f"场景：{settings.domain}　数据库：{version}")
+    agents_md = Path(settings.project_dir) / "AGENTS.md"
+    print(f"项目：{Path(settings.project_dir).resolve()}（{'有' if agents_md.is_file() else '没有'} AGENTS.md）")
+    if app.inspector:
+        print(f"数据库：{version}　schema：{', '.join(app.inspector.schemas)}")
     print(f"工具：{len(app.tools)} 个 —— {', '.join(t.name for t in app.tools)}")
     print(f"会话：{session.root}（下次 python run.py --resume {session.id} 接着聊）")
     if history:

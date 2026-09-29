@@ -183,7 +183,8 @@ def write_cases() -> None:
     标准答案有错的题（DISPUTED）：gold_sql 写成列表，原版在第一条，打「标注存疑」标签，理由写进 note。
     """
     questions = [q for q in json.loads(QUESTIONS.read_text(encoding="utf-8")) if q["db_id"] == DB_ID]
-    lines = [json.dumps({"settings": {"domain": "financial"}, "submit": SUBMIT}, ensure_ascii=False)]
+    lines = [json.dumps({"settings": {"project_dir": "evals/projects/financial", "db_schema": "financial", "r_sandbox": False},
+                         "submit": SUBMIT}, ensure_ascii=False)]
     for q in sorted(questions, key=lambda q: q["question_id"]):
         question = q["question"].strip()
         if q.get("evidence", "").strip():
