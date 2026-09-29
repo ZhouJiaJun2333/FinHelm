@@ -17,8 +17,6 @@ import pytest
 
 from data_agent.app import build_application
 from data_agent.db.connection import QueryResult
-from data_agent.domains import get_domain
-from data_agent.prompts import build_system_prompt
 from data_agent.settings import Settings
 from data_agent.tools.python import PYTHON_KERNEL, RunPythonTool
 from data_agent.tools.sandbox import Execution, Sandbox, SandboxUnavailable
@@ -210,11 +208,12 @@ def test_开沙箱时注册工具_提示词里多一步_容器不急着启动():
         app.close()
 
 
-def test_关掉沙箱时只有SQL工具_提示词和原来一样():
+def test_关掉沙箱时只有SQL工具_提示词不讲沙箱():
     app = build_application(Settings(domain="shop", python_sandbox=False), llm=ScriptedProvider())
     assert "run_python" not in app.tools and app.sandboxes == {}
-    assert app.agent.system_prompt == build_system_prompt(get_domain(app.settings.domain))
-    assert "4. 用自然语言给结论" in app.agent.system_prompt
+    prompt = app.agent.system_prompt
+    assert "4. 用自然语言给结论" in prompt
+    assert "inputs/" not in prompt and "save_result" not in prompt
 
 
 # ---------------------------------------------------------------- 真的容器

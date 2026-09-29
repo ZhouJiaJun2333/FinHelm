@@ -18,10 +18,10 @@ from evals.runner import Trial, extract_final, grade
 
 
 # ================================================================ 场景包
-def test_payments场景包_讲数据目录_不叫用户上传():
-    prompt = build_system_prompt(get_domain("payments"), ["run_python"])
-    assert "`/data/`" in prompt and "manual.md" in prompt
-    assert "用户上传" not in prompt and "/attach" not in prompt
+def test_payments_讲数据目录和读手册_没有SQL():
+    payments = get_domain("payments")
+    prompt = build_system_prompt(["run_python", "read_file"], rules=payments.rules, data_dir=True)
+    assert "`/data/`" in prompt and "manual.md" in prompt and "`read_file` 读" in prompt
     assert "run_sql" not in prompt
 
 

@@ -183,7 +183,8 @@ def build_application(
     agent = Agent(
         llm=llm,
         tools=tools,
-        system_prompt=build_system_prompt(domain, [t.name for t in tools]),
+        system_prompt=build_system_prompt([t.name for t in tools], rules=f"- 数据是{domain.subject}。\n{domain.rules}",
+                                          data_dir=data_dir is not None),
         context=context,
         max_steps=settings.max_steps,
         approval_hook=approval_hook,

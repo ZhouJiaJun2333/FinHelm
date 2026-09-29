@@ -39,8 +39,8 @@ def test_沙箱关掉的就不注册(tmp_path):
 
 
 def test_提示词_讲文件和模板_不讲SQL(tmp_path):
-    prompt = build_system_prompt(get_domain("research"), ["run_python", "run_r"])
-    assert "医学统计分析师" in prompt and "inputs/" in prompt and "fh_help()" in prompt
+    prompt = build_system_prompt(["run_python", "run_r"], rules=get_domain("research").rules)
+    assert "inputs/" in prompt and "fh_help()" in prompt
     assert "RevMan 5" in prompt and "不要根据 I² 自动切换" in prompt
     for sql_only in ("run_sql", "list_tables", "SQL 里做完"):
         assert sql_only not in prompt
@@ -49,8 +49,8 @@ def test_提示词_讲文件和模板_不讲SQL(tmp_path):
 
 
 def test_金融场景的提示词没有被R影响():
-    assert "run_r" not in build_system_prompt(get_domain("shop"), ["list_tables", "describe_table", "run_sql",
-                                                                   "run_python"])
+    assert "run_r" not in build_system_prompt(["list_tables", "describe_table", "run_sql", "run_python"],
+                                              rules=get_domain("shop").rules)
 
 
 def test_上传_复制进inputs_下一条消息带上文件清单(tmp_path):

@@ -98,12 +98,11 @@ def test_沙箱的表直接写CSV_SQL的没有库就说清楚(tmp_path):
 
 # ================================================================ 提示词
 def test_提示词_有沙箱才讲save_result():
-    shop = get_domain("shop")
-    assert "save_result" not in build_system_prompt(shop), "只有 SQL 的提示词不变"
-    assert "save_result" in build_system_prompt(shop, ["run_sql", "run_python"])
-    research = build_system_prompt(get_domain("research"), ["run_python", "run_r"])
+    assert "save_result" not in build_system_prompt(["run_sql"]), "只有 SQL 的提示词不变"
+    assert "save_result" in build_system_prompt(["run_sql", "run_python"])
+    research = build_system_prompt(["run_python", "run_r"])
     assert "## 展示结果" in research and "save_result" in research and "{{r3}}" in research
-    assert "## 展示结果" not in build_system_prompt(get_domain("research"), [])
+    assert "## 展示结果" not in build_system_prompt([])
 
 
 # ================================================================ R

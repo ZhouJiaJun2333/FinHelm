@@ -13,19 +13,25 @@ from fakes import ScriptedProvider
 
 
 def test_业务约定跟着场景包走_通用部分不变():
-    shop = build_system_prompt(get_domain("shop"))
-    bank = build_system_prompt(get_domain("financial"))
+    shop = build_system_prompt(("list_tables", "describe_table", "run_sql"), rules=get_domain("shop").rules)
+    bank = build_system_prompt(("list_tables", "describe_table", "run_sql"), rules=get_domain("financial").rules)
     assert "只算 `completed`" in shop and "completed" not in bank
     assert "DISPONENT" in bank and "DISPONENT" not in shop
-    # 通用部分两边都有：工作流程、结果引用的写法（format 之后还是两层花括号）
+    # 通用部分两边一样：只有一个身份，约定之外一字不差
     for prompt in (shop, bank):
         assert "`describe_table`" in prompt and "`{{r3}}`" in prompt
+    assert shop.split("## 项目约定")[0] == bank.split("## 项目约定")[0]
+    assert shop.split("## 展示结果")[1] == bank.split("## 展示结果")[1]
+
+
+def test_没有约定就不出约定那一节():
+    assert "## 项目约定" not in build_system_prompt(("run_python",))
 
 
 def test_组装时按配置选场景包():
     app = build_application(Settings(domain="financial"), llm=ScriptedProvider())
     assert app.inspector.schemas == ("financial",)
-    assert "捷克银行" in app.agent.system_prompt
+    assert "捷克银行" in app.agent.system_prompt and "DISPONENT" in app.agent.system_prompt
 
 
 def test_不认识的场景包直接报错():
