@@ -1,12 +1,15 @@
 """系统提示词。迭代最频繁的部分，单独成文件。
 
 只有一个身份，不分场景。按实际注册了哪些工具、有哪些数据拼流程：有库就讲 SQL，有 /data/ 就讲读文档，
-有沙箱就讲上传文件和 run_python / run_r，有 view_image 就多一条「交付前看图」。项目自己的约定原样附在后面。
+有沙箱就讲上传文件和 run_python / run_r，有 view_image 就多一条「交付前看图」。项目自己的约定原样附在后面，
+再列出能用的技能（只有名字和描述，正文靠 load_skill 读）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
+
+from .skills import Skill
 
 _SQL_STEPS = [
     "不清楚库里有什么 → `list_tables`",
@@ -26,8 +29,13 @@ _PYTHON_AFTER_SQL = """\
 读文件、整理数据，以及 SQL 不方便算的（收益率、同比环比、累计、波动率、回归、画图）→ `run_python`，
    用 `load_result("r3")` 取查出来的结果。**不要心算，也不要把数字手抄进代码。**"""
 
-_R_STEP = """统计分析（meta 分析、森林图、偏倚风险图…）→ `run_r`，**先用 `fh_` 开头的模板函数**（`fh_help()` 列出全部），
-   不要自己手写 meta 分析公式和森林图。模板做不了的才自己写，并在回答里说明这部分不是模板。"""
+_R_STEP = "统计分析、统计图 → `run_r`。"
+
+_SKILLS = """
+## 技能
+做下面这些任务之前，先用 `load_skill` 读它的全文，照着里面的做法和默认口径来：
+{skills}
+"""
 
 _RESULT_REFS = """
 ## 展示结果
@@ -60,8 +68,10 @@ WRAP_UP_BEST_GUESS = (
     "只有问题本身不成立（问的东西数据里根本没有）时，才说没法回答。用户原来对回答格式的要求照样遵守。]")
 
 
-def build_system_prompt(tools: Collection[str], *, rules: str = "", data_dir: bool = False) -> str:
-    """tools：实际注册了的工具名；rules：项目约定原文；data_dir：有没有只读挂在 /data/ 的数据。"""
+def build_system_prompt(tools: Collection[str], *, rules: str = "", data_dir: bool = False,
+                        skills: Sequence[Skill] = ()) -> str:
+    """tools：实际注册了的工具名；rules：项目约定原文；data_dir：有没有只读挂在 /data/ 的数据；
+    skills：能用的技能，只列名字和描述，正文靠 load_skill 读。"""
     sql = "run_sql" in tools
     sandbox = bool({"run_python", "run_r"} & set(tools))
     steps = list(_SQL_STEPS) if sql else []
@@ -93,6 +103,7 @@ def build_system_prompt(tools: Collection[str], *, rules: str = "", data_dir: bo
         "你是 FinHelm，一个严谨的数据分析 Agent：用工具查询、计算用户的数据来回答问题。\n\n## 工作流程\n"
         + "\n".join(f"{i}. {step}" for i, step in enumerate(steps, 1))
         + (f"\n\n## 项目约定（很重要）\n{rules.strip()}\n" if rules.strip() else "\n")
+        + (_SKILLS.format(skills="\n".join(f"- `{s.name}`：{s.description}" for s in skills)) if skills else "")
         + _result_refs(sql, sandbox=sandbox)
         + "\n## 原则\n" + "\n".join(f"- {p}" for p in principles) + "\n"
     )

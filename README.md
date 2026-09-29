@@ -57,6 +57,8 @@ python run.py
 写在项目目录（`PROJECT_DIR`，默认示例是 `examples/demo`）的 `AGENTS.md` 里，原样拼进系统提示词 ——
 和 Codex、Claude Code 读项目说明文件是一个思路。换项目 = 换 `PROJECT_DIR`，代码不动。
 
+**技能（Skills）**：换一份数据也成立的做法（比如 meta 分析的流程和默认口径）不写进 `AGENTS.md`，写成技能：一个目录一个 `SKILL.md`（[Agent Skills 规范](https://agentskills.io/specification)，学 pi）。系统提示词里只列名字和一句描述，模型做对应的任务前用 `load_skill` 读全文。内置的在 `src/data_agent/skills/builtin/`，项目自己的放 `<PROJECT_DIR>/.agents/skills/`（同名盖过内置的）；frontmatter 的 `tools: [run_r]` 写要用的工具，环境里没有就不列。`/skills` 看有哪些，`/skill:meta-analysis 要做的事` 直接指定。
+
 每次对话有一个会话目录 `sessions/<会话ID>/`：对话日志 `session.jsonl`、查询结果 `results.jsonl`、
 导出的 CSV `exports/`、沙箱的工作目录 `work/`（图在 `work/figures/`）。启动时会打印会话 ID，接着上次聊：
 
@@ -105,6 +107,7 @@ pytest
 │   ├── app.py                  ★ 组装层：唯一知道「零件怎么拼」的地方
 │   ├── settings.py             配置（.env）
 │   ├── prompts.py              系统提示词
+│   ├── skills/                 ★ 技能目录（catalog.py）和内置技能（builtin/<名字>/SKILL.md）
 │   ├── cli.py                  终端界面（只管显示）
 │   │
 │   ├── core/                   ★ Agent 运行时（不 import 包外任何模块，tests/test_imports.py 守着）
@@ -144,6 +147,7 @@ pytest
 │   │   │   └── templates.R         meta 分析模板 fh_*：算法和版式对齐 RevMan 5（见「医学科研」一节）
 │   │   ├── paths.py            模型写的路径（/data/…、/work/…、相对路径）→ 宿主机路径，只放行两个目录
 │   │   ├── read_file.py        按行读文本文件、带行号（学 Claude Code 的 Read），一次能读完一份手册
+│   │   ├── load_skill.py       读一个技能的全文
 │   │   └── view_image.py       把一张图发给模型看（模型能看图时才注册）
 │   │
 │   ├── session/                ★ 会话落盘（学 pi / Claude Code 的 JSONL 日志）
@@ -404,7 +408,7 @@ Python 和 R 能做的事比 SQL 多得多，所以不在代码层面拦（拦�
 ## 医学科研：系统评价 / meta 分析
 
 还是同一个 Agent，不用切换什么：开着 R 沙箱就有 `run_r`，用户把 Excel 传上来，用一句话说要什么。
-这类项目的默认口径（效应量、合并方法）写在项目的 `AGENTS.md` 里，参考 `evals/projects/research/AGENTS.md`：
+流程和默认口径（效应量、合并方法、报告格式）在内置技能 `meta-analysis` 里（`src/data_agent/skills/builtin/meta-analysis/SKILL.md`），模型做 meta 分析前先加载它：
 
 ```
 你 > /attach D:\课题\纳入研究.xlsx
@@ -721,11 +725,11 @@ Agent 写 `100.0 * ...`，查出来是 Decimal —— 前 15 位一样也算错�
 | **多 Agent** | 把 `Agent` 包成一个 `Tool` | 子 Agent 就是一个工具，天然递归 |
 | **持久化会话** | 已实现：`session/` | 每轮成功之后把新增的历史追加进 `session.jsonl`，`--resume` 读回来。以后要分支（从某一轮重来），学 pi 给每条记录加 id / parentId |
 | **轮内检查点** | 已实现：`Agent.resume` + `session/store.py` | 回滚照旧，进度另外存（`checkpoint.json`），`/continue` 从断的地方接着跑。以后要「整个评测跑到一半接着跑」（跳过做完的 trial），是另一件事 |
-| **Skills** | 和长期记忆共用一套机制 | 系统提示词里只放目录（名字 + 一句话），模型需要时再读全文；AGENTS.md 里的长约定（规则匹配、meta 分析流程）拆成 skill，提示词不再跟着项目膨胀 |
+| **Skills** | 已实现：`skills/` + `load_skill` | 系统提示词里只放目录（名字 + 一句话），模型需要时再读全文；以后要带脚本、参考文件，挂进沙箱的 /skills/ |
 | **MCP 客户端** | 把外部 MCP 工具包装成 `Tool` 注册进来 | 外部工具的描述是不可信输入（可能夹带提示词注入），要能审批、按需开；参数照样过严格校验 |
 | **统一运行状态** | 从事件推导，学 pi 的 `AgentState` | 是否在运行、正在执行的工具调用、最近的错误；做 Web 界面时要用 |
 
-接下来的顺序：~~轮内检查点~~ → 长期记忆 + Skills → RAG（配 FinanceBench）→ MCP 客户端 → 统一运行状态 + 流式输出 + Web 界面。
+接下来的顺序：~~轮内检查点~~ → ~~Skills~~ → 长期记忆 → RAG（配 FinanceBench）→ MCP 客户端 → 统一运行状态 + 流式输出 + Web 界面。
 每一样都要有评测证明它有用。
 
 加**新工具**是最简单的扩展，三步：

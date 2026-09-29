@@ -52,6 +52,7 @@ BANNER = """
 │  /continue 接着跑暂停、出错的那一轮（可带一句话）   │
 │  /context 看上下文用量        /compact 压缩上下文   │
 │  /save    把最近的结果存成 CSV（/save r3 指定编号） │
+│  /skills  看有哪些技能        /skill:名字 按技能做  │
 │  /reset   清空对话            /exit    退出         │
 └─────────────────────────────────────────────────────┘"""
 
@@ -274,6 +275,15 @@ def handle_command(cmd: str, app: Application) -> bool:
             else:
                 _save(arg, app)
 
+        case "/skills":
+            if not app.skills:
+                print("没有能用的技能。")
+            for skill in app.skills:
+                print(f"  · {skill.name}（{skill.path.parent}）\n      {skill.description}")
+
+        case _ if name.startswith("/skill:"):
+            _run_skill(name.removeprefix("/skill:"), arg, app)
+
         case "/compact":
             # 整理的过程由事件打印，这里只管「什么都没做」和失败
             try:
@@ -285,6 +295,18 @@ def handle_command(cmd: str, app: Application) -> bool:
         case _:
             return False
     return True
+
+
+def _run_skill(skill_name: str, request: str, app: Application) -> None:
+    """/skill:名字 要做的事：模型有时会漏加载技能，用户可以直接指定。技能全文拼在这条消息前面（学 pi）。"""
+    skill = next((s for s in app.skills if s.name == skill_name), None)
+    if skill is None:
+        print(f"没有叫 {skill_name} 的技能。/skills 看有哪些。")
+    elif not request.strip():
+        print(f"用法：/skill:{skill.name} 要做的事")
+    else:
+        message = f"[用户指定按技能 {skill.name} 来做，下面是技能全文]\n{skill.body()}\n\n{request.strip()}"
+        _run(app, lambda: app.agent.run(app.with_uploads(message)))
 
 
 # -------------------------------------------------------------------- main
@@ -396,6 +418,10 @@ def _repl(app: Application, session: Session, results: ResultStore, settings: Se
     if app.inspector:
         print(f"数据库：{version}　schema：{', '.join(app.inspector.schemas)}")
     print(f"工具：{len(app.tools)} 个 —— {', '.join(t.name for t in app.tools)}")
+    if app.skills:
+        print(f"技能：{', '.join(s.name for s in app.skills)}（/skills 查看）")
+    for problem in app.skill_problems:
+        print(f"⚠️ 跳过了一个技能 {problem}")
     print(f"会话：{session.root}（下次 python run.py --resume {session.id} 接着聊）")
     if history:
         print(f"已恢复 {len(turn_starts(history))} 轮对话、{len(results.refs())} 个查询结果")

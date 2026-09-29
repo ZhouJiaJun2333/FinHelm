@@ -157,3 +157,15 @@ def test_提示词指纹跟着实际注册的工具变():
     on, off = (prompt_fingerprint(eval_settings("research", **base, openai_vision=v)) for v in (True, False))
     assert on != off, "view_image 注册与否，提示词和工具表都不一样"
     assert on == prompt_fingerprint(eval_settings("research", **base, openai_vision=True))
+
+
+def test_记下加载了哪些技能_失败的不算():
+    from evals.runner import digest_skills
+
+    t = Trial("rs-01", 1, no_sql=True)
+    digest_skills(t, [ToolStarted(name="load_skill", arguments={"name": "没有"}),
+                      ToolFinished(name="load_skill", content="", is_error=True, elapsed_ms=1),
+                      *run("run_r", "x"),
+                      ToolStarted(name="load_skill", arguments={"name": "meta-analysis"}),
+                      ToolFinished(name="load_skill", content="", is_error=False, elapsed_ms=1)])
+    assert t.skills == ["meta-analysis"]

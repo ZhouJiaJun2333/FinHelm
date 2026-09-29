@@ -128,6 +128,7 @@ class Trial:
     # 自己写代码画的图（不是 fh_ 模板画的）有几次，其中几次之后调了 view_image
     custom_plots: int = 0
     viewed_after: int = 0
+    skills: list[str] = field(default_factory=list)     # load_skill 成功加载过的技能，按顺序
     final_answer: str = ""                # DABstep：回答最后「最终答案：」那一行，提交文件用它
     wrote_final: bool = False             # 写了「最终答案：」这一行（空列表的正确写法是后面留空）
     official: bool = False                # DABstep 的题：只按「最终答案」判
@@ -320,9 +321,22 @@ def digest(t: Trial, events: list[Event]) -> None:
     succeeded = [c for c in t.sql_calls if c.ok]
     t.final_sql = succeeded[-1].sql if succeeded else ""
     digest_sandbox(t, events)
+    digest_skills(t, events)
 
 
 SANDBOX_TOOLS = ("run_python", "run_r")
+
+
+def digest_skills(t: Trial, events: list[Event]) -> None:
+    """load_skill 成功加载过哪些技能（按顺序，重复加载的也记）。"""
+    pending: ToolStarted | None = None
+    for e in events:
+        if isinstance(e, ToolStarted):
+            pending = e
+        elif isinstance(e, ToolFinished) and pending is not None:
+            if pending.name == "load_skill" and not e.is_error:
+                t.skills.append(str(pending.arguments.get("name", "")))
+            pending = None
 
 
 def digest_sandbox(t: Trial, events: list[Event]) -> None:

@@ -132,6 +132,8 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
         "按标签": {tag: {**rates(ts), "trials": len(ts)} for tag, ts in sorted(by_tag.items())},
         "逐题": per_case,
         **({"上传文件": file_stats(files)} if (files := [t for t in trials if t.no_sql]) else {}),
+        "技能": {"加载了技能的trial": sum(bool(t.skills) for t in trials),
+                 "按技能": dict(Counter(s for t in trials for s in dict.fromkeys(t.skills)))},
         "只看最终答案": bool(trials) and all(t.official for t in trials),
     }
 
@@ -284,6 +286,11 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
                 f"- 自己写代码画了图（没用 fh_ 模板）的 trial：{files['自己画图的trial']} 个，"
                 f"其中交付前用 view_image 看了图的 {files['画完看了图的trial']} 个",
                 f"- 按次数：自己画图 {files['自己画图次数']} 次，画完看了的 {files['画完看图次数']} 次", ""]
+    if meta.get("skills") or s.get("技能", {}).get("加载了技能的trial"):
+        sk = s.get("技能", {"加载了技能的trial": 0, "按技能": {}})
+        each = "，".join(f"{k} {v} 个" for k, v in sk["按技能"].items()) or "没有"
+        out += ["## 技能", "", f"- 系统提示词里列出的：{', '.join(meta.get('skills') or []) or '（旧运行没记）'}",
+                f"- 加载了技能的 trial：{sk['加载了技能的trial']} / {s['trials']}（{each}）", ""]
     if s.get("回答里算对"):
         out += ["## SQL 没对上、回答里算对了", "",
                 "标准答案是单个算出来的数（比例、平均数），回答里说到了：",

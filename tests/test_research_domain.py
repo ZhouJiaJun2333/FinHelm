@@ -23,7 +23,7 @@ def test_不连数据库_只有沙箱工具(tmp_path):
     app = research_app(tmp_path)
     try:
         assert app.db is None and app.inspector is None
-        assert [t.name for t in app.tools] == ["run_python", "run_r", "read_file"]
+        assert [t.name for t in app.tools] == ["run_python", "run_r", "read_file", "load_skill"]
         assert set(app.sandboxes) == {"python", "r"}
         assert not any(s.running for s in app.sandboxes.values()), "第一次调用才启动容器"
         assert app.agent.session_context is None
@@ -37,14 +37,17 @@ def test_沙箱关掉的就不注册(tmp_path):
     assert "run_r" not in app.agent.system_prompt
 
 
-def test_提示词_讲文件和模板_不讲SQL(tmp_path):
-    prompt = build_system_prompt(["run_python", "run_r"], rules=Path("evals/projects/research/AGENTS.md").read_text(encoding="utf-8"))
-    assert "inputs/" in prompt and "fh_help()" in prompt
-    assert "RevMan 5" in prompt and "不要根据 I² 自动切换" in prompt
+def test_提示词_讲文件_meta分析的做法在技能里_不讲SQL(tmp_path):
+    app = research_app(tmp_path)
+    prompt = app.agent.system_prompt
+    assert "inputs/" in prompt and "## 技能" in prompt and "`meta-analysis`" in prompt
+    assert "不要根据 I² 自动切换" not in prompt, "方法和默认口径只在技能正文里"
     for sql_only in ("run_sql", "list_tables", "SQL 里做完"):
         assert sql_only not in prompt
     steps = [line[:2] for line in prompt.splitlines() if line[:1].isdigit()]
     assert steps == ["1.", "2.", "3.", "4."]
+    skill = app.tools.get("load_skill").run(app.tools.get("load_skill").Args(name="meta-analysis")).content
+    assert "fh_help()" in skill and "RevMan 5" in skill and "不要根据 I² 自动切换" in skill
 
 
 def test_金融场景的提示词没有被R影响():

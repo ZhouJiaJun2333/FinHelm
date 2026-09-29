@@ -111,6 +111,7 @@ def main(argv: list[str] | None = None) -> None:
     label = f"_{args.label}" if args.label else ""
     run_dir = RUNS_DIR / f"{started:%Y%m%d-%H%M%S}_{args.cases}_{model}{label}"
     run_dir.mkdir(parents=True)
+    prompt_sha1, skills = agent_profile(settings)
     meta = {
         "cases": args.cases,
         "cases_sha1": case_set.sha1,
@@ -125,7 +126,8 @@ def main(argv: list[str] | None = None) -> None:
         "started": f"{started:%Y-%m-%d %H:%M:%S}",
         "project": settings.project_dir,
         "db_schema": settings.db_schema,
-        "prompt_sha1": prompt_fingerprint(settings),
+        "prompt_sha1": prompt_sha1,
+        "skills": skills,
         "max_steps": settings.max_steps,
         "inject_errors": args.inject_errors,
         "resume": not args.no_resume,
@@ -222,19 +224,25 @@ def _regrade(run_dir: Path, meta: dict, case_set: CaseSet, trials: list[Trial]) 
     print(f"按现在的规则重判了 {len(trials)} 个 trial")
 
 
-def prompt_fingerprint(settings: Settings) -> str:
-    """系统提示词 + 工具定义 + 收尾提示的指纹，按这次真正会组装出来的 Agent 算。
+def agent_profile(settings: Settings) -> tuple[str, list[str]]:
+    """(指纹, 列出的技能)。指纹 = 系统提示词 + 工具定义 + 收尾提示 + 技能正文，按这次真正会组装出来的 Agent 算。
 
     提示词按注册了哪些工具拼（沙箱、view_image 开没开），只按项目算的话，
-    开关不同的两次运行指纹一样，报告里就看不出提示词变过。不启动沙箱（第一次调用才起容器）。
+    开关不同的两次运行指纹一样，报告里就看不出提示词变过。技能正文不在提示词里，但改了它模型的做法就变了。
+    没有技能时多出来的是空串，指纹和加技能之前一样。不启动沙箱（第一次调用才起容器）。
     """
     app = build_application(settings)
     try:
         text = (app.agent.system_prompt + json.dumps(app.tools.schemas(), ensure_ascii=False, sort_keys=True)
-                + app.agent.wrap_up_prompt)
+                + app.agent.wrap_up_prompt + "".join(s.body() for s in app.skills))
+        skills = [s.name for s in app.skills]
     finally:
         app.close()
-    return hashlib.sha1(text.encode()).hexdigest()[:12]
+    return hashlib.sha1(text.encode()).hexdigest()[:12], skills
+
+
+def prompt_fingerprint(settings: Settings) -> str:
+    return agent_profile(settings)[0]
 
 
 def run_schema(meta: dict, settings: Settings) -> str:

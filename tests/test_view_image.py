@@ -266,7 +266,7 @@ def research_app(tmp_path, vision: bool, **settings):
 
 def test_能看图_注册view_image_提示词叫它交付前看一眼(tmp_path):
     app = research_app(tmp_path, vision=True)
-    assert [t.name for t in app.tools] == ["run_python", "run_r", "read_file", "view_image"]
+    assert [t.name for t in app.tools] == ["run_python", "run_r", "read_file", "view_image", "load_skill"]
     prompt = app.agent.system_prompt
     assert "交付前用 `view_image` 看一眼" in prompt and "`fh_` 模板画的图不用看" in prompt
     assert app.agent.context.edits[0].tools >= {"view_image"}, "旧图可以清理"

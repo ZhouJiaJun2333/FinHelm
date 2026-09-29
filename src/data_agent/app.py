@@ -28,6 +28,8 @@ from .tools.sql.run_sql import RunSqlTool
 from .tools.paths import SandboxPaths
 from .tools.read_file import ReadFileTool
 from .tools.view_image import ViewImageTool
+from .tools.load_skill import LoadSkillTool
+from .skills import BUILTIN, Skill, load_skills, usable
 
 
 @dataclass(slots=True)
@@ -35,7 +37,7 @@ class Application:
     """装配好的一整套东西。"""
 
     agent: Agent
-    db: Database | None               # 场景包不连数据库时是 None
+    db: Database | None               # 没配 DATABASE_URL 时是 None
     inspector: SchemaInspector | None
     tools: ToolRegistry
     llm: LLMProvider
@@ -45,6 +47,8 @@ class Application:
     export_dir: Path                  # CSV 写到哪（/save 和 export_csv 共用）
     work_dir: Path                    # 沙箱的工作目录：inputs/ 放上传的文件，figures/ 放图
     sandboxes: dict[str, Sandbox] = field(default_factory=dict)   # "python" / "r"
+    skills: list[Skill] = field(default_factory=list)             # 能用的技能（要的工具都在）
+    skill_problems: list[str] = field(default_factory=list)       # 写坏了、被跳过的 SKILL.md
     pending_uploads: list[Path] = field(default_factory=list)     # 上传了、还没告诉模型的文件
 
     def attach(self, paths: list[Path]) -> list[Path]:
@@ -158,6 +162,11 @@ def build_application(
         tools.register(ReadFileTool(paths))
         if llm.vision:
             tools.register(ViewImageTool(paths))
+    # 技能：项目的（.agents/skills/）盖过内置的；要的工具不在就不列，一个都没有就不注册 load_skill
+    found, skill_problems = load_skills([project / ".agents" / "skills", BUILTIN])
+    skills = usable(found, [t.name for t in tools])
+    if skills:
+        tools.register(LoadSkillTool(skills))
 
     # --- 上下文 ---
     # 触发线不超过「窗口 - 余量」：换成小窗口的模型时不能等到 10 万才动手
@@ -186,7 +195,7 @@ def build_application(
         llm=llm,
         tools=tools,
         system_prompt=build_system_prompt([t.name for t in tools], rules=rules,
-                                          data_dir=data_dir is not None),
+                                          data_dir=data_dir is not None, skills=skills),
         context=context,
         max_steps=settings.max_steps,
         approval_hook=approval_hook,
@@ -199,5 +208,5 @@ def build_application(
     return Application(
         agent=agent, db=db, inspector=inspector,
         tools=tools, llm=llm, settings=settings, results=results, export_dir=export_dir,
-        work_dir=work_dir, sandboxes=sandboxes,
+        work_dir=work_dir, sandboxes=sandboxes, skills=skills, skill_problems=skill_problems,
     )
