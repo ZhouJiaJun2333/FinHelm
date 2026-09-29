@@ -1,5 +1,7 @@
 """【设计草图，没有接进主程序】事件 + reducer 版的 Agent 状态机。
 
+真正接进主程序的是 core/state.py：只拿 reducer 折出给界面看的状态，恢复现场还是靠检查点（InterruptedTurn）。
+
     python docs/state_sketch.py
 
 这是把 pi 的 runtime/reducer.ts 思路搬到我们代码里的样子。先看类型，

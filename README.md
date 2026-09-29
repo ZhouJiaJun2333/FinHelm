@@ -132,6 +132,7 @@ pytest
 │   │   ├── provider.py           LLMProvider 接口（实现在 llm/）
 │   │   ├── tools.py              Tool / ToolOutput / ToolRegistry 工具框架（具体工具在 tools/）
 │   │   ├── events.py             运行事件（解耦「运行」和「展示」）
+│   │   ├── state.py              运行状态 AgentState：从事件折叠出来，界面读它
 │   │   ├── errors.py             运行时异常（截断 / 拒绝 / 未知停止原因 / 上下文超长 / 压缩失败）
 │   │   ├── context/              上下文管理：只追加的历史（消息 + 标记）+ 一组按顺序套用的编辑工序
 │   │   │   ├── base.py             Context / ContextEdit / Marker；工序不持有状态，决定记成标记
@@ -376,6 +377,32 @@ CLI 里每走一步还写一次 `checkpoint.json`），`resume()` 接回历史�
   memory 100%、research 97%（100%）、BIRD 回答对 69% / 提交 47%（71% / 50%，逐题 ±1 的都是没问的题）、dabstep_dev 77%（70%）。
   一共只问了 6 次，都问在真有歧义的地方：BIRD 0094 / 0095 两个条件落在不同的人身上（0095 从 1/3 到 3/3），
   research rs-12 数据写成「151/5」（事件数超过人数）。
+
+---
+
+## 运行状态和流式输出
+
+**运行状态**（`core/state.py`，学 pi 的 `AgentState`）：界面要知道「是不是在跑、在跑哪个工具、正在输出的半句话、
+上一轮为什么断了、在等用户回答什么」。这些以前散在 Agent 的私有字段和局部变量里，界面只能自己从事件里再攒一遍。
+现在状态是事件折叠出来的：`state = reduce(state, event)`，`reduce` 是纯函数。
+
+- Agent 每个事件先 `reduce` 再交给订阅者（`Agent._emit`，同 pi 的 `processEvents`），订阅者收到事件时 `agent.state` 已经是新的。
+- 前端拿到同一串事件，用同一个 `reduce` 折出来的状态和 `agent.state` 一模一样（测试里 `fold(events) == agent.state`）；
+  中途连上的前端先要一份 `agent.state` 快照，再接着收事件。
+- 为了能折出来，补了几个事件：`TurnStarted` / `TurnEnded`（一轮的开始和结束，结束带回答或断的原因）、
+  `StepStarted`（开始一步）、`TextDelta`（流式的一小段）、`ConversationReset`；工具事件带上 `call_id`（一步里可能调两次同名工具）。
+- 和 `docs/state_sketch.py` 的草图不同：状态**不用来恢复现场**。恢复靠检查点（`InterruptedTurn`），历史在 `Context` 里；
+  状态只是给界面看的派生数据，丢了重新折一遍就有。
+
+**流式输出**：`LLMProvider.stream(..., on_delta)` 边生成边交出文字，返回值和 `chat()` 一模一样（进历史的消息、用量、stop_reason），
+所以主循环只在「怎么请求」这一处分叉（`Agent._call_llm`）。不支持流式的 provider 不用改：基类默认整段调 `chat`、回答一次给完。
+
+- OpenAI 兼容：把分块拼回和非流式一样的原生 message —— 思考模型的 `reasoning_content` 回传时必须带上，工具参数是一段段 JSON 拼起来的。
+  DeepSeek 的用量放在带 `finish_reason` 的最后一块，OpenAI 单独一块（`choices` 为空），两种都认。
+- Anthropic：SDK 的 `messages.stream()` 自己拼好最终消息（`get_final_message()`），和 `chat` 走同一个转换。
+- 终端：正文边来边打，`{{r3}}` 先原样出来，这一步说完补上表格；思考默认只显示「💭 思考中…」，`--verbose` 暗色原样打。
+  最终回答改成在 `TurnEnded` 时打（流式打过就不再打），`_run` 不再管打印 —— 界面就是一个订阅事件的 sink。
+- 配置 `STREAM`（默认开）。评测强制关：不需要看，也不想每题收几千个增量事件；请求本身和不流式一样，没重跑评测。
 
 ---
 
@@ -902,7 +929,7 @@ python -m evals.financebench.e2e --resume evals/runs/<目录> --modes rag_all,ra
 | **RAG** | 已实现：`rag/` + `tools/docs.py`（见「FinanceBench」一节） | 端到端评测扩到文字题（大模型判分）和不告诉文档的设定；MinerU 作为对照解析器；图检索先留接口 |
 | **画图、统计** | 已实现：`tools/python/`、`tools/r/` | `run_python` / `run_r` 在沙箱里跑，图存进 `work/figures/`；meta 分析有 RevMan 5 模板 |
 | **沙箱表格编号** | 已实现：`tools/sql/results.py` + 两个内核的 `save_result()` | Python / R 里 `save_result(df, "标题")` 把表发给宿主，存进同一个结果仓库、接着 r 号往下编；回答里 `{{r5}}` 引用、`/save r5` 导出（没有 SQL 可重跑，直接写存下的行）、`load_result("r5")` 取回 |
-| **流式输出** | `llm/` 各 provider 加 `stream_chat()` | `LLMResponse` 不变，只是分块 yield |
+| **流式输出** | 已实现：`LLMProvider.stream()` + `TextDelta` 事件 | 见「运行状态和流式输出」一节。工具参数的流式（边生成边显示 SQL）没做 |
 | **人工审批** | 已实现：`build_application(approval_hook=...)` | 传个函数，工具执行前弹确认 |
 | **自定义结束条件** | 已实现：`build_application(finish_turn_hook=...)` | 见概念 8 |
 | **Web 界面** | 换一个 `EventSink` | `core/` 一行不用动，这就是 `events.py` 存在的意义 |
@@ -912,9 +939,9 @@ python -m evals.financebench.e2e --resume evals/runs/<目录> --modes rag_all,ra
 | **轮内检查点** | 已实现：`Agent.resume` + `session/store.py` | 回滚照旧，进度另外存（`checkpoint.json`），`/continue` 从断的地方接着跑。以后要「整个评测跑到一半接着跑」（跳过做完的 trial），是另一件事 |
 | **Skills** | 已实现：`skills/` + `load_skill` | 系统提示词里只放目录（名字 + 一句话），模型需要时再读全文；以后要带脚本、参考文件，挂进沙箱的 /skills/ |
 | **MCP** | 已实现：`mcp/`（见「MCP：外部工具服务器」一节） | HTTP 传输（Streamable HTTP）；服务器发来的「工具列表变了」通知；resources / prompts |
-| **统一运行状态** | 从事件推导，学 pi 的 `AgentState` | 是否在运行、正在执行的工具调用、最近的错误；做 Web 界面时要用 |
+| **统一运行状态** | 已实现：`core/state.py` | 程序重启后从 `checkpoint.json` 恢复的那一轮不在状态里（没有事件），Web 界面时再补 |
 
-接下来的顺序：~~轮内检查点~~ → ~~Skills~~ → ~~长期记忆~~ → ~~RAG（配 FinanceBench）~~ → ~~MCP~~ → 统一运行状态 + 流式输出 + Web 界面。
+接下来的顺序：~~轮内检查点~~ → ~~Skills~~ → ~~长期记忆~~ → ~~RAG（配 FinanceBench）~~ → ~~MCP~~ → ~~统一运行状态 + 流式输出~~ → Web 界面。
 每一样都要有评测证明它有用。
 
 加**新工具**是最简单的扩展，三步：

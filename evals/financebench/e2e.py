@@ -88,7 +88,7 @@ SYSTEM = ("You are a careful financial analyst. Answer the question using only t
 
 AGENT_SETTINGS = {
     "project_dir": "evals/projects/financebench", "docs_dirs": str(data.PDFS), "database_url": "",
-    "python_sandbox": True, "r_sandbox": False, "memory_enabled": False, "ask_user": False,
+    "python_sandbox": True, "r_sandbox": False, "memory_enabled": False, "ask_user": False, "stream": False,
     "max_steps": MAX_STEPS, "wrap_up": "best_guess",     # 步数用完也交一个答案：和单次调用的三种一样总有答案
 }
 

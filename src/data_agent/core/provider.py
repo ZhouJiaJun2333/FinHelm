@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Callable
 
 from .messages import LLMResponse, Message
 
@@ -35,3 +35,26 @@ class LLMProvider(ABC):
 
         请求超出上下文窗口时抛 ContextOverflow（各家报错不同，见 llm/overflow.py）。
         """
+
+    def stream(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+        *,
+        on_delta: OnDelta,
+    ) -> LLMResponse:
+        """和 chat 一样，只是边生成边把文字交给 on_delta(文字, 是不是思考)。返回值和 chat 的一模一样。
+
+        不支持流式的实现不用管：默认整段调 chat，回答一次给完。
+        """
+        extra = {"max_tokens": max_tokens} if max_tokens is not None else {}
+        response = self.chat(messages=messages, tools=tools, system=system, **extra)
+        if response.text:
+            on_delta(response.text, False)
+        return response
+
+
+# on_delta(文字, 是不是思考过程)
+OnDelta = Callable[[str, bool], None]

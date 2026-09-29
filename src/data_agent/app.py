@@ -252,6 +252,7 @@ def build_application(
         on_event=on_event,
         session_context=_session_context(inspector, memory),
         wrap_up_prompt=WRAP_UP_BEST_GUESS if settings.wrap_up == "best_guess" else WRAP_UP,
+        stream=settings.stream,
     )
 
     return Application(

@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     # 模型能不能看图（deepseek-flash 能，deepseek-v4-pro 不能）。不能的要改成 false：
     # v4-pro 收到图片不报错，只在回答里说 Unsupported Image。关掉就不注册 view_image
     openai_vision: bool = True
+    # 模型回答逐字输出。只影响显示；评测关掉（不需要，事件也少）
+    stream: bool = True
 
     # ---------------- 数据库 ----------------
     # docker/docker-compose.yml 起的库，只读账号。留空 = 不连库，只分析文件

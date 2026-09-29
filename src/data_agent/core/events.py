@@ -9,6 +9,43 @@ from .messages import Usage
 
 
 @dataclass(slots=True)
+class TurnStarted:
+    """用户问了一个新问题，开始新的一轮。接着跑上一轮是 TurnResumed。"""
+
+    question: str
+
+
+@dataclass(slots=True)
+class TurnEnded:
+    """一轮结束：答完了（answer），或者没跑完（interrupted 是原因，进度在 agent.interrupted）。"""
+
+    answer: str = ""
+    interrupted: str = ""
+    awaiting_user: bool = False      # 停下来等用户回答（UserAsked 那个问题）
+
+
+@dataclass(slots=True)
+class StepStarted:
+    """开始第 step 步：整理上下文、请求模型。"""
+
+    step: int
+
+
+@dataclass(slots=True)
+class TextDelta:
+    """流式输出的一小段。thinking=True 是思考过程（不进回答）。这一步的完整回复看随后的 LLMResponded。"""
+
+    step: int
+    text: str
+    thinking: bool = False
+
+
+@dataclass(slots=True)
+class ConversationReset:
+    """对话清空了（/reset）。"""
+
+
+@dataclass(slots=True)
 class LLMResponded:
     """模型回了一轮。tool_calls 为空说明它认为任务做完了。"""
 
@@ -24,6 +61,7 @@ class LLMResponded:
 class ToolStarted:
     name: str
     arguments: dict[str, Any]
+    call_id: str = ""
 
 
 @dataclass(slots=True)
@@ -34,6 +72,7 @@ class ToolFinished:
     elapsed_ms: int
     # ToolOutput.details，只给界面
     details: Any = None
+    call_id: str = ""
 
 
 @dataclass(slots=True)
@@ -42,6 +81,7 @@ class ToolDenied:
 
     name: str
     reason: str
+    call_id: str = ""
 
 
 @dataclass(slots=True)
@@ -51,6 +91,7 @@ class UserAsked:
     name: str
     question: str
     options: tuple[str, ...] = ()
+    call_id: str = ""
 
 
 @dataclass(slots=True)
@@ -122,7 +163,8 @@ class ContextOverflowed:
 
 
 Event = (
-    LLMResponded | ToolStarted | ToolFinished | ToolDenied | ToolCallRepeated | UserAsked
+    TurnStarted | TurnEnded | StepStarted | TextDelta | ConversationReset
+    | LLMResponded | ToolStarted | ToolFinished | ToolDenied | ToolCallRepeated | UserAsked
     | TurnContinued | TurnResumed
     | StepLimitReached
     | ContextEdited | ContextEditFailed | AutoCompactionPaused | ContextOverflowed

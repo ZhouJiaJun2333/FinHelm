@@ -14,7 +14,7 @@ from openai import BadRequestError, OpenAI
 
 from ..core.errors import ContextOverflow
 from ..core.messages import INVALID_JSON_ARGS, Image, LLMResponse, Message, ToolCall, Usage
-from ..core.provider import LLMProvider
+from ..core.provider import LLMProvider, OnDelta
 from .overflow import is_context_overflow
 
 
@@ -128,13 +128,7 @@ class OpenAICompatibleProvider(LLMProvider):
         return out
 
     # ------------------------------------------------------------- 调用
-    def chat(
-        self,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        system: str | None = None,
-        max_tokens: int | None = None,
-    ) -> LLMResponse:
+    def _kwargs(self, messages, tools, system, max_tokens) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens or self.max_tokens,
@@ -142,34 +136,94 @@ class OpenAICompatibleProvider(LLMProvider):
         }
         if tools:
             kwargs["tools"] = self.convert_tools(tools)
+        return kwargs
 
+    def _create(self, **kwargs: Any) -> Any:
         try:
-            resp = self.client.chat.completions.create(**kwargs)
+            return self.client.chat.completions.create(**kwargs)
         except BadRequestError as exc:
             if is_context_overflow(str(exc)):
                 raise ContextOverflow(f"请求超出了 {self.model} 的上下文窗口：{exc}") from exc
             raise
-        choice = resp.choices[0]
-        message = choice.message
 
+    def chat(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        resp = self._create(**self._kwargs(messages, tools, system, max_tokens))
+        choice = resp.choices[0]
+        # exclude_none：去掉 refusal / audio 这类空字段
+        return self._response(choice.message.model_dump(exclude_none=True), resp.usage, choice.finish_reason)
+
+    def stream(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+        *,
+        on_delta: OnDelta,
+    ) -> LLMResponse:
+        """把分块拼回和 chat 一样的原生 message：reasoning_content 回传时要带上，工具参数是一段段 JSON 拼起来的。"""
+        chunks = self._create(**self._kwargs(messages, tools, system, max_tokens),
+                              stream=True, stream_options={"include_usage": True})
+        text: list[str] = []
+        thinking: list[str] | None = None        # None = 这个模型不回 reasoning_content
+        calls: dict[int, dict[str, str]] = {}
+        usage = finish = None
+        for chunk in chunks:
+            # DeepSeek 把用量放在带 finish_reason 的那块，OpenAI 单独一块（choices 为空）
+            usage = chunk.usage or usage
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+            finish = choice.finish_reason or finish
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning is not None and thinking is None:
+                thinking = []
+            if reasoning:
+                thinking.append(reasoning)
+                on_delta(reasoning, True)
+            if delta.content:
+                text.append(delta.content)
+                on_delta(delta.content, False)
+            for part in delta.tool_calls or []:
+                call = calls.setdefault(part.index, {"id": "", "name": "", "arguments": ""})
+                call["id"] = part.id or call["id"]
+                if part.function is not None:
+                    call["name"] += part.function.name or ""
+                    call["arguments"] += part.function.arguments or ""
+
+        raw: dict[str, Any] = {"role": "assistant", "content": "".join(text)}
+        if thinking is not None:
+            raw["reasoning_content"] = "".join(thinking)
+        if calls:
+            raw["tool_calls"] = [{"id": c["id"], "type": "function",
+                                  "function": {"name": c["name"], "arguments": c["arguments"]}}
+                                 for _, c in sorted(calls.items())]
+        return self._response(raw, usage, finish)
+
+    def _response(self, raw: dict[str, Any], usage: Any, finish_reason: str | None) -> LLMResponse:
         tool_calls: list[ToolCall] = []
-        for call in message.tool_calls or []:
+        for call in raw.get("tool_calls") or []:
+            fn = call["function"]
             try:
-                arguments = json.loads(call.function.arguments or "{}")
+                arguments = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 # 非法 JSON 不崩：交给工具层报错，错误会回到模型那里
-                arguments = {INVALID_JSON_ARGS: call.function.arguments}
-            tool_calls.append(
-                ToolCall(id=call.id, name=call.function.name, arguments=arguments)
-            )
+                arguments = {INVALID_JSON_ARGS: fn.get("arguments")}
+            tool_calls.append(ToolCall(id=call["id"], name=fn["name"], arguments=arguments))
 
         return LLMResponse(
-            text=(message.content or "").strip(),
+            text=(raw.get("content") or "").strip(),
             tool_calls=tool_calls,
-            # exclude_none：去掉 refusal / audio 这类空字段
-            raw_content=message.model_dump(exclude_none=True),
-            usage=self.convert_usage(resp.usage),
-            stop_reason=choice.finish_reason,
+            raw_content=raw,
+            usage=self.convert_usage(usage),
+            stop_reason=finish_reason,
         )
 
     @staticmethod

@@ -7,10 +7,11 @@ from .agent import Agent, AwaitingUser, InterruptedTurn, PendingQuestion
 from .context import BaseContext, ClearOldToolResults, Context, ContextEdit, KeepRecentTurns
 from .messages import LLMResponse, Message, ToolCall, Usage
 from .provider import LLMProvider
+from .state import AgentState, ToolRun
 from .tools import NeedsUserInput, Tool, ToolOutput, ToolRegistry
 
 __all__ = [
-    "Agent", "AwaitingUser", "InterruptedTurn", "PendingQuestion",
+    "Agent", "AgentState", "AwaitingUser", "InterruptedTurn", "PendingQuestion", "ToolRun",
     "BaseContext", "Context", "ContextEdit", "ClearOldToolResults", "KeepRecentTurns",
     "Message", "ToolCall", "LLMResponse", "Usage",
     "LLMProvider", "NeedsUserInput", "Tool", "ToolOutput", "ToolRegistry",

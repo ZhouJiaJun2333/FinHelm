@@ -7,13 +7,14 @@ prompt 缓存要自己打 cache_control（DeepSeek、百炼是自动前缀缓存
 
 from __future__ import annotations
 
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import anthropic
 
 from ..core.errors import ContextOverflow
 from ..core.messages import Image, LLMResponse, Message, ToolCall, Usage
-from ..core.provider import LLMProvider
+from ..core.provider import LLMProvider, OnDelta
 from .overflow import is_context_overflow
 
 
@@ -112,14 +113,42 @@ class AnthropicProvider(LLMProvider):
         system: str | None = None,
         max_tokens: int | None = None,
     ) -> LLMResponse:
+        with self._overflow():
+            resp = self.client.messages.create(**self._request_kwargs(messages, tools, system, max_tokens))
+        return self._response(resp)
+
+    def stream(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        system: str | None = None,
+        max_tokens: int | None = None,
+        *,
+        on_delta: OnDelta,
+    ) -> LLMResponse:
+        """SDK 自己把分块拼成完整的 message（get_final_message），和 chat 走同一个转换。"""
         kwargs = self._request_kwargs(messages, tools, system, max_tokens)
+        with self._overflow(), self.client.messages.stream(**kwargs) as events:
+            for event in events:
+                if event.type != "content_block_delta":
+                    continue
+                if event.delta.type == "text_delta":
+                    on_delta(event.delta.text, False)
+                elif event.delta.type == "thinking_delta":
+                    on_delta(event.delta.thinking, True)
+            resp = events.get_final_message()
+        return self._response(resp)
+
+    @contextmanager
+    def _overflow(self) -> Iterator[None]:
         try:
-            resp = self.client.messages.create(**kwargs)
+            yield
         except anthropic.BadRequestError as exc:
             if is_context_overflow(str(exc)):
                 raise ContextOverflow(f"请求超出了 {self.model} 的上下文窗口：{exc}") from exc
             raise
 
+    def _response(self, resp: Any) -> LLMResponse:
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         for block in resp.content:

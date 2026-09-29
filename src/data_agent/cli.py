@@ -26,11 +26,14 @@ from .core.events import (
     Event,
     LLMResponded,
     StepLimitReached,
+    StepStarted,
+    TextDelta,
     ToolCallRepeated,
     ToolDenied,
     ToolFinished,
     ToolStarted,
     TurnContinued,
+    TurnEnded,
     TurnResumed,
 )
 from .core.messages import Message, ToolCall, Usage
@@ -40,7 +43,7 @@ from .session import Session
 from .settings import Settings
 from .tools.sandbox import Execution
 from .tools.sql.export_csv import export_result
-from .tools.sql.results import ResultStore, StoredResult, markdown_table
+from .tools.sql.results import REF, ResultStore, StoredResult, markdown_table
 
 REF_NAME = re.compile(r"r\d+")
 
@@ -90,18 +93,67 @@ RESULT_RENDERERS: dict[str, Callable[[Any], str]] = {
 }
 
 
+DIM, RESET = "\x1b[2m", "\x1b[0m"
+
+
 def make_console_sink(verbose: bool, results: ResultStore):
-    """results 用来展开过渡的话里的 {{r3}}。"""
+    """results 用来展开回答里的 {{r3}}。
+
+    流式时文字边来边打，{{r3}} 先原样出来，这一步说完再把表格补在后面。
+    最终回答流式打过了就不再打；没流式（STREAM=false、步数用完的兜底话）在 TurnEnded 时打。
+    """
+    live = {"text": False, "thinking": False}      # 这一步已经开始打正文 / 思考了
+    streamed = ""                                  # 最近一段流式打出来的回复
+
+    def end_thinking() -> None:
+        # --verbose 时思考用暗色原样打，正文开始或这一步结束时关掉暗色
+        if verbose and live["thinking"] and not live["text"]:
+            print(RESET)
+            live["thinking"] = False
 
     def sink(event: Event) -> None:
+        nonlocal streamed
         match event:
+            case StepStarted():
+                live.update(text=False, thinking=False)
+                streamed = ""
+
+            case TextDelta(text=text, thinking=True):
+                if verbose:
+                    print(("" if live["thinking"] else f"\n💭 {DIM}") + text, end="", flush=True)
+                elif not live["thinking"]:
+                    print("\n💭 思考中…", flush=True)
+                live["thinking"] = True
+
+            case TextDelta(text=text):
+                if not live["text"]:
+                    text = text.lstrip()             # 思考完常常先来几个换行
+                    if not text:
+                        return
+                    end_thinking()
+                    print("\n💬 ", end="")
+                    live["text"] = True
+                print(text, end="", flush=True)
+
             case LLMResponded(text=text, tool_calls=calls, usage=usage, context_window=window):
-                # 只打印动手之前说的话，最终回答由主循环打印
+                end_thinking()
+                if live["text"]:
+                    print()
+                    streamed = text
+                    for ref in REF.findall(text):
+                        print(_show_table(t) if (t := results.get(ref)) else f"（找不到结果 {ref}）")
+                elif calls and text:
+                    # 不流式时只打印动手之前说的话，最终回答等 TurnEnded
+                    print(f"\n🤖 {results.expand(text, _show_table)}")
                 if calls:
-                    if text:
-                        print(f"\n🤖 {results.expand(text, _show_table)}")
                     print(f"   ↳ 调用：{', '.join(calls)}")
                 print(f"   📊 {_usage_line(usage, window)}")
+
+            case TurnEnded(answer=answer) if answer and answer != streamed:
+                print(f"\n💬 {results.expand(answer, _show_table)}")
+
+            case TurnEnded():
+                end_thinking()                       # 断在思考中间
 
             case ToolStarted(name="ask_user"):
                 pass                                  # 问题由 _ask 打印
@@ -417,8 +469,7 @@ def _ask(q: PendingQuestion) -> None:
 def _run(app: Application, turn: Callable[[], str]) -> None:
     """跑一轮（新问题或接着跑）。断了的话进度留在 agent.interrupted，提示可以 /continue。"""
     try:
-        answer = turn()
-        print(f"\n💬 {app.results.expand(answer, _show_table)}")
+        turn()                  # 回答由事件打印（流式时边生成边打）
     except AwaitingUser as asked:
         _ask(asked.pending)
     except KeyboardInterrupt:
