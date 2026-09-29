@@ -454,8 +454,25 @@ Python 和 R 能做的事比 SQL 多得多，所以不在代码层面拦（拦�
 
 反过来，FinHelm 也是一个 MCP 服务器：`python -m data_agent.mcp.server --docs-dir <目录>` 把知识库的
 `list_docs` / `search_docs` / `read_doc` 给任何 MCP 客户端用（Claude Code：`claude mcp add finhelm -- python -m data_agent.mcp.server --docs-dir ...`），
-用法说明作为 `instructions` 发过去，和我们自己提示词里的是同一段话。验收：FinanceBench 端到端的 `agentic_mcp` 做法关掉原生知识库工具、
-全走 MCP（`python -m evals.financebench.e2e --modes agentic_mcp`），分数应该和原生的一样。
+用法说明作为 `instructions` 发过去，和我们自己提示词里的是同一段话。
+
+**验收**：FinanceBench 端到端的 `agentic_mcp` 关掉原生知识库工具、全走 MCP（4 路并发共用一个服务器进程），
+和原生同一次运行对比（`python -m evals.financebench.e2e --modes agentic,agentic_mcp`）：
+
+| | 答对 | 平均输入 token | 平均步数 | 平均秒数 | list / search / read_doc 调用 |
+|:--|--:|--:|--:|--:|:--|
+| 原生工具 | 48/50 = 96% | 24.8k | 4.0 | 15 | 70 / 97 / 12 |
+| 走 MCP | 48/50 = 96% | 23.5k | 4.1 | 17 | 63 / 106 / 16 |
+
+逐题对错完全相同（错的是同样两题：标准答案舍入、净利润口径），没有一次超时或协议错误；
+慢 2 秒来自一个服务器进程按顺序处理 4 路的请求。协议这一层没丢东西。
+
+Claude Code 也能直接用这个知识库（服务器由它按命令起，跑的是我们的代码和环境）。这台机器上要写全 Python 路径、设 PYTHONPATH
+（环境里有个同名的无关 `data_agent` 包）：
+
+```powershell
+claude mcp add finhelm -s user -e PYTHONPATH=D:\AgentLearning\MyFirstAgent\src -- D:\anaconda3\envs\agentlearn\python.exe -X utf8 -m data_agent.mcp.server --docs-dir D:\AgentLearning\MyFirstAgent\data\financebench\pdfs
+```
 
 ---
 
