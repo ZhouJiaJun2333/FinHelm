@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, ClassVar
 
 from pydantic import BaseModel, Field
@@ -72,9 +72,12 @@ class Sandbox:
         kill_command: list[str] | None = None,
         cwd: Path | None = None,
         save: Save | None = None,
+        figures_dir: Path | None = None,
     ) -> None:
         self.command = command
         self.work_dir = work_dir
+        # 容器里的 figures/ 实际挂的是宿主机上的哪个目录（子 Agent 各用各的，见 docker()）。None = work_dir/figures
+        self.figures_dir = figures_dir
         self.resolve = resolve
         self.save = save
         self.timeout_s = timeout_s
@@ -91,10 +94,13 @@ class Sandbox:
     def docker(
         cls, image: str, kernel: KernelSpec, work_dir: Path, resolve: Resolve, *,
         timeout_s: float = 60, memory: str = "2g", cpus: float = 2, save: Save | None = None,
-        data_dir: Path | None = None,
+        data_dir: Path | None = None, figures_dir: Path | None = None,
     ) -> "Sandbox":
-        """data_dir：场景包自带的数据，只读挂到容器的 /data/。"""
+        """data_dir：场景包自带的数据，只读挂到容器的 /data/。
+        figures_dir：把容器里的 /work/figures 换成宿主机上的这个目录。子 Agent 同时跑时各写各的，
+        模型照样往 figures/ 存，不会把别人的同名文件盖掉；工作目录其余部分（inputs/ 等）照常共享。"""
         work_dir = work_dir.resolve()
+        figures_dir = figures_dir.resolve() if figures_dir is not None else None
         name = f"finhelm-sandbox-{secrets.token_hex(4)}"
         mounts = [arg for f in kernel.files for arg in
                   ("--mount", f"type=bind,source={f.resolve()},target={MOUNT}/{f.name},readonly")]
@@ -106,12 +112,13 @@ class Sandbox:
             "--memory", memory, "--memory-swap", memory, "--cpus", str(cpus), "--pids-limit", "128",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000",
             "--mount", f"type=bind,source={work_dir},target=/work", *mounts,
+            *(("--mount", f"type=bind,source={figures_dir},target=/work/figures") if figures_dir else ()),
             *(("--mount", f"type=bind,source={data_dir.resolve()},target=/data,readonly") if data_dir else ()),
             "-w", "/work", *env,
             image, *kernel.command, f"{MOUNT}/{kernel.files[0].name}",
         ]
         return cls(command, work_dir, resolve, timeout_s=timeout_s,
-                   kill_command=["docker", "kill", name], save=save)
+                   kill_command=["docker", "kill", name], save=save, figures_dir=figures_dir)
 
     @classmethod
     def local(cls, kernel: KernelSpec, work_dir: Path, resolve: Resolve, *, timeout_s: float = 60,
@@ -136,7 +143,7 @@ class Sandbox:
                 elif msg["op"] == "done":
                     return Execution(
                         output=msg["output"], value=msg["value"], error=msg["error"],
-                        figures=[self.work_dir / f for f in msg["figures"]],
+                        figures=[self._host_path(f) for f in msg["figures"]],
                     )
         except TimeoutError:
             self.close()
@@ -149,6 +156,13 @@ class Sandbox:
                 return Execution(error="用户中断了执行，内核已重启。", restarted=True)
             return Execution(error="内核意外退出（常见原因是内存超限）。" + (f"\n{detail}" if detail else ""),
                              restarted=True)
+
+    def _host_path(self, path: str) -> Path:
+        """内核报的路径（相对 /work）→ 宿主机上的路径。"""
+        parts = PurePosixPath(path).parts
+        if self.figures_dir is not None and parts and parts[0] == "figures":
+            return self.figures_dir.joinpath(*parts[1:])
+        return self.work_dir / path
 
     def _payload(self, ref: str) -> dict[str, Any]:
         try:
@@ -174,6 +188,8 @@ class Sandbox:
             return
         self.close()
         self.work_dir.mkdir(parents=True, exist_ok=True)
+        if self.figures_dir is not None:              # 要挂进容器，得先有；用到沙箱时才建，不留空目录
+            self.figures_dir.mkdir(parents=True, exist_ok=True)
         self._log = tempfile.TemporaryFile()
         try:
             self._proc = subprocess.Popen(

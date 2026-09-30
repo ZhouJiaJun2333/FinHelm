@@ -14,9 +14,11 @@ CONTAINER_DATA = PurePosixPath("/data")
 
 
 class SandboxPaths:
-    def __init__(self, work_dir: Path, data_dir: Path | None = None) -> None:
+    def __init__(self, work_dir: Path, data_dir: Path | None = None, figures_dir: Path | None = None) -> None:
         self.work_dir = work_dir.resolve()
         self.data_dir = data_dir.resolve() if data_dir is not None else None
+        # 子 Agent 的沙箱把 figures/ 挂到了别处（Sandbox.docker 的 figures_dir），它说的 figures/a.png 在这里
+        self.figures_dir = figures_dir.resolve() if figures_dir is not None else None
 
     @property
     def allowed(self) -> str:
@@ -34,6 +36,9 @@ class SandboxPaths:
             path = Path(raw)
             path = path if path.is_absolute() else self.work_dir / path
         path = path.resolve()                  # 先解开 ..，再判断在不在允许的目录里
+        shared = self.work_dir / "figures"
+        if self.figures_dir is not None and path.is_relative_to(shared) and not path.is_relative_to(self.figures_dir):
+            path = self.figures_dir / path.relative_to(shared)
         if not any(root is not None and path.is_relative_to(root) for root in (self.work_dir, self.data_dir)):
             raise ValueError(f"只能读{self.allowed}下的文件。")
         if not path.is_file():
@@ -44,4 +49,6 @@ class SandboxPaths:
         """给模型看的写法：工作目录里的写相对路径（figures/fig-1.png），数据目录里的写 /data/manual.md。"""
         if self.data_dir is not None and path.is_relative_to(self.data_dir):
             return (CONTAINER_DATA / path.relative_to(self.data_dir).as_posix()).as_posix()
+        if self.figures_dir is not None and path.is_relative_to(self.figures_dir):
+            return f"figures/{path.relative_to(self.figures_dir).as_posix()}"
         return path.relative_to(self.work_dir).as_posix()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -32,7 +33,9 @@ class Database:
         self._statement_timeout_ms = statement_timeout_ms
         # SQL 不写 schema 前缀时去哪找表（BIRD 的标准 SQL 都不带前缀）
         self._search_path = search_path
-        self._active: psycopg.Connection | None = None     # 正在跑查询的连接，cancel() 用
+        # 正在跑查询的连接，cancel() 用。几个子 Agent 可能同时在查
+        self._active: set[psycopg.Connection] = set()
+        self._active_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     def _connect(self) -> psycopg.Connection:
@@ -59,7 +62,8 @@ class Database:
         """执行一条只读查询。多取一行判断是不是还有更多，只返回 max_rows 行。"""
         started = time.perf_counter()
         with self._connect() as conn, conn.cursor() as cur:
-            self._active = conn
+            with self._active_lock:
+                self._active.add(conn)
             try:
                 cur.execute(sql, params)
                 if cur.description is None:          # 不返回结果集的语句
@@ -67,7 +71,8 @@ class Database:
                 columns = [d.name for d in cur.description]
                 rows = cur.fetchmany(max_rows + 1)
             finally:
-                self._active = None
+                with self._active_lock:
+                    self._active.discard(conn)
 
         truncated = len(rows) > max_rows
         elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -75,8 +80,9 @@ class Database:
 
     def cancel(self) -> None:
         """别的线程调：取消正在跑的查询，query() 那边抛 QueryCanceled。"""
-        conn = self._active
-        if conn is not None:
+        with self._active_lock:
+            active = list(self._active)
+        for conn in active:
             conn.cancel_safe()
 
     def query_dicts(self, sql: str, params: tuple[Any, ...] | None = None) -> list[dict]:

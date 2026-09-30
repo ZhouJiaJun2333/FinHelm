@@ -38,7 +38,7 @@ from .tools.memory import ReadMemoryTool, RememberTool
 from .memory import Memory
 from .rag import Collection, IndexSpec, SearchSpec
 from .skills import BUILTIN, Skill, load_skills, usable
-from .subagents import BUILTIN as BUILTIN_AGENTS, Definition, DelegateTool, load_definitions
+from .subagents import BUILTIN as BUILTIN_AGENTS, Child, Definition, DelegateTool, load_definitions
 from .subagents import usable as usable_agents
 
 
@@ -176,16 +176,20 @@ def build_application(
     data_dir = Path(settings.data_dir) if settings.data_dir else None
     if data_dir is not None and not data_dir.is_dir():
         raise FileNotFoundError(f"数据目录 {data_dir} 不存在（在项目根目录下运行？数据下载了吗？）")
-    for kind, enabled, image, kernel, tool_class in (
-        ("python", settings.python_sandbox, settings.sandbox_image, PYTHON_KERNEL, RunPythonTool),
-        ("r", settings.r_sandbox, settings.sandbox_r_image, R_KERNEL, RunRTool),
-    ):
+    kernels = {"python": (settings.sandbox_image, PYTHON_KERNEL), "r": (settings.sandbox_r_image, R_KERNEL)}
+
+    def make_sandbox(kind: str, figures_dir: Path | None = None) -> Sandbox:
+        image, kernel = kernels[kind]
+        return Sandbox.docker(
+            image, kernel, work_dir, result_resolver(results), timeout_s=settings.sandbox_timeout_s,
+            memory=settings.sandbox_memory, cpus=settings.sandbox_cpus, save=result_saver(results, kind),
+            data_dir=data_dir, figures_dir=figures_dir,
+        )
+
+    for kind, enabled, tool_class in (("python", settings.python_sandbox, RunPythonTool),
+                                      ("r", settings.r_sandbox, RunRTool)):
         if enabled:
-            sandboxes[kind] = Sandbox.docker(
-                image, kernel, work_dir, result_resolver(results), timeout_s=settings.sandbox_timeout_s,
-                memory=settings.sandbox_memory, cpus=settings.sandbox_cpus, save=result_saver(results, kind),
-                data_dir=data_dir,
-            )
+            sandboxes[kind] = make_sandbox(kind)
             tools.register(tool_class(sandboxes[kind]))
     # 读文档、看图：有沙箱才有文件可读。看图要模型能看：不注册的话，提示词里「交付前看一眼」那句也就没了
     if sandboxes:
@@ -238,20 +242,44 @@ def build_application(
     session_context = _session_context(inspector, memory)
     wrap_up = WRAP_UP_BEST_GUESS if settings.wrap_up == "best_guess" else WRAP_UP
 
-    # 子 Agent：全新的上下文，工具按类型从主 Agent 的里面挑（同一批实例，结果编号、沙箱、数据库都共用）
+    # 子 Agent：全新的上下文，工具按类型从主 Agent 的里面挑。数据库、知识库、结果编号共用同一批实例；
+    # 沙箱各起各的（几个子 Agent 同时跑，变量不能串），往 figures/ 存的落在 figures/<任务号>/
     definitions: list[Definition] = []
     agent_problems: list[str] = []
     if settings.subagents:
         found_agents, agent_problems = load_definitions([project / ".agents" / "agents", BUILTIN_AGENTS])
         definitions = usable_agents(found_agents, [t.name for t in tools])
 
-    def spawn(definition: Definition, emit: Callable[[Event], None]) -> Agent:
-        child_tools = ToolRegistry(t for t in tools if t.name in definition.allowed([t.name for t in tools]))
+    def spawn(definition: Definition, task: str, emit: Callable[[Event], None]) -> Child:
+        allowed = definition.allowed([t.name for t in tools])
+        figures = work_dir.resolve() / "figures" / task
+        own: dict[str, Sandbox] = {}
+        child_tools = ToolRegistry()
+        for tool in tools:
+            if tool.name not in allowed:
+                continue
+            if isinstance(tool, (RunPythonTool, RunRTool)):
+                kind = "python" if isinstance(tool, RunPythonTool) else "r"
+                own[kind] = make_sandbox(kind, figures)
+                tool = type(tool)(own[kind])
+            elif isinstance(tool, (ReadFileTool, ViewImageTool)):
+                tool = type(tool)(SandboxPaths(work_dir, data_dir, figures))
+            child_tools.register(tool)
         names = [t.name for t in child_tools]
-        return Agent(llm=llm, tools=child_tools, system_prompt=system_prompt(names, definition.role()),
-                     context=_context(settings, llm, child_tools), max_steps=definition.max_steps,
-                     approval_hook=approval_hook, on_event=emit, session_context=session_context,
-                     wrap_up_prompt=wrap_up)
+        agent = Agent(llm=llm, tools=child_tools, system_prompt=system_prompt(names, definition.role()),
+                      context=_context(settings, llm, child_tools), max_steps=definition.max_steps,
+                      approval_hook=approval_hook, on_event=emit, session_context=session_context,
+                      wrap_up_prompt=wrap_up)
+
+        def close() -> None:
+            for sandbox in own.values():
+                sandbox.close()
+
+        def files() -> list[str]:
+            root = work_dir.resolve()
+            return sorted(p.relative_to(root).as_posix() for p in figures.rglob("*") if p.is_file())
+
+        return Child(agent, close, files)
 
     delegate = None
     if definitions:

@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+import threading
+from pathlib import Path
+
 import pytest
 
 from data_agent.app import build_application
-from data_agent.core.events import SubagentEvent, ToolFinished, TurnEnded, TurnStarted, collect_sink
+from data_agent.core.events import (
+    LLMResponded,
+    SubagentEvent,
+    ToolFinished,
+    ToolStarted,
+    TurnEnded,
+    TurnStarted,
+    collect_sink,
+)
 from data_agent.core.messages import LLMResponse, ToolCall, Usage
+from data_agent.core.provider import LLMProvider
+from data_agent.db.connection import QueryResult
 from data_agent.settings import Settings
 from data_agent.subagents import BUILTIN, PARENT_ONLY, load_definitions
+from data_agent.tools.paths import SandboxPaths
+from data_agent.tools.python import PYTHON_KERNEL
+from data_agent.tools.sandbox import Sandbox
+from data_agent.tools.sql.results import ResultStore
 
 from fakes import ScriptedProvider
 
@@ -57,7 +74,7 @@ def test_子Agent拿不到只属于主Agent的工具(tmp_path):
 def test_开关关着就没有delegate(tmp_path):
     assert "delegate" not in build_application(settings(tmp_path, subagents=False), llm=ScriptedProvider()).tools
     app = build_application(settings(tmp_path), llm=ScriptedProvider())
-    assert "delegate" in app.tools and [d.name for d in app.subagents] == ["explore"]
+    assert "delegate" in app.tools and sorted(d.name for d in app.subagents) == ["analyst", "explore"]
     assert "explore：" in app.tools.get("delegate").description
 
 
@@ -94,13 +111,60 @@ def test_分派一个任务_子Agent上下文全新_只交回结论(tmp_path):
     assert app.agent.session_usage.output == 20
 
 
+class Routed(LLMProvider):
+    """主 Agent 照剧本走；子 Agent 按它的任务说明（第一条消息）查 children 回答，值可以是异常或函数。"""
+
+    model = "routed"
+    context_window = None
+
+    def __init__(self, parent: list, children: dict) -> None:
+        self.parent = ScriptedProvider(parent)
+        self.children = children
+
+    def chat(self, messages, tools=None, system=None, max_tokens=None):
+        if system and system.startswith("你是 FinHelm 的子 Agent"):
+            reply = self.children[messages[0].content]
+            reply = reply() if callable(reply) and not isinstance(reply, type) else reply
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+        return self.parent.chat(messages, tools, system, max_tokens)
+
+
+def test_几个任务同时跑(tmp_path):
+    both_in = threading.Barrier(2, timeout=5)           # 两个子 Agent 都进了请求才放行：不是一个接一个
+
+    def answer(text):
+        def reply():
+            both_in.wait()
+            return say(text)
+        return reply
+
+    llm = Routed([delegate(("explore", "甲", "查甲"), ("explore", "乙", "查乙")), say("汇总")],
+                 {"查甲": answer("甲是 1"), "查乙": answer("乙是 2")})
+    events = []
+    build_application(settings(tmp_path), llm=llm, on_event=collect_sink(events)).agent.run("查甲和乙")
+    finished = next(e for e in events if isinstance(e, ToolFinished) and e.name == "delegate")
+    assert "t1 · explore · 甲：完成" in finished.content and "甲是 1" in finished.content
+    assert "t2 · explore · 乙：完成" in finished.content and "乙是 2" in finished.content
+    assert finished.content.index("t1") < finished.content.index("t2")      # 交回的顺序按分派的顺序
+    ended = {e.task for e in events if isinstance(e, SubagentEvent) and isinstance(e.event, TurnEnded)}
+    assert ended == {"t1", "t2"}
+
+
+def test_任务号在会话里接着编(tmp_path):
+    llm = Routed([delegate(("explore", "甲", "查甲")), say("好"), delegate(("explore", "乙", "查乙"), call_id="d2"),
+                  say("好")], {"查甲": say("1"), "查乙": say("2")})
+    events = []
+    app = build_application(settings(tmp_path), llm=llm, on_event=collect_sink(events))
+    app.agent.run("一")
+    app.agent.run("二")
+    assert [e.task for e in events if isinstance(e, SubagentEvent) and isinstance(e.event, TurnStarted)] == ["t1", "t2"]
+
+
 def test_一个任务失败不连累别的_全失败才算这次调用出错(tmp_path):
-    llm = ScriptedProvider([
-        delegate(("explore", "甲", "查甲"), ("explore", "乙", "查乙")),
-        ConnectionError("断网了"),                        # 甲：请求失败
-        say("乙查到了"),                                  # 乙
-        say("汇总"),
-    ])
+    llm = Routed([delegate(("explore", "甲", "查甲"), ("explore", "乙", "查乙")), say("汇总")],
+                 {"查甲": ConnectionError("断网了"), "查乙": say("乙查到了")})
     events = []
     app = build_application(settings(tmp_path), llm=llm, on_event=collect_sink(events))
     app.agent.run("查甲和乙")
@@ -111,11 +175,11 @@ def test_一个任务失败不连累别的_全失败才算这次调用出错(tmp
 
 
 def test_没有这个类型_告诉模型有哪些(tmp_path):
-    llm = ScriptedProvider([delegate(("analyst", "x", "y")), say("好")])
+    llm = ScriptedProvider([delegate(("planner", "x", "y")), say("好")])
     events = []
     build_application(settings(tmp_path), llm=llm, on_event=collect_sink(events)).agent.run("q")
     finished = next(e for e in events if isinstance(e, ToolFinished))
-    assert finished.is_error and "没有子 Agent 类型 analyst" in finished.content and "explore" in finished.content
+    assert finished.is_error and "没有子 Agent 类型 planner" in finished.content and "explore" in finished.content
 
 
 class Stopped(BaseException):
@@ -134,3 +198,71 @@ def test_停止_在子Agent的事件上抛出_主Agent这一轮也停下(tmp_pat
         app.agent.run("q")
     assert llm.calls == 1                     # 子 Agent 一次都没请求
     assert app.agent.interrupted is not None and app.agent.interrupted.reason.startswith("Stopped")
+
+
+def test_停止_一个子Agent被停下_兄弟在下一个事件上也停(tmp_path):
+    first_stopped = threading.Event()
+
+    def second():
+        first_stopped.wait(5)                  # 乙的请求等甲被停下了才返回：返回后下一个事件就该停
+        return LLMResponse(text="", stop_reason="tool_use", tool_calls=[ToolCall("x", "read_memory", {"scope": "user",
+                                                                                                        "name": "a"})])
+
+    llm = Routed([delegate(("explore", "甲", "查甲"), ("explore", "乙", "查乙")), say("主")],
+                 {"查甲": say("甲"), "查乙": second})
+    seen = []
+
+    def sink(event):
+        seen.append(event)
+        if isinstance(event, SubagentEvent) and event.task == "t1" and isinstance(event.event, LLMResponded):
+            first_stopped.set()
+            raise Stopped()
+
+    app = build_application(settings(tmp_path), llm=llm, on_event=sink)
+    with pytest.raises(Stopped):
+        app.agent.run("q")
+    inner = [(e.task, e.event) for e in seen if isinstance(e, SubagentEvent)]
+    assert not any(isinstance(ev, ToolStarted) for _, ev in inner)          # 乙的工具没执行
+    assert {t for t, ev in inner if isinstance(ev, TurnEnded)} == {"t1", "t2"}   # 两个都报了停下
+    assert app.agent.interrupted.reason.startswith("Stopped")
+
+
+# ================================================================ 共用的东西
+def test_结果编号_同时存不重号_记得是哪个任务的():
+    store = ResultStore()
+    table = QueryResult(["n"], [(1,)], False, 1)
+
+    def work(name):
+        with store.origin(name):
+            for _ in range(50):
+                store.add("select 1", table)
+
+    threads = [threading.Thread(target=work, args=(f"t{i}",)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    store.add("select 1", table)                        # 主 Agent 的
+    assert len(store.refs()) == len(set(store.refs())) == 201
+    assert all(len(store.made_by(f"t{i}")) == 50 for i in range(4))
+    assert store.refs()[-1] not in {r for i in range(4) for r in store.made_by(f"t{i}")}
+
+
+def test_子Agent的沙箱_figures挂到自己的目录(tmp_path):
+    figures = tmp_path / "figures" / "t1"
+    sandbox = Sandbox.docker("img", PYTHON_KERNEL, tmp_path, lambda ref: {}, figures_dir=figures)
+    assert f"type=bind,source={figures.resolve()},target=/work/figures" in sandbox.command
+    assert sandbox._host_path("figures/a.png") == figures.resolve() / "a.png"
+    assert sandbox._host_path("inputs/x.csv") == tmp_path.resolve() / "inputs" / "x.csv"
+    assert not figures.exists()                         # 用到沙箱时才建目录
+
+    # 读文件、看图：它说 figures/a.png 指的是自己目录里的；inputs/ 照常共享
+    figures.mkdir(parents=True)
+    (figures / "a.png").write_bytes(b"x")
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / "d.csv").write_text("a", encoding="utf-8")
+    paths = SandboxPaths(tmp_path, figures_dir=figures)
+    for raw in ("figures/a.png", "/work/figures/a.png", str(figures / "a.png")):
+        assert paths.resolve(raw) == (figures / "a.png").resolve()
+        assert paths.display(paths.resolve(raw)) == "figures/a.png"
+    assert paths.resolve("inputs/d.csv") == (tmp_path / "inputs" / "d.csv").resolve()

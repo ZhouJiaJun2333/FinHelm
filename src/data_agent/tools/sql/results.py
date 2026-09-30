@@ -12,7 +12,9 @@ import datetime as dt
 import itertools
 import json
 import re
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -43,6 +45,11 @@ class ResultStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path              # None = 只在内存里
         self._results: dict[str, StoredResult] = {}
+        # 几个子 Agent 同时查的时候编号不能重、列表不能边改边读
+        self._lock = threading.Lock()
+        # 每个编号是谁产出的（子 Agent 的任务号；主 Agent 是 None）。按线程记：子 Agent 各在自己的线程里跑
+        self._origin: dict[str, str | None] = {}
+        self._local = threading.local()
         if path is not None and path.exists():
             for line in path.read_text(encoding="utf-8").splitlines():
                 table = _decode(json.loads(line))
@@ -52,20 +59,37 @@ class ResultStore:
 
     def add(self, sql: str, result: QueryResult, *, source: str = "sql", title: str = "") -> StoredResult:
         """存一个结果，编上下一个号。"""
-        table = StoredResult(f"r{next(self._numbers)}", sql, result, source, title)
-        self._results[table.ref] = table
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(_encode(table), ensure_ascii=False, default=str) + "\n")
+        with self._lock:
+            table = StoredResult(f"r{next(self._numbers)}", sql, result, source, title)
+            self._results[table.ref] = table
+            self._origin[table.ref] = getattr(self._local, "origin", None)
+            if self.path is not None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(_encode(table), ensure_ascii=False, default=str) + "\n")
         return table
+
+    @contextmanager
+    def origin(self, name: str) -> Iterator[None]:
+        """这个线程里接下来存的结果都记在 name 名下（delegate 给每个子任务包一层）。"""
+        previous = getattr(self._local, "origin", None)
+        self._local.origin = name
+        try:
+            yield
+        finally:
+            self._local.origin = previous
+
+    def made_by(self, name: str) -> list[str]:
+        with self._lock:
+            return [ref for ref, origin in self._origin.items() if origin == name]
 
     def get(self, ref: str) -> StoredResult | None:
         return self._results.get(ref.strip())
 
     def refs(self) -> list[str]:
         """按先后排，最后一个是最近的。"""
-        return list(self._results)
+        with self._lock:
+            return list(self._results)
 
     def expand(self, text: str, render: Callable[[StoredResult], str]) -> str:
         """把 {{r3}} 换成 render(结果)。怎么画由界面定。"""
