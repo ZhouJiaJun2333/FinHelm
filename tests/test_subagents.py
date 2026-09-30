@@ -275,3 +275,28 @@ def test_同一次分派里任务说明一模一样_拒绝(tmp_path):
     finished = next(e for e in events if isinstance(e, ToolFinished))
     assert finished.is_error and "第 1 个和第 2 个任务的说明一模一样" in finished.content
     assert llm.calls == 2                     # 子 Agent 一个都没起
+
+
+# ================================================================ 存盘和重新打开
+def test_子任务的过程存盘_重新打开后任务号接着编_界面能建出子任务(tmp_path):
+    from data_agent.session.store import load_transcript
+    from data_agent.web.serialize import timeline
+
+    transcripts = tmp_path / "subagents"
+    llm = Routed([delegate(("explore", "甲", "查甲")), say("好")], {"查甲": say("甲是 1")})
+    app = build_application(settings(tmp_path), llm=llm, subagent_dir=transcripts)
+    app.agent.run("q")
+    header, entries = load_transcript(transcripts / "t1.jsonl")
+    assert header == {"type": "subagent", "version": 1, "task": "t1", "agent": "explore", "title": "甲", "prompt": "查甲"}
+    assert [e.content for e in entries] == ["查甲", "甲是 1"]
+
+    # 重新打开：delegate 那条下面建出子任务，它自己的条目和主对话一样的形状
+    items = timeline(app.agent.context.history, subagents=transcripts)
+    tool = next(i for i in items if i["kind"] == "tool")
+    assert [(c["task"], c["agent"], c["title"], c["status"]) for c in tool["children"]] == [("t1", "explore", "甲", "done")]
+    assert [(i["kind"], i["text"]) for i in tool["children"][0]["items"]] == [("user", "查甲"), ("assistant", "甲是 1")]
+
+    # 同一个会话再开一次：新任务从 t2 编起，不盖掉 t1 的过程
+    llm2 = Routed([delegate(("explore", "乙", "查乙")), say("好")], {"查乙": say("乙")})
+    build_application(settings(tmp_path), llm=llm2, subagent_dir=transcripts).agent.run("q2")
+    assert sorted(p.name for p in transcripts.iterdir()) == ["t1.jsonl", "t2.jsonl"]

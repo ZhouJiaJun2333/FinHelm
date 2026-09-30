@@ -4,6 +4,7 @@ import type { Step, Tool } from "../blocks";
 import { toolMeta, toolSubtitle } from "../toolMeta";
 import { DataTable } from "./DataTable";
 import { FileChip } from "./Artifact";
+import { Subtasks } from "./Subtasks";
 
 type Props = { steps: Step[]; files: string[]; live: boolean; onOpenFile: (url: string) => void;
                onOpenResult: (ref: string) => void };
@@ -16,7 +17,11 @@ export function Activity({ steps, files, live, onOpenFile, onOpenResult }: Props
   const running = live ? tools.find((s) => s.tool.status === "running") : undefined;
 
   let label: React.ReactNode;
-  if (running) {
+  if (running?.tool.name === "delegate") {
+    const n = (running.tool.arguments.tasks as unknown[] | undefined)?.length ?? 0;
+    const done = running.tool.children?.filter((c) => c.status !== "running").length ?? 0;
+    label = <span className="shimmer">{n} 个子任务进行中{done ? `，${done} 个已完成` : ""}…</span>;
+  } else if (running) {
     label = <span className="shimmer">{toolMeta(running.tool.name).doing}…</span>;
   } else if (live && steps.at(-1)?.kind === "thinking") {
     label = <span className="shimmer">思考中…</span>;
@@ -41,7 +46,7 @@ export function Activity({ steps, files, live, onOpenFile, onOpenResult }: Props
         <div className="steps">
           {steps.map((s) => s.kind === "thinking"
             ? <ThinkingStep key={`t${s.id}`} text={s.text} />
-            : <ToolStep key={s.id} tool={s.tool} onOpenResult={onOpenResult} />)}
+            : <ToolStep key={s.id} tool={s.tool} live={live} onOpenFile={onOpenFile} onOpenResult={onOpenResult} />)}
         </div>
       )}
       {files.length > 0 && (
@@ -65,8 +70,10 @@ function ThinkingStep({ text }: { text: string }) {
   );
 }
 
-function ToolStep({ tool, onOpenResult }: { tool: Tool; onOpenResult: (ref: string) => void }) {
-  const [open, setOpen] = useState(false);
+function ToolStep({ tool, live, onOpenFile, onOpenResult }:
+    { tool: Tool; live: boolean; onOpenFile: (url: string) => void; onOpenResult: (ref: string) => void }) {
+  // 分派的子任务默认展开：它们就是这一步在做的事
+  const [open, setOpen] = useState(tool.name === "delegate");
   const { label, icon: Icon } = toolMeta(tool.name);
   const code = (tool.arguments.sql ?? tool.arguments.code) as string | undefined;
   const rest = Object.fromEntries(Object.entries(tool.arguments).filter(([k]) => k !== "sql" && k !== "code"));
@@ -80,7 +87,9 @@ function ToolStep({ tool, onOpenResult }: { tool: Tool; onOpenResult: (ref: stri
         <span className="faint ellipsis">{toolSubtitle(tool.arguments)}</span>
         <ChevronRight size={13} className="chev" />
       </button>
-      {open && (
+      {open && tool.name === "delegate" ? (
+        <Subtasks tool={tool} live={live} onOpenFile={onOpenFile} onOpenResult={onOpenResult} />
+      ) : open && (
         <div className="step-body">
           {code && <pre className="code">{code}</pre>}
           {Object.keys(rest).length > 0 && <pre className="code">{JSON.stringify(rest, null, 2)}</pre>}

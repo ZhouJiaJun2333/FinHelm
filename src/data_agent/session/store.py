@@ -5,6 +5,7 @@
         checkpoint.json  没跑完的那一轮的进度（每走一步整个重写），这一轮提交了就删
         meta.json        用户改过的标题（Web 界面的「重命名」）
         results.jsonl    查询结果 r1、r2…（tools/sql/results.py 写）
+        subagents/       子 Agent 的过程，一个任务一个 t1.jsonl（delegate 写，界面重新打开时展开看）
         exports/         /save 和 export_csv 写的 CSV
         work/            run_python 沙箱的工作目录（图表在 work/figures/）
 
@@ -62,6 +63,10 @@ class Session:
     @property
     def meta_path(self) -> Path:
         return self.root / "meta.json"
+
+    @property
+    def subagents_dir(self) -> Path:
+        return self.root / "subagents"
 
     # ------------------------------------------------------------ 新建 / 打开
     @classmethod
@@ -203,3 +208,21 @@ class Session:
         with open(self.log_path, "a", encoding="utf-8") as f:
             for r in records:
                 f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
+
+
+# ---------------------------------------------------------------- 子 Agent 的过程
+def save_transcript(path: Path, header: dict[str, Any], entries: list[Entry] | tuple[Entry, ...] = ()) -> None:
+    """一个子任务的过程：第一行 header（任务号、类型、标题、任务说明），后面是它的历史条目。整个重写。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [{"type": "subagent", "version": VERSION, **header}, *(encode(e) for e in entries)]
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("".join(json.dumps(r, ensure_ascii=False, default=str) + "\n" for r in lines), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def load_transcript(path: Path) -> tuple[dict[str, Any], list[Entry]]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header = json.loads(lines[0])
+    if header.get("type") != "subagent" or header.get("version") != VERSION:
+        raise ValueError(f"不认识的子 Agent 过程格式：{path}")
+    return header, [decode(json.loads(line)) for line in lines[1:] if line.strip()]

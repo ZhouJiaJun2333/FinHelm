@@ -532,7 +532,7 @@ def main() -> None:
     try:
         app = build_application(settings, on_event=make_console_sink(args.verbose, results),
                                 results=results, export_dir=session.exports_dir,
-                                work_dir=session.work_dir, ask_mcp=ask_mcp)
+                                work_dir=session.work_dir, ask_mcp=ask_mcp, subagent_dir=session.subagents_dir)
     except Exception as exc:
         print(f"❌ 初始化失败：{type(exc).__name__}: {exc}")
         print("检查 .env 配置（参考 .env.example）")

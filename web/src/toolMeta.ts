@@ -1,5 +1,5 @@
 import {
-  BookOpen, Brain, Code2, Database, Download, FileText, Image, Library, ListTree, Plug, Search, Sparkles,
+  BookOpen, Brain, Code2, Database, Download, FileText, Image, Library, ListTree, Network, Plug, Search, Sparkles,
   TableProperties, type LucideIcon,
 } from "lucide-react";
 
@@ -19,6 +19,7 @@ const TOOLS: Record<string, { label: string; doing: string; icon: LucideIcon }> 
   list_docs: { label: "列出文档", doing: "正在列出文档", icon: Library },
   search_docs: { label: "检索文档", doing: "正在检索文档", icon: Search },
   read_doc: { label: "阅读文档", doing: "正在阅读文档", icon: BookOpen },
+  delegate: { label: "分派子任务", doing: "子任务进行中", icon: Network },
 };
 
 export function toolMeta(name: string) {
@@ -30,6 +31,7 @@ export function toolMeta(name: string) {
 
 // 标题后面那句：模型写的用途，没有就取 SQL / 代码 / 参数的第一行
 export function toolSubtitle(args: Record<string, unknown>): string {
+  if (Array.isArray(args.tasks)) return args.tasks.map((t: { title?: string }) => t.title ?? "").join("、");
   const pick = args.purpose ?? args.query ?? args.sql ?? args.code ?? args.table ?? args.path ?? args.name ?? "";
   return String(pick).split("\n").find((l) => l.trim())?.trim() ?? "";
 }

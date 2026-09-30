@@ -16,7 +16,7 @@ from typing import Any, Callable
 from ..app import Application, build_application
 from ..cli import pick_option
 from ..core.agent import AwaitingUser
-from ..core.events import Event, TextDelta, ToolFinished, TurnEnded
+from ..core.events import Event, SubagentEvent, TextDelta, ToolFinished, TurnEnded
 from ..core.messages import ToolCall
 from ..core.provider import LLMProvider
 from ..mcp import Decision, McpTool
@@ -55,7 +55,7 @@ class SessionRunner:
         self.results = ResultStore(session.results_path)
         self.app: Application = build_application(
             settings, on_event=self._on_event, results=self.results, export_dir=session.exports_dir,
-            work_dir=session.work_dir, ask_mcp=self._ask_mcp, llm=llm)
+            work_dir=session.work_dir, ask_mcp=self._ask_mcp, llm=llm, subagent_dir=session.subagents_dir)
         self.app.restore(history, session.load_checkpoint())
         self.app.agent.checkpoint_hook = session.save_checkpoint
         self._result_count = len(self.results.refs())
@@ -92,7 +92,7 @@ class SessionRunner:
             entries += turn.entries           # 没跑完的那一轮不在正式历史里，也要看得到
         return {"type": "snapshot", "data": {
             "session": self.id,
-            "items": timeline(entries, self.file_url, self.results),
+            "items": timeline(entries, self.file_url, self.results, self.session.subagents_dir),
             "interrupted": interrupted_json(turn),
             "results": self.results_json(),
             "approvals": [a["request"] for a in self._approvals.values()],
@@ -127,7 +127,9 @@ class SessionRunner:
         if not isinstance(event, TextDelta):          # 每个增量都带状态太重，前端自己把字拼上
             message["state"] = state_json(self.app.agent.state)
         self._publish(message)
-        if isinstance(event, ToolFinished) and len(self.results.refs()) != self._result_count:
+        # 子 Agent 查出来的表也要马上能在面板里打开，不用等整个分派做完
+        inner = event.event if isinstance(event, SubagentEvent) else event
+        if isinstance(inner, ToolFinished) and len(self.results.refs()) != self._result_count:
             self._result_count = len(self.results.refs())
             self._publish({"type": "results", "data": self.results_json()})
 

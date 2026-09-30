@@ -40,7 +40,17 @@ export type Table = {
 
 export type Details =
   | ({ kind: "table" } & Table)
-  | { kind: "execution"; output: string; value: string | null; error: string | null; figures: string[] };
+  | { kind: "execution"; output: string; value: string | null; error: string | null; figures: string[] }
+  | { kind: "delegate"; tasks: { task: string; ok: boolean; error: string }[] };
+
+// delegate 分派出去的一个子任务：它自己的一份时间线（同一个 reduce 折叠出来）
+export type Subtask = {
+  task: string;
+  agent: string;
+  title: string;
+  status: "running" | "done" | "error" | "stopped";
+  items: Item[];
+};
 
 export type Item =
   | { kind: "user"; id: number; text: string }
@@ -55,6 +65,7 @@ export type Item =
       content: string;
       details: Details | null;
       elapsed_ms: number;
+      children?: Subtask[];
     }
   | { kind: "notice"; id: number; text: string; level: "info" | "warn" | "error" };
 

@@ -15,6 +15,13 @@ export type Block =
   | { kind: "ask"; id: number; tool: Tool }
   | { kind: "notice"; id: number; text: string; level: "info" | "warn" | "error" };
 
+// 一条工具调用产出的文件：沙箱的图、PDF、Excel…，delegate 的算上它的子任务的
+export function filesOf(it: Item): string[] {
+  if (it.kind !== "tool") return [];
+  const own = it.details?.kind === "execution" ? it.details.figures : [];
+  return [...own, ...(it.children ?? []).flatMap((c) => c.items.flatMap(filesOf))];
+}
+
 export function toBlocks(items: Item[]): Block[] {
   const blocks: Block[] = [];
   let group: Extract<Block, { kind: "activity" }> | null = null;
@@ -46,7 +53,7 @@ export function toBlocks(items: Item[]): Block[] {
       const g = activity();
       if (!g.id) g.id = it.id;
       g.steps.push({ kind: "tool", id: it.id, tool: it });
-      if (it.details?.kind === "execution") g.files.push(...it.details.figures);
+      g.files.push(...filesOf(it));
     } else {
       group = null;
       blocks.push(it.kind === "user" ? { kind: "user", id: it.id, text: it.text }

@@ -1,7 +1,7 @@
 // 时间线：打开会话时用服务器给的历史条目建起来，之后每来一个事件就改一下。
 // 和后端 core/state.py 的 reduce 是一个思路：纯函数，(条目, 事件) -> 新条目。
 
-import type { Item, ServerMessage } from "./types";
+import type { Item, ServerMessage, Subtask } from "./types";
 
 let nextId = 1;
 export const withId = <T extends object>(item: T) => ({ ...item, id: nextId++ });
@@ -27,6 +27,37 @@ function patchTool(items: Item[], callId: string, name: string, patch: Partial<T
   // 找不到（服务器重启后接着答的那次提问）就补一条
   return [...items, withId({ kind: "tool" as const, call_id: callId, name, arguments: {}, status: "done" as const,
                               content: "", details: null, elapsed_ms: 0, ...patch })];
+}
+
+// 子 Agent 的一个事件 → 折进正在跑的那次 delegate 下面对应的子任务（它自己的条目用同一个 reduce 折）
+function subagentEvent(items: Item[], d: any): Item[] {
+  let i = items.length - 1;
+  while (i >= 0 && !(items[i].kind === "tool" && (items[i] as Tool).name === "delegate" && (items[i] as Tool).status === "running")) i--;
+  if (i < 0) return items;
+  const tool = items[i] as Tool;
+  const children = [...(tool.children ?? [])];
+  let j = children.findIndex((c) => c.task === d.task);
+  if (j < 0) {
+    children.push({ task: d.task, agent: d.agent, title: d.title, status: "running", items: [] });
+    j = children.length - 1;
+  }
+  const inner = d.event as ServerMessage;
+  let status = children[j].status;
+  if (inner.type === "TurnEnded") {
+    const why: string = inner.data.interrupted ?? "";
+    status = !why ? "done" : /^(Stopped|_Aborted)/.test(why) ? "stopped" : "error";
+  }
+  children[j] = { ...children[j], status, items: reduce(children[j].items, inner) };
+  const next = items.slice();
+  next[i] = { ...tool, children };
+  return next;
+}
+
+// delegate 做完：按交回的结果定下每个子任务的状态
+function settleChildren(children: Subtask[] | undefined, details: any): Subtask[] | undefined {
+  if (!children || details?.kind !== "delegate") return children;
+  const ok = new Map<string, boolean>(details.tasks.map((t: { task: string; ok: boolean }) => [t.task, t.ok]));
+  return children.map((c) => (ok.has(c.task) ? { ...c, status: ok.get(c.task) ? "done" : "error" } : c));
 }
 
 // 最后一条还在流式输出的回复（属于这一步）
@@ -70,9 +101,15 @@ export function reduce(items: Item[], msg: ServerMessage): Item[] {
       return [...items, withId({ kind: "tool" as const, call_id: d.call_id, name: d.name, arguments: d.arguments,
                                  status: "running" as const, content: "", details: null, elapsed_ms: 0 })];
 
-    case "ToolFinished":
+    case "ToolFinished": {
+      const own = items.find((it) => it.kind === "tool" && it.call_id === d.call_id) as Tool | undefined;
       return patchTool(items, d.call_id, d.name, {
-        status: d.is_error ? "error" : "done", content: d.content, details: d.details, elapsed_ms: d.elapsed_ms });
+        status: d.is_error ? "error" : "done", content: d.content, details: d.details, elapsed_ms: d.elapsed_ms,
+        children: settleChildren(own?.children, d.details) });
+    }
+
+    case "SubagentEvent":
+      return subagentEvent(items, d);
 
     case "ToolDenied":
       return patchTool(items, d.call_id, d.name, { status: "denied", content: d.reason });
@@ -104,7 +141,10 @@ export function reduce(items: Item[], msg: ServerMessage): Item[] {
     case "TurnEnded": {
       let next = items.map((it) =>
         it.kind === "assistant" && it.streaming ? { ...it, streaming: false }
-        : it.kind === "tool" && it.status === "running" ? { ...it, status: "error" as const } : it);
+        : it.kind === "tool" && it.status === "running"
+          ? { ...it, status: "error" as const,
+              children: it.children?.map((c) => (c.status === "running" ? { ...c, status: "stopped" as const } : c)) }
+          : it);
       // 没流式出来的回答（步数用完的兜底话）补上
       if (d.answer && !next.some((it) => it.kind === "assistant" && it.text === d.answer)) {
         next = [...next, withId({ kind: "assistant" as const, text: d.answer, thinking: "", streaming: false })];

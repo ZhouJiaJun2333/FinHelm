@@ -12,9 +12,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import re
 import threading
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from pydantic import BaseModel, Field
@@ -23,12 +26,16 @@ from ..core.agent import Agent
 from ..core.events import Event, SubagentEvent, TurnEnded
 from ..core.messages import Usage
 from ..core.tools import Tool, ToolOutput
+from ..session.store import save_transcript
 from ..tools.sql.results import ResultStore
 from .catalog import Definition
 
 MAX_TASKS = 4
 ANSWER_CHARS = 4000            # 每个任务交回的话最多这么长，多个任务加起来也不会撑爆主上下文
 POLL_S = 0.2                   # 主线程等子任务时隔多久醒一次：Windows 上一直阻塞着收不到 Ctrl-C
+TASK_FILE = re.compile(r"t(\d+)\.jsonl")
+# 交回给主 Agent 的每一段的开头。界面重新打开会话时靠它找到每个任务的过程（web/serialize.py）
+REPORT_HEAD = re.compile(r"^## (t\d+) · ([\w-]+) · (.*)：(完成|失败)", re.M)
 
 DESCRIPTION = """\
 把任务分派给子 Agent。子 Agent 从全新的上下文开始：看不到这段对话，只看得到你写的任务说明；
@@ -109,7 +116,8 @@ class DelegateTool(Tool):
     class Args(BaseModel):
         tasks: list[Task] = Field(min_length=1, max_length=MAX_TASKS, description=f"要分派的任务，1 到 {MAX_TASKS} 个")
 
-    def __init__(self, definitions: list[Definition], spawn: Spawn, results: ResultStore) -> None:
+    def __init__(self, definitions: list[Definition], spawn: Spawn, results: ResultStore,
+                 transcripts: Path | None = None) -> None:
         self.definitions = {d.name: d for d in definitions}
         self.spawn = spawn
         self.results = results
@@ -120,7 +128,11 @@ class DelegateTool(Tool):
         self._lock = threading.Lock()                # 事件一次发一个；改下面几个字段
         self._running: dict[str, Child] = {}
         self._abort: BaseException | None = None     # 这次分派被停下的原因（第一个异常）
-        self._count = 0            # 任务号在会话里一直往下编，界面不会把两次分派的任务混在一起
+        # 每个子任务的过程存在这里（会话目录/subagents/，没有就不存：评测）
+        self.transcripts = transcripts
+        # 任务号在会话里一直往下编：两次分派的任务不会混，重新打开会话也不会盖掉以前的过程和 figures/t1/
+        self._count = max((int(m.group(1)) for p in transcripts.glob("t*.jsonl")
+                           if (m := TASK_FILE.fullmatch(p.name))), default=0) if transcripts else 0
 
     def bind(self, parent: Agent) -> None:
         self.parent = parent
@@ -175,6 +187,11 @@ class DelegateTool(Tool):
                 self._abort = exc
         self.cancel()
 
+    def _save(self, tid: str, header: dict, entries: list | None = None) -> None:
+        if self.transcripts is not None:
+            with contextlib.suppress(OSError):        # 存盘是给界面回看的，失败了不影响交回结果
+                save_transcript(self.transcripts / f"{tid}.jsonl", header, entries or [])
+
     def _emit(self, event: SubagentEvent) -> None:
         with self._lock:
             # 一轮结束的事件照发：界面要知道这个子任务停了
@@ -191,6 +208,8 @@ class DelegateTool(Tool):
             return TaskReport(tid, task.agent, task.title, ok=False, error=f"子 Agent 没能创建：{type(exc).__name__}: {exc}")
         with self._lock:
             self._running[tid] = child
+        header = {"task": tid, "agent": task.agent, "title": task.title, "prompt": task.prompt}
+        self._save(tid, header)                       # 先占住任务号：进程中途被杀，下次也不会重用
         try:
             with self.results.origin(tid):
                 answer, error = child.agent.run(task.prompt), ""
@@ -205,6 +224,8 @@ class DelegateTool(Tool):
                 if self.parent is not None:          # 被停下来也要记：停之前的请求已经花了
                     self.parent.session_usage += child.agent.session_usage
             child.close()
+            agent = child.agent
+            self._save(tid, header, [*agent.context.history, *(agent.interrupted.entries if agent.interrupted else ())])
         return TaskReport(tid, task.agent, task.title, ok=not error, answer=answer, error=error,
                           steps=child.agent.state.step, usage=child.agent.session_usage,
                           refs=self.results.made_by(tid), files=child.files())

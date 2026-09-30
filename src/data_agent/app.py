@@ -132,6 +132,7 @@ def build_application(
     work_dir: Path | None = None,
     mcp_clients: dict[str, McpClient] | None = None,
     ask_mcp: Callable[[ToolCall, McpTool], Decision] | None = None,
+    subagent_dir: Path | None = None,
 ) -> Application:
     """把所有零件拼成一个能跑的 Agent。
 
@@ -139,6 +140,7 @@ def build_application(
     （打印事件的 sink 要用它展开 {{r3}}）；export_dir、work_dir 不传用 settings 里的。
     mcp_clients：已经连好的 MCP 服务器（评测里几个 Agent 共用一个），按名字替代配置里的；
     ask_mcp：外部工具第一次调用时怎么问用户，不给就只放行 autoApprove 里的。
+    subagent_dir：子 Agent 的过程存在哪（会话目录/subagents/），不给就不存。
     用完要 close()：沙箱是个容器，MCP 服务器是子进程。
     """
     settings = settings or Settings()
@@ -283,7 +285,7 @@ def build_application(
 
     delegate = None
     if definitions:
-        delegate = DelegateTool(definitions, spawn, results)
+        delegate = DelegateTool(definitions, spawn, results, subagent_dir)
         tools.register(delegate)
 
     # --- Agent ---

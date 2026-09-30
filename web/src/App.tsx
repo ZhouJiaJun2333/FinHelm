@@ -11,6 +11,7 @@ import { Logo } from "./components/Logo";
 import { Login } from "./components/Login";
 import { Menu } from "./components/Menu";
 import { SessionContext } from "./sessionContext";
+import { filesOf } from "./blocks";
 
 const idFromHash = () => decodeURIComponent(location.hash.replace(/^#\/?s\//, "")) || null;
 // 窄屏（手机）上侧栏和面板盖在对话上面
@@ -122,7 +123,7 @@ function Workspace({ me, onLogout }: { me: Me; onLogout: () => void }) {
 
   const pendingAsk = !view.busy ? view.interrupted?.pending ?? null : null;
   const answer = (a: string) => current && run(() => (a ? api.send(current, a) : api.resume(current, "")));
-  const files = view.items.flatMap((it) => it.kind === "tool" && it.details?.kind === "execution" ? it.details.figures : []);
+  const files = view.items.flatMap(filesOf);
   const firstQuestion = view.items.find((it) => it.kind === "user")?.text.replace(/^\[用户上传了文件[^\]]*\]\n\n/, "") ?? "";
   const title = sessions.find((s) => s.id === current)?.title || firstQuestion.split("\n")[0] || "新对话";
   const busy = view.busy || !!queued;

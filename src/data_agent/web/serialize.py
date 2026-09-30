@@ -18,6 +18,8 @@ from ..core.agent import InterruptedTurn
 from ..core.context import Entry, Marker
 from ..core.events import Event, SubagentEvent, ToolFinished
 from ..core.messages import Message
+from ..session.store import load_transcript
+from ..subagents.tool import REPORT_HEAD, TaskReport
 from ..core.state import AgentState
 from ..tools.sandbox import Execution, saved_figures
 from ..tools.sql.results import ResultStore, StoredResult
@@ -63,6 +65,8 @@ def details_json(details: Any, file_url: FileUrl) -> dict[str, Any] | None:
     """ToolOutput.details（只给界面的结构化结果）。认不得的就不发，界面显示模型看到的那份文字。"""
     if isinstance(details, StoredResult):
         return {"kind": "table", **table_json(details)}
+    if isinstance(details, list) and details and all(isinstance(r, TaskReport) for r in details):
+        return {"kind": "delegate", "tasks": [{"task": r.task, "ok": r.ok, "error": r.error} for r in details]}
     if isinstance(details, Execution):
         return {"kind": "execution", "output": details.output, "value": details.value, "error": details.error,
                 "figures": [u for p in details.figures if (u := file_url(p))]}
@@ -94,10 +98,11 @@ def interrupted_json(turn: InterruptedTurn | None) -> dict[str, Any] | None:
 
 
 def timeline(entries: list[Entry] | tuple[Entry, ...], file_url: FileUrl | None = None,
-             results: ResultStore | None = None) -> list[dict[str, Any]]:
+             results: ResultStore | None = None, subagents: Path | None = None) -> list[dict[str, Any]]:
     """历史 → 时间线条目。工具调用和它的结果并成一条 tool。
 
     历史里只有模型看到的文字，没有 details（表、图）。表按结果编号去 results 里取，图从文字里的文件清单找回来。
+    delegate 的结果按里面的任务号去 subagents/ 读子 Agent 的过程，建成它下面的 children。
     """
     items: list[dict[str, Any]] = []
     tools: dict[str, dict[str, Any]] = {}
@@ -123,7 +128,25 @@ def timeline(entries: list[Entry] | tuple[Entry, ...], file_url: FileUrl | None 
         elif e.role == "tool" and (tool := tools.get(e.tool_call_id or "")) is not None:
             tool.update(status="error" if e.is_error else "done", content=_cap(e.content),
                         details=_rebuild_details(e.content, file_url, results))
+            if tool["name"] == "delegate" and subagents is not None:
+                tool["children"] = _children(e.content, subagents, file_url, results)
     return items
+
+
+def _children(content: str, subagents: Path, file_url: FileUrl | None,
+              results: ResultStore | None) -> list[dict[str, Any]]:
+    """delegate 结果里的每个任务 → {task, agent, title, status, items}。过程文件没了就只有标题和状态。"""
+    children = []
+    for m in REPORT_HEAD.finditer(content):
+        task, agent, title, verdict = m.groups()
+        try:
+            _, entries = load_transcript(subagents / f"{task}.jsonl")
+        except (OSError, ValueError):
+            entries = []
+        children.append({"task": task, "agent": agent, "title": title,
+                         "status": "done" if verdict == "完成" else "error",
+                         "items": timeline(entries, file_url, results)})
+    return children
 
 
 def _rebuild_details(content: str, file_url: FileUrl | None, results: ResultStore | None) -> dict[str, Any] | None:
