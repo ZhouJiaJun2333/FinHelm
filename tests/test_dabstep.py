@@ -136,3 +136,13 @@ def test_补跑只填没写出答案的题_不覆盖已有答案(tmp_path):
         (d / "trials.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
     lines = [json.loads(line) for line in export(first, retry).read_text(encoding="utf-8").splitlines()]
     assert [(r["task_id"], r["agent_answer"]) for r in lines] == [("1", "x"), ("2", "z")]
+
+
+def test_复核前那一版也按同样的规则判():
+    c = dab(official_answer="42")
+    t = Trial(c.id, 1, no_sql=True, graded=c.graded, official=True, answer="最终答案：42", answer_before="最终答案：41")
+    grade(t, c, None, None)
+    assert t.answer_ok and t.before_ok is False           # 复核改对了
+    t = Trial(c.id, 1, no_sql=True, graded=c.graded, official=True, answer="最终答案：42")
+    grade(t, c, None, None)
+    assert t.before_ok is None                             # 没复核

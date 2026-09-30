@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # 子 Agent（delegate 工具）：主 Agent 把查探、独立的子问题分派出去，子 Agent 用全新的上下文做完交回结论。
     # 类型定义在 subagents/builtin/ 和 <PROJECT_DIR>/.agents/agents/。先默认关，评测证明有用再开
     subagents: bool = False
+    # 交付前复核（要开着子 Agent）：主 Agent 第一次打算收工时，先派 verifier 独立重算一遍关键数字再回答。
+    # 每轮多花一次复核的钱，评测证明有用再开
+    verify: bool = False
     # 知识库（RAG）：要检索的文档目录（财报、合同…的 PDF），几个用 ; 隔开，知识库名 = 目录名。
     # 配了才有 list_docs / search_docs / read_doc。索引跟着目录走：几个项目挂同一个目录，共用一份索引
     docs_dirs: str = ""

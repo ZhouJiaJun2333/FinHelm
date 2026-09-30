@@ -74,7 +74,7 @@ def test_子Agent拿不到只属于主Agent的工具(tmp_path):
 def test_开关关着就没有delegate(tmp_path):
     assert "delegate" not in build_application(settings(tmp_path, subagents=False), llm=ScriptedProvider()).tools
     app = build_application(settings(tmp_path), llm=ScriptedProvider())
-    assert "delegate" in app.tools and sorted(d.name for d in app.subagents) == ["analyst", "explore"]
+    assert "delegate" in app.tools and sorted(d.name for d in app.subagents) == ["analyst", "explore", "verifier"]
     assert "explore：" in app.tools.get("delegate").description
 
 
@@ -300,3 +300,44 @@ def test_子任务的过程存盘_重新打开后任务号接着编_界面能建
     llm2 = Routed([delegate(("explore", "乙", "查乙")), say("好")], {"查乙": say("乙")})
     build_application(settings(tmp_path), llm=llm2, subagent_dir=transcripts).agent.run("q2")
     assert sorted(p.name for p in transcripts.iterdir()) == ["t1.jsonl", "t2.jsonl"]
+
+
+# ================================================================ 交付前复核
+def test_复核_每轮第一次收工时推一次_离上限太近不推():
+    from data_agent.core.agent import TurnOutcome
+    from data_agent.subagents.verify import VERIFY_NUDGE, verify_before_finish
+
+    hook = verify_before_finish(max_steps=6)
+    end = lambda step, tools=False: hook(TurnOutcome(step, say("x"), tools))   # noqa: E731
+    assert end(1, tools=True).action == "continue"
+    first = end(2)
+    assert first.action == "continue" and first.nudge == VERIFY_NUDGE
+    assert end(3, tools=True).action == "continue"
+    assert end(4).action == "end"                 # 这一轮推过了
+    assert end(1).nudge == VERIFY_NUDGE           # 新的一轮又推
+    hook2 = verify_before_finish(max_steps=6)
+    assert hook2(TurnOutcome(5, say("x"), False)).action == "end"   # 只剩 1 步，来不及复核
+
+
+def test_开了复核_交付前派verifier_评测拿到复核前那一版(tmp_path):
+    from data_agent.subagents.verify import VERIFY_NUDGE
+    from evals.runner import Trial, digest
+
+    llm = Routed([
+        say("答案是 41"),                                            # 第一次打算收工
+        delegate(("verifier", "复核", "原问题：q。主 Agent 的答案：41")),
+        say("复核发现应该是 42。最终答案：42"),
+    ], {"原问题：q。主 Agent 的答案：41": say("不一致：应该是 42")})
+    events = []
+    app = build_application(settings(tmp_path, verify=True), llm=llm, on_event=collect_sink(events))
+    assert app.agent.run("q") == "复核发现应该是 42。最终答案：42"
+    assert llm.parent.seen[1][-1].content == VERIFY_NUDGE
+
+    t = Trial("c1", 1)
+    digest(t, events)
+    assert t.answer_before == "答案是 41" and t.subagents == ["verifier"]
+    assert t.subagent_usage.output == 10 and t.peak_context > 0
+
+    # 没开子 Agent 时 VERIFY 不起作用（没有 verifier 可派）
+    llm2 = ScriptedProvider([say("答案是 41")])
+    assert build_application(settings(tmp_path, subagents=False, verify=True), llm=llm2).agent.run("q") == "答案是 41"

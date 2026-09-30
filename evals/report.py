@@ -136,6 +136,27 @@ def summarize(cases: list[Case], trials: list[Trial]) -> dict[str, Any]:
         "技能": {"加载了技能的trial": sum(bool(t.skills) for t in trials),
                  "按技能": dict(Counter(s for t in trials for s in dict.fromkeys(t.skills)))},
         "只看最终答案": bool(trials) and all(t.official for t in trials),
+        "子Agent": subagent_stats(trials),
+    }
+
+
+def subagent_stats(trials: list[Trial]) -> dict[str, Any]:
+    """子 Agent：分派了多少、花了多少、主上下文省了没有；复核改对、改错了几题。"""
+    n = len(trials) or 1
+    verified = [t for t in trials if t.before_ok is not None]
+    return {
+        "分派了的trial": sum(bool(t.subagents) for t in trials),
+        "任务数": len([a for t in trials for a in t.subagents]),
+        "按类型": dict(Counter(a for t in trials for a in t.subagents)),
+        "子Agent平均输入token": round(sum(t.subagent_usage.prompt_tokens for t in trials) / n),
+        "子Agent平均输出token": round(sum(t.subagent_usage.output for t in trials) / n),
+        "主上下文峰值平均": round(sum(t.peak_context for t in trials) / n),
+        "主上下文峰值最大": max((t.peak_context for t in trials), default=0),
+        "复核了的trial": len(verified),
+        "复核前对": sum(bool(t.before_ok) for t in verified),
+        "复核后对": sum(t.answer_ok for t in verified),
+        "改对": [f"{t.case_id} #{t.trial}" for t in verified if not t.before_ok and t.answer_ok],
+        "改错": [f"{t.case_id} #{t.trial}" for t in verified if t.before_ok and not t.answer_ok],
     }
 
 
@@ -328,6 +349,19 @@ def render(meta: dict[str, Any], s: dict[str, Any], diff: list[str] | None = Non
         each = "，".join(f"{k} {v} 个" for k, v in sk["按技能"].items()) or "没有"
         out += ["## 技能", "", f"- 系统提示词里列出的：{', '.join(meta.get('skills') or []) or '（旧运行没记）'}",
                 f"- 加载了技能的 trial：{sk['加载了技能的trial']} / {s['trials']}（{each}）", ""]
+    sub = s.get("子Agent") or {}
+    if sub.get("分派了的trial") or sub.get("复核了的trial") or "subagents" in str(meta.get("overrides", "")):
+        each = "，".join(f"{k} {v} 个" for k, v in sub.get("按类型", {}).items()) or "没有"
+        out += ["## 子 Agent", "",
+                f"- 分派了的 trial：{sub['分派了的trial']} / {s['trials']}，共 {sub['任务数']} 个任务（{each}）",
+                f"- 子 Agent 平均每个 trial 花：输入 {sub['子Agent平均输入token']:,} / 输出 {sub['子Agent平均输出token']:,} token"
+                "（已算在上面的平均 token 里）",
+                f"- 主上下文峰值：平均 {sub['主上下文峰值平均']:,}，最大 {sub['主上下文峰值最大']:,} token", ""]
+        if sub.get("复核了的trial"):
+            out += ["### 交付前复核", "",
+                    f"- 复核了的 trial：{sub['复核了的trial']} 个；复核前对 {sub['复核前对']} 个 → 复核后对 {sub['复核后对']} 个",
+                    f"- 改对：{'，'.join(sub['改对']) or '没有'}",
+                    f"- 改错：{'，'.join(sub['改错']) or '没有'}", ""]
     if s.get("回答里算对"):
         out += ["## SQL 没对上、回答里算对了", "",
                 "标准答案是单个算出来的数（比例、平均数），回答里说到了：",

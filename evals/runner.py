@@ -22,7 +22,7 @@ import shutil
 import tempfile
 import time
 import traceback
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -35,9 +35,11 @@ from data_agent.core.events import (
     Event,
     LLMResponded,
     StepLimitReached,
+    SubagentEvent,
     ToolCallRepeated,
     ToolFinished,
     ToolStarted,
+    TurnContinued,
     TurnResumed,
     UserAsked,
     collect_sink,
@@ -46,6 +48,7 @@ from data_agent.core.messages import Message, Usage
 from data_agent.db.connection import Database
 from data_agent.memory import Memory
 from data_agent.settings import Settings, build_provider
+from data_agent.subagents.verify import VERIFY_NUDGE
 from data_agent.tools.sandbox import Execution
 from data_agent.tools.sql.results import REF, ResultStore, markdown_table
 
@@ -145,6 +148,13 @@ class Trial:
     final_answer: str = ""                # DABstep：回答最后「最终答案：」那一行，提交文件用它
     wrote_final: bool = False             # 写了「最终答案：」这一行（空列表的正确写法是后面留空）
     official: bool = False                # DABstep 的题：只按「最终答案」判
+    # 子 Agent（SUBAGENTS）：分派出去的任务是哪种子 Agent；它们花的 token（已经算在 usage 里）
+    subagents: list[str] = field(default_factory=list)
+    subagent_usage: Usage = field(default_factory=Usage)
+    peak_context: int = 0                 # 主 Agent 的上下文最大到过多少（子 Agent 省不省上下文看它）
+    # 交付前复核（VERIFY）：被推去复核之前那一版回答，和它按同样的规则判对没有（None = 没复核）
+    answer_before: str = ""
+    before_ok: bool | None = None
 
     # ------------------------------------------------------------ 结论
     @property
@@ -208,6 +218,8 @@ class Trial:
         d["usage"] = Usage(**d["usage"])
         d["calls"] = [Usage(**u) for u in d.get("calls", [])]
         d["summary_calls"] = [Usage(**u) for u in d.get("summary_calls", [])]
+        if d.get("subagent_usage"):
+            d["subagent_usage"] = Usage(**d["subagent_usage"])
         if d.get("result"):
             d["result"] = ResultMatch(**d["result"])
         if d.get("answer_check"):
@@ -344,6 +356,23 @@ def digest(t: Trial, events: list[Event]) -> None:
     digest_skills(t, events)
     digest_memory(t, events)
     digest_asks(t, events)
+    digest_subagents(t, events)
+
+
+def digest_subagents(t: Trial, events: list[Event]) -> None:
+    """分派了哪些子任务、子 Agent 花了多少、主上下文最大多少、复核之前那一版回答。"""
+    t.peak_context = max((u.context_tokens for u in t.calls), default=0)
+    last_text = ""
+    for e in events:
+        if isinstance(e, ToolStarted) and e.name == "delegate":
+            t.subagents += [str(task.get("agent", "")) for task in e.arguments.get("tasks", [])
+                            if isinstance(task, dict)]
+        elif isinstance(e, SubagentEvent) and isinstance(e.event, LLMResponded):
+            t.subagent_usage = t.subagent_usage + e.event.usage
+        elif isinstance(e, LLMResponded):
+            last_text = e.text
+        elif isinstance(e, TurnContinued) and e.nudge == VERIFY_NUDGE and not t.answer_before:
+            t.answer_before = last_text
 
 
 SANDBOX_TOOLS = ("run_python", "run_r")
@@ -618,6 +647,12 @@ def grade(t: Trial, case: Case, db, gold: Gold) -> None:
     t.result = t.answer_check = None
     t.final_strict = t.text_ok = False
     t.matched_sql = t.grade_error = ""
+    t.before_ok = None
+    if t.answer_before:
+        # 复核之前那一版按同样的规则判一遍（SQL 题的 SQL 是整轮的，差别只在回答文字）
+        before = replace(t, answer=t.answer_before, shown="", answer_before="", submission=None)
+        grade(before, case, db, gold)
+        t.before_ok = before.answer_ok
     if t.submission is not None:
         t.submission.strict = False
     if case.no_sql:

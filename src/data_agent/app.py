@@ -40,6 +40,7 @@ from .rag import Collection, IndexSpec, SearchSpec
 from .skills import BUILTIN, Skill, load_skills, usable
 from .subagents import BUILTIN as BUILTIN_AGENTS, Child, Definition, DelegateTool, load_definitions
 from .subagents import usable as usable_agents
+from .subagents.verify import verify_before_finish
 
 
 @dataclass(slots=True)
@@ -287,6 +288,9 @@ def build_application(
     if definitions:
         delegate = DelegateTool(definitions, spawn, results, subagent_dir)
         tools.register(delegate)
+    # 交付前复核：第一次打算收工时推一句，先派 verifier 独立重算
+    if settings.verify and any(d.name == "verifier" for d in definitions):
+        finish_turn_hook = verify_before_finish(settings.max_steps, finish_turn_hook)
 
     # --- Agent ---
     agent = Agent(
