@@ -38,6 +38,7 @@ export const api = {
     call("POST", `${s(id)}/approvals/${rid}`, { decision }),
   result: (id: string, ref: string) => call<Table>("GET", `${s(id)}/results/${ref}`),
   csvUrl: (id: string, ref: string) => `${s(id)}/results/${ref}/csv`,
+  sheets: (url: string) => call<{ sheets: Table[] }>("GET", url).then((r) => r.sheets),
   events: (id: string) => `${s(id)}/events`,
   async upload(id: string, files: File[]) {
     const form = new FormData();

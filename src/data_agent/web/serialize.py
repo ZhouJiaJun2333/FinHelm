@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import csv
 import dataclasses
 import datetime as dt
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -17,12 +19,16 @@ from ..core.context import Entry, Marker
 from ..core.events import Event, ToolFinished
 from ..core.messages import Message
 from ..core.state import AgentState
-from ..tools.sandbox import Execution
-from ..tools.sql.results import StoredResult
+from ..tools.sandbox import Execution, saved_figures
+from ..tools.sql.results import ResultStore, StoredResult
 
 # 界面上一条工具结果最多带多少字、一张表的预览带几行
 CONTENT_CHARS = 4000
 PREVIEW_ROWS = 20
+# 右侧面板预览 Excel / CSV 时每个工作表最多带几行
+SHEET_ROWS = 500
+
+_RESULT_REF = re.compile(r"^结果 (r\d+)（")
 
 FileUrl = Callable[[Path], str | None]
 
@@ -84,8 +90,12 @@ def interrupted_json(turn: InterruptedTurn | None) -> dict[str, Any] | None:
             {"call_id": pending.call_id, "question": pending.question, "options": list(pending.options)}}
 
 
-def timeline(entries: list[Entry] | tuple[Entry, ...]) -> list[dict[str, Any]]:
-    """历史 → 时间线条目。工具调用和它的结果并成一条 tool。"""
+def timeline(entries: list[Entry] | tuple[Entry, ...], file_url: FileUrl | None = None,
+             results: ResultStore | None = None) -> list[dict[str, Any]]:
+    """历史 → 时间线条目。工具调用和它的结果并成一条 tool。
+
+    历史里只有模型看到的文字，没有 details（表、图）。表按结果编号去 results 里取，图从文字里的文件清单找回来。
+    """
     items: list[dict[str, Any]] = []
     tools: dict[str, dict[str, Any]] = {}
     for e in entries:
@@ -108,8 +118,52 @@ def timeline(entries: list[Entry] | tuple[Entry, ...]) -> list[dict[str, Any]]:
                 tools[c.id] = tool
                 items.append(tool)
         elif e.role == "tool" and (tool := tools.get(e.tool_call_id or "")) is not None:
-            tool.update(status="error" if e.is_error else "done", content=_cap(e.content))
+            tool.update(status="error" if e.is_error else "done", content=_cap(e.content),
+                        details=_rebuild_details(e.content, file_url, results))
     return items
+
+
+def _rebuild_details(content: str, file_url: FileUrl | None, results: ResultStore | None) -> dict[str, Any] | None:
+    if results is not None and (m := _RESULT_REF.match(content)) and (table := results.get(m.group(1))):
+        return {"kind": "table", **table_json(table)}
+    if file_url is not None and (figures := [u for p in saved_figures(content) if p.exists() and (u := file_url(p))]):
+        return {"kind": "execution", "output": "", "value": None, "error": None, "figures": figures}
+    return None
+
+
+def sheets_json(path: Path, rows: int = SHEET_ROWS) -> list[dict[str, Any]]:
+    """Excel / CSV 给右侧面板预览：每个工作表第一行当表头，其余前 rows 行。"""
+    if path.suffix.lower() == ".csv":
+        with path.open(encoding="utf-8-sig", errors="replace", newline="") as f:
+            return [_sheet(path.stem, csv.reader(f), rows)]
+    from openpyxl import load_workbook
+
+    book = load_workbook(path, read_only=True, data_only=True)
+    try:
+        return [_sheet(ws.title, ws.iter_rows(values_only=True), rows) for ws in book.worksheets]
+    finally:
+        book.close()
+
+
+def _sheet(name: str, lines: Any, rows: int) -> dict[str, Any]:
+    header: list[Any] | None = None
+    body: list[list[Any]] = []
+    count = 0
+    for line in lines:
+        values = list(line)
+        if header is None:
+            if any(v not in (None, "") for v in values):
+                header = values
+            continue
+        count += 1
+        if len(body) < rows:
+            body.append(values)
+    header = header or []
+    width = max([len(header), *(len(r) for r in body)], default=0)
+    columns = [str(c) if c not in (None, "") else "" for c in header] + [""] * (width - len(header))
+    return {"ref": name, "title": name, "source": "", "sql": "", "columns": columns,
+            "rows": plain([r + [None] * (width - len(r)) for r in body]),
+            "row_count": count, "truncated": count > len(body)}
 
 
 def _thinking(raw: Any) -> str:

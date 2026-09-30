@@ -7,9 +7,15 @@ import asyncio
 import pytest
 from fastapi.testclient import TestClient
 
-from data_agent.core.messages import LLMResponse, ToolCall, Usage
+from data_agent.core.messages import LLMResponse, Message, ToolCall, Usage
+from data_agent.db.connection import QueryResult
 from data_agent.session import Session
 from data_agent.settings import Settings
+from data_agent.tools.python.run_python import RunPythonTool
+from data_agent.tools.sandbox import Execution
+from data_agent.tools.sql.results import ResultStore
+from data_agent.tools.sql.run_sql import _format
+from data_agent.web.serialize import timeline
 from data_agent.web.runner import SessionRunner
 from data_agent.web.auth import Users
 from data_agent.web.server import create_app
@@ -135,6 +141,30 @@ def test_上传的文件进inputs_下一条消息告诉模型(harness):
     assert h.llm.seen[0][-1].content.startswith("[用户上传了文件")
 
 
+def test_重新打开会话_历史里的图和表都找得回来(tmp_path):
+    work = tmp_path / "work"
+    (work / "figures").mkdir(parents=True)
+    png, pdf = work / "figures" / "forest.png", work / "figures" / "forest.pdf"
+    png.write_bytes(b"png")
+    pdf.write_bytes(b"pdf")
+    results = ResultStore()
+    table = results.add("select 1 as n", QueryResult(["n"], [(1,)], truncated=False, elapsed_ms=3))
+    sandbox_text = RunPythonTool.render(RunPythonTool.__new__(RunPythonTool),
+                                        Execution(output="画好了", figures=[png, pdf, work / "figures" / "gone.png"]))
+    entries = [
+        Message(role="assistant", tool_calls=[ToolCall("c1", "run_sql", {"sql": "select 1"}),
+                                              ToolCall("c2", "run_python", {"code": "plot()"})]),
+        Message.tool_result("c1", _format(table.ref, table.result)),
+        Message.tool_result("c2", sandbox_text),
+    ]
+    items = timeline(entries, lambda path: f"/f/{path.name}", results)
+    assert items[0]["details"]["kind"] == "table" and items[0]["details"]["rows"] == [[1]]
+    # 已经删掉的文件不给
+    assert items[1]["details"]["figures"] == ["/f/forest.png", "/f/forest.pdf"]
+    # 不给 file_url / results 时和以前一样只有文字
+    assert all(i["details"] is None for i in timeline(entries))
+
+
 # ================================================================ HTTP
 @pytest.fixture
 def client(tmp_path):
@@ -224,3 +254,29 @@ def test_建了账号就要登录_每个人只看得到自己的会话(tmp_path)
         c.post("/api/login", json={"name": "bob", "password": "bob-password"})
         assert c.get("/api/sessions").json() == []
         assert c.get(f"/api/sessions/{sid}/events").status_code == 404
+
+
+def test_Excel和CSV按工作表预览(client):
+    from openpyxl import Workbook
+
+    sid = client.post("/api/sessions").json()["id"]
+    work = client.app.state.hubs[""].runners[sid].session.work_dir
+    work.mkdir(parents=True, exist_ok=True)
+    book = Workbook()
+    book.active.title = "各研究"
+    book.active.append([None])                       # 表头前的空行跳过
+    book.active.append(["研究", "MD"])
+    book.active.append(["Chen 2017", -2.4])
+    book.create_sheet("合并结果").append(["项目", "数值"])
+    book.save(work / "r.xlsx")
+    (work / "a.csv").write_text("x,y\n1,2\n3\n", encoding="utf-8")
+    (work / "a.txt").write_text("hi", encoding="utf-8")
+
+    sheets = client.get(f"/api/sessions/{sid}/sheets/r.xlsx").json()["sheets"]
+    assert [s["title"] for s in sheets] == ["各研究", "合并结果"]
+    assert sheets[0]["columns"] == ["研究", "MD"] and sheets[0]["rows"] == [["Chen 2017", -2.4]]
+    assert sheets[1]["row_count"] == 0
+    csv = client.get(f"/api/sessions/{sid}/sheets/a.csv").json()["sheets"][0]
+    assert csv["rows"] == [["1", "2"], ["3", None]]
+    assert client.get(f"/api/sessions/{sid}/sheets/a.txt").status_code == 415
+    assert client.get(f"/api/sessions/{sid}/sheets/../session.jsonl").status_code == 404

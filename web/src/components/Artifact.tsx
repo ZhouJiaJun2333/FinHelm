@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { FILE_ICONS, FILE_LABELS, fileKind, fileName } from "../files";
 import type { Table } from "../types";
 import { formatCell } from "./DataTable";
 
@@ -40,5 +41,20 @@ export function ResultCard({ table, refName, onOpen }: { table?: Table; refName:
     <ArtifactCard title={table.title || `结果 ${table.ref}`}
       subtitle={`${table.ref} · ${table.row_count} 行 × ${table.columns.length} 列`}
       thumb={<TableThumb table={table} />} onOpen={() => onOpen(table.ref)} />
+  );
+}
+
+// 工具产出的文件（图、PDF、Excel…）：一个小卡片，点开在右侧面板看。图的图标位置放缩略图
+export function FileChip({ url, onOpen }: { url: string; onOpen: (url: string) => void }) {
+  const kind = fileKind(url);
+  const Icon = FILE_ICONS[kind];
+  return (
+    <button className="file-chip" onClick={() => onOpen(url)}>
+      {kind === "image" ? <img className="file-chip-thumb" src={url} alt="" /> : <Icon size={16} />}
+      <span className="file-chip-text">
+        <span className="ellipsis">{fileName(url)}</span>
+        <span className="faint small">{FILE_LABELS[kind]}</span>
+      </span>
+    </button>
   );
 }

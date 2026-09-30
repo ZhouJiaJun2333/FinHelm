@@ -11,7 +11,7 @@ export type Step = { kind: "thinking"; id: number; text: string; live: boolean }
 export type Block =
   | { kind: "user"; id: number; text: string }
   | { kind: "text"; id: number; item: Assistant }
-  | { kind: "activity"; id: number; steps: Step[]; figures: string[] }
+  | { kind: "activity"; id: number; steps: Step[]; files: string[] }
   | { kind: "ask"; id: number; tool: Tool }
   | { kind: "notice"; id: number; text: string; level: "info" | "warn" | "error" };
 
@@ -20,7 +20,7 @@ export function toBlocks(items: Item[]): Block[] {
   let group: Extract<Block, { kind: "activity" }> | null = null;
   const activity = () => {
     if (!group) {
-      group = { kind: "activity", id: 0, steps: [], figures: [] };
+      group = { kind: "activity", id: 0, steps: [], files: [] };
       blocks.push(group);
     }
     return group;
@@ -46,18 +46,18 @@ export function toBlocks(items: Item[]): Block[] {
       const g = activity();
       if (!g.id) g.id = it.id;
       g.steps.push({ kind: "tool", id: it.id, tool: it });
-      if (it.details?.kind === "execution") g.figures.push(...it.details.figures);
+      if (it.details?.kind === "execution") g.files.push(...it.details.figures);
     } else {
       group = null;
       blocks.push(it.kind === "user" ? { kind: "user", id: it.id, text: it.text }
                                      : { kind: "notice", id: it.id, text: it.text, level: it.level });
     }
   }
-  // 同一张图重画了好几次（文件名一样），只留最后一版
+  // 同一个文件重画了好几次（文件名一样），只留最后一版
   for (const b of blocks) {
     if (b.kind === "activity") {
-      const latest = new Map(b.figures.map((u) => [u.split("?")[0], u]));
-      b.figures = [...latest.values()];
+      const latest = new Map(b.files.map((u) => [u.split("?")[0], u]));
+      b.files = [...latest.values()];
     }
   }
   return blocks;

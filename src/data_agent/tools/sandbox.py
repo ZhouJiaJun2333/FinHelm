@@ -30,6 +30,7 @@ from ..core.tools import Tool, ToolOutput
 STARTUP_TIMEOUT_S = 60           # 冷启动容器 + 加载 pandas / meta
 HARD_TIMEOUT_GRACE_S = 10
 MOUNT = "/opt/finhelm"
+FIGURES_HEADER = "图表已保存（用户能看到这些文件）："
 
 # 给一个结果编号，返回内核要的数据：{"columns", "rows", "dates", "truncated"} 或 {"error"}
 Resolve = Callable[[str], dict[str, Any]]
@@ -274,7 +275,7 @@ class SandboxTool(Tool):
         if ex.value is not None:
             parts.append(ex.value)
         if ex.figures:
-            parts.append("图表已保存（用户能看到这些文件）：\n" + "\n".join(f"- {p}" for p in ex.figures))
+            parts.append(FIGURES_HEADER + "\n" + "\n".join(f"- {p}" for p in ex.figures))
         if ex.error:
             parts.append(f"出错了：\n{ex.error.rstrip()}")
         restart = f"{self.language} 内核重启过，之前定义的变量都没了。需要的话重新运行定义它们的代码，数据用 load_result 重新取。"
@@ -283,6 +284,15 @@ class SandboxTool(Tool):
         elif ex.error and self.missing_name.search(ex.error):
             parts.append("如果这个变量是之前的调用里定义的：内核可能重启过（超时、恢复会话），重新运行定义它的代码。")
         return "\n\n".join(parts) or "执行成功，没有输出。要看结果就打印出来，或者把表达式放在最后一行。"
+
+
+def saved_figures(content: str) -> list[Path]:
+    """从模型看到的那份文字里找回产出的文件（render 的反向）。历史里只存了文字，重新打开会话时靠它重建预览。"""
+    _, found, rest = content.partition(FIGURES_HEADER + "\n")
+    if not found:
+        return []
+    lines = rest.split("\n\n", 1)[0].splitlines()
+    return [Path(line[2:]) for line in lines if line.startswith("- ")]
 
 
 def _summarize(ex: Execution) -> str:

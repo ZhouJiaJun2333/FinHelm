@@ -92,7 +92,7 @@ class SessionRunner:
             entries += turn.entries           # 没跑完的那一轮不在正式历史里，也要看得到
         return {"type": "snapshot", "data": {
             "session": self.id,
-            "items": timeline(entries),
+            "items": timeline(entries, self.file_url, self.results),
             "interrupted": interrupted_json(turn),
             "results": self.results_json(),
             "approvals": [a["request"] for a in self._approvals.values()],

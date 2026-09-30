@@ -3,13 +3,13 @@ import { ChevronRight } from "lucide-react";
 import type { Step, Tool } from "../blocks";
 import { toolMeta, toolSubtitle } from "../toolMeta";
 import { DataTable } from "./DataTable";
-import { ArtifactCard } from "./Artifact";
+import { FileChip } from "./Artifact";
 
-type Props = { steps: Step[]; figures: string[]; live: boolean; onOpenFigure: (url: string) => void;
+type Props = { steps: Step[]; files: string[]; live: boolean; onOpenFile: (url: string) => void;
                onOpenResult: (ref: string) => void };
 
 // 一段「思考 + 工具调用」：平时是一行淡灰小字，点开是每一步
-export function Activity({ steps, figures, live, onOpenFigure, onOpenResult }: Props) {
+export function Activity({ steps, files, live, onOpenFile, onOpenResult }: Props) {
   const [open, setOpen] = useState(false);
   const tools = steps.filter((s) => s.kind === "tool");
   const failed = tools.filter((s) => s.tool.status === "error" || s.tool.status === "denied").length;
@@ -44,10 +44,11 @@ export function Activity({ steps, figures, live, onOpenFigure, onOpenResult }: P
             : <ToolStep key={s.id} tool={s.tool} onOpenResult={onOpenResult} />)}
         </div>
       )}
-      {figures.map((u) => (
-        <ArtifactCard key={u} title={u.split("?")[0].split("/").pop() ?? "图"} subtitle="图片"
-          thumb={<img src={u} alt="" />} onOpen={() => onOpenFigure(u)} />
-      ))}
+      {files.length > 0 && (
+        <div className="file-chips">
+          {files.map((u) => <FileChip key={u} url={u} onOpen={onOpenFile} />)}
+        </div>
+      )}
     </div>
   );
 }

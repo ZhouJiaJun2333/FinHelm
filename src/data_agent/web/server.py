@@ -35,10 +35,12 @@ from ..settings import Settings
 from ..tools.sql.export_csv import export_result
 from .auth import COOKIE, TTL_S, Users
 from .runner import Busy, SessionRunner
-from .serialize import table_json
+from .serialize import sheets_json, table_json
 
 # 同时开着几个会话。每个会话有自己的沙箱容器、MCP 子进程，多了关掉最久没用的（闲着的）
 MAX_OPEN = 4
+# 右侧面板能按表格预览的文件
+SHEET_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
 # SSE 多久没事件发一次注释行，免得代理、浏览器当连接死了
 PING_S = 15
 DIST = Path(__file__).resolve().parents[3] / "web" / "dist"
@@ -350,13 +352,26 @@ def create_app(settings: Settings | None = None, llm: LLMProvider | None = None)
             raise HTTPException(500, f"导出失败：{type(exc).__name__}: {exc}") from exc
         return FileResponse(done.path, filename=done.path.name, media_type="text/csv")
 
-    @app.get("/api/sessions/{sid}/files/{path:path}")
-    def file(sid: str, path: str, h: Hub = Depends(hub)):
+    def work_file(h: Hub, sid: str, path: str) -> Path:
         root = h.get(sid).session.work_dir.resolve()
         target = (root / path).resolve()
         if not target.is_relative_to(root) or not target.is_file():
             raise HTTPException(404, "没有这个文件")
-        return FileResponse(target)
+        return target
+
+    @app.get("/api/sessions/{sid}/files/{path:path}")
+    def file(sid: str, path: str, h: Hub = Depends(hub)):
+        return FileResponse(work_file(h, sid, path))
+
+    @app.get("/api/sessions/{sid}/sheets/{path:path}")
+    def sheets(sid: str, path: str, h: Hub = Depends(hub)):
+        target = work_file(h, sid, path)
+        if target.suffix.lower() not in SHEET_SUFFIXES:
+            raise HTTPException(415, "只能预览 xlsx、xlsm、csv")
+        try:
+            return {"sheets": sheets_json(target)}
+        except Exception as exc:          # 坏文件、加密的工作簿
+            raise HTTPException(422, f"读不了这个文件：{exc}") from exc
 
     if DIST.is_dir():
         app.mount("/", StaticFiles(directory=DIST, html=True), name="web")

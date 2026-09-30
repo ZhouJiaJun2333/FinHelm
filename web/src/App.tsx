@@ -122,7 +122,7 @@ function Workspace({ me, onLogout }: { me: Me; onLogout: () => void }) {
 
   const pendingAsk = !view.busy ? view.interrupted?.pending ?? null : null;
   const answer = (a: string) => current && run(() => (a ? api.send(current, a) : api.resume(current, "")));
-  const figures = view.items.flatMap((it) => it.kind === "tool" && it.details?.kind === "execution" ? it.details.figures : []);
+  const files = view.items.flatMap((it) => it.kind === "tool" && it.details?.kind === "execution" ? it.details.figures : []);
   const firstQuestion = view.items.find((it) => it.kind === "user")?.text.replace(/^\[用户上传了文件[^\]]*\]\n\n/, "") ?? "";
   const title = sessions.find((s) => s.id === current)?.title || firstQuestion.split("\n")[0] || "新对话";
   const busy = view.busy || !!queued;
@@ -161,10 +161,10 @@ function Workspace({ me, onLogout }: { me: Me; onLogout: () => void }) {
             )}
             <span className="spacer" />
             {view.error && <span className="faint small">{view.error}</span>}
-            {view.results.length + figures.length > 0 && (
+            {view.results.length + files.length > 0 && (
               <button className={`icon-btn${active ? " on" : ""}`} title="结果"
                 onClick={() => active ? setActive(null) : showPanel(tabs.at(-1) ??
-                  (view.results.length ? { kind: "table", ref: view.results.at(-1)!.ref } : { kind: "figure", url: figures.at(-1)! }))}>
+                  (view.results.length ? { kind: "table", ref: view.results.at(-1)!.ref } : { kind: "file", url: files.at(-1)! }))}>
                 <PanelRight size={16} />
               </button>
             )}
@@ -184,7 +184,7 @@ function Workspace({ me, onLogout }: { me: Me; onLogout: () => void }) {
               <Thread items={view.items} results={view.results} busy={busy} interrupted={view.interrupted}
                 approvals={view.approvals}
                 onOpenResult={(ref) => showPanel({ kind: "table", ref })}
-                onOpenFigure={(url) => showPanel({ kind: "figure", url })}
+                onOpenFile={(url) => showPanel({ kind: "file", url })}
                 onAnswer={answer}
                 onContinue={() => current && run(() => api.resume(current))}
                 onApprove={(rid, d) => current && guard(api.approve(current, rid, d))} />

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Code2, Download, Image, Table2, X } from "lucide-react";
+import { Code2, Download, Table2, X } from "lucide-react";
 import { api } from "../api";
+import { FILE_ICONS, fileKind, fileName, sheetsUrl } from "../files";
 import type { Table } from "../types";
 import { DataTable } from "./DataTable";
 
-export type PanelTarget = { kind: "table"; ref: string } | { kind: "figure"; url: string };
+export type PanelTarget = { kind: "table"; ref: string } | { kind: "file"; url: string };
 
 export const sameTarget = (a: PanelTarget, b: PanelTarget) =>
   a.kind === b.kind && (a.kind === "table" ? a.ref === (b as typeof a).ref : a.url === (b as typeof a).url);
@@ -19,7 +20,7 @@ type Props = {
   onClose: () => void;
 };
 
-// 右侧面板（Claude 的文件面板）：打开过的结果表和图，一个标签一个
+// 右侧面板（Claude 的文件面板）：打开过的结果表和文件，一个标签一个
 export function ResultPanel({ session, results, tabs, active, onSelect, onCloseTab, onClose }: Props) {
   const [full, setFull] = useState<Table | null>(null);
   const [showSql, setShowSql] = useState(false);
@@ -36,7 +37,7 @@ export function ResultPanel({ session, results, tabs, active, onSelect, onCloseT
 
   const table = full ?? preview;
   const name = (t: PanelTarget) => {
-    if (t.kind === "figure") return t.url.split("?")[0].split("/").pop();
+    if (t.kind === "file") return fileName(t.url);
     const r = results.find((x) => x.ref === t.ref);
     return r?.title || t.ref;
   };
@@ -44,17 +45,23 @@ export function ResultPanel({ session, results, tabs, active, onSelect, onCloseT
   return (
     <section className="panel">
       <div className="panel-tabs">
-        {tabs.map((t) => (
-          <div key={t.kind === "table" ? t.ref : t.url} className={`tab${sameTarget(t, active) ? " active" : ""}`}>
-            <button className="tab-main" onClick={() => onSelect(t)}>
-              {t.kind === "table" ? <Table2 size={13} /> : <Image size={13} />}
-              <span className="ellipsis">{name(t)}</span>
-            </button>
-            <button className="tab-x" onClick={() => onCloseTab(t)}><X size={12} /></button>
-          </div>
-        ))}
+        {tabs.map((t) => {
+          const Icon = t.kind === "table" ? Table2 : FILE_ICONS[fileKind(t.url)];
+          return (
+            <div key={t.kind === "table" ? t.ref : t.url} className={`tab${sameTarget(t, active) ? " active" : ""}`}>
+              <button className="tab-main" onClick={() => onSelect(t)}>
+                <Icon size={13} />
+                <span className="ellipsis">{name(t)}</span>
+              </button>
+              <button className="tab-x" onClick={() => onCloseTab(t)}><X size={12} /></button>
+            </div>
+          );
+        })}
         <span className="spacer" />
-        {table && (
+        {active.kind === "file" && (
+          <a className="icon-btn" title="下载" href={active.url} download={fileName(active.url)}><Download size={16} /></a>
+        )}
+        {active.kind === "table" && table && (
           <>
             {table.sql && (
               <button className={`icon-btn${showSql ? " on" : ""}`} title="SQL" onClick={() => setShowSql(!showSql)}>
@@ -67,8 +74,8 @@ export function ResultPanel({ session, results, tabs, active, onSelect, onCloseT
         <button className="icon-btn" title="关闭" onClick={onClose}><X size={16} /></button>
       </div>
 
-      {active.kind === "figure" ? (
-        <div className="panel-body figure-view"><img src={active.url} alt="" /></div>
+      {active.kind === "file" ? (
+        <FileView key={active.url} url={active.url} />
       ) : table ? (
         <div className="panel-body">
           <div className="panel-head">
@@ -82,5 +89,54 @@ export function ResultPanel({ session, results, tabs, active, onSelect, onCloseT
         <div className="panel-body faint pad">没有这个结果</div>
       )}
     </section>
+  );
+}
+
+function FileView({ url }: { url: string }) {
+  switch (fileKind(url)) {
+    case "image":
+      return <div className="panel-body figure-view"><img src={url} alt="" /></div>;
+    case "pdf":
+      // 浏览器自带的 PDF 阅读器；关掉左边的缩略图栏，宽度撑满
+      return <div className="panel-body"><iframe className="pdf-view" src={`${url}#navpanes=0&view=FitH`} title={fileName(url)} /></div>;
+    case "sheet":
+      return <SheetView url={url} />;
+    default:
+      return <div className="panel-body faint pad">这个文件不能预览，可以点右上角下载。</div>;
+  }
+}
+
+// Excel / CSV：一个工作表一个按钮，下面是表格
+function SheetView({ url }: { url: string }) {
+  const [sheets, setSheets] = useState<Table[] | null>(null);
+  const [error, setError] = useState("");
+  const [index, setIndex] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    api.sheets(sheetsUrl(url)).then((s) => alive && setSheets(s)).catch((e) => alive && setError(e.message));
+    return () => { alive = false; };
+  }, [url]);
+
+  if (error) return <div className="panel-body faint pad">{error}</div>;
+  if (!sheets) return <div className="panel-body faint pad">读取中…</div>;
+  const sheet = sheets[Math.min(index, sheets.length - 1)];
+  if (!sheet) return <div className="panel-body faint pad">没有工作表</div>;
+  return (
+    <div className="panel-body">
+      <div className="panel-head">
+        {sheets.length > 1 && (
+          <div className="sheet-tabs">
+            {sheets.map((s, i) => (
+              <button key={i} className={i === index ? "on" : ""} onClick={() => setIndex(i)}>{s.title}</button>
+            ))}
+          </div>
+        )}
+        <div className="faint small">
+          {sheet.row_count} 行 × {sheet.columns.length} 列{sheet.truncated && `，只显示前 ${sheet.rows.length} 行`}
+        </div>
+      </div>
+      <DataTable table={sheet} />
+    </div>
   );
 }

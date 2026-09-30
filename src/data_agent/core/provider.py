@@ -7,6 +7,9 @@ from typing import Any, Callable
 
 from .messages import LLMResponse, Message
 
+# 连不上、429、5xx 时 SDK 自己重试的次数。退避 0.5s 起翻倍、封顶 8s，5 次大约能扛过 15 秒的断网。
+MAX_RETRIES = 5
+
 
 class LLMProvider(ABC):
     """换厂商 = 换一个实现。"""

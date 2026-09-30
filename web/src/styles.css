@@ -172,7 +172,9 @@ code, pre { font-family: var(--mono); }
   max-width: 80%; background: var(--bubble); padding: 9px 14px; border-radius: 12px;
   white-space: pre-wrap; word-break: break-word; font-size: 14.5px;
 }
-.attach-line { font-size: 12.5px; color: var(--muted); margin-bottom: 3px; }
+.attach-line { font-size: 12.5px; color: var(--muted); margin-bottom: 3px; display: flex; flex-wrap: wrap; gap: 2px 10px; }
+.attach-file { color: inherit; font-size: inherit; text-align: left; }
+.attach-file:hover { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
 
 /* 一段思考 + 工具调用：淡灰小字一行 */
 .activity { display: flex; flex-direction: column; gap: 8px; }
@@ -215,6 +217,14 @@ code, pre { font-family: var(--mono); }
 .artifact-bar { display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px; }
 .artifact-text { flex: 1; min-width: 0; }
 .artifact-title { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 6px; }
+.file-chip {
+  display: flex; align-items: center; gap: 10px; max-width: 260px; padding: 8px 14px 8px 11px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--muted); text-align: left;
+}
+.file-chip:hover { border-color: var(--border-strong); }
+.file-chip-thumb { width: 28px; height: 28px; margin: 0 -4px 0 -3px; object-fit: cover; border-radius: 5px; border: 1px solid var(--border); background: #fff; flex-shrink: 0; }
+.file-chip-text { display: flex; flex-direction: column; min-width: 0; font-size: 13px; color: var(--text); line-height: 1.35; }
 .thumb-table { border-collapse: collapse; font-size: 9.5px; margin: 10px; width: calc(100% - 20px); color: var(--muted); background: var(--surface); }
 .thumb-table th, .thumb-table td { border-bottom: 1px solid var(--border); padding: 3px 6px; text-align: left; white-space: nowrap; max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
 .thumb-table th { color: var(--text-2); font-weight: 600; }
@@ -322,6 +332,11 @@ button.ask-option:hover { background: var(--hover); }
 .panel-sql { margin: 0 18px 12px; }
 .figure-view { align-items: center; justify-content: center; padding: 20px; background: var(--code-bg); }
 .figure-view img { max-width: 100%; max-height: 100%; border-radius: 6px; background: #fff; }
+.pdf-view { flex: 1; width: 100%; border: 0; background: var(--code-bg); }
+.sheet-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.sheet-tabs button { font-size: 13px; color: var(--muted); padding: 3px 10px; border-radius: 7px; }
+.sheet-tabs button:hover { background: var(--hover); }
+.sheet-tabs button.on { background: var(--hover); color: var(--text); }
 
 /* 数据表 */
 .datatable { overflow: auto; }

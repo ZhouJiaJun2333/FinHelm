@@ -14,7 +14,7 @@ import anthropic
 
 from ..core.errors import ContextOverflow
 from ..core.messages import Image, LLMResponse, Message, ToolCall, Usage
-from ..core.provider import LLMProvider, OnDelta
+from ..core.provider import MAX_RETRIES, LLMProvider, OnDelta
 from .overflow import is_context_overflow
 
 
@@ -28,7 +28,7 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int = 16000,
         context_window: int | None = None,
     ) -> None:
-        self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        self.client = anthropic.Anthropic(api_key=api_key or None, max_retries=MAX_RETRIES)   # None：读环境变量
         self.model = model
         self.max_tokens = max_tokens
         self.context_window = context_window

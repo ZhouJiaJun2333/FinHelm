@@ -14,7 +14,7 @@ from openai import BadRequestError, OpenAI
 
 from ..core.errors import ContextOverflow
 from ..core.messages import INVALID_JSON_ARGS, Image, LLMResponse, Message, ToolCall, Usage
-from ..core.provider import LLMProvider, OnDelta
+from ..core.provider import MAX_RETRIES, LLMProvider, OnDelta
 from .overflow import is_context_overflow
 
 
@@ -29,7 +29,7 @@ class OpenAICompatibleProvider(LLMProvider):
         native_thinking: bool = False,
         vision: bool = False,
     ) -> None:
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=MAX_RETRIES)
         self.model = model
         self.max_tokens = max_tokens
         self.context_window = context_window

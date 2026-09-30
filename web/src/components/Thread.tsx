@@ -5,6 +5,7 @@ import { Activity } from "./Activity";
 import { AskCard } from "./Ask";
 import { Logo } from "./Logo";
 import { Markdown } from "./Markdown";
+import { useFileUrl } from "../sessionContext";
 
 type Props = {
   items: Item[];
@@ -13,7 +14,7 @@ type Props = {
   interrupted: Interrupted;
   approvals: ApprovalRequest[];
   onOpenResult: (ref: string) => void;
-  onOpenFigure: (url: string) => void;
+  onOpenFile: (url: string) => void;
   onAnswer: (answer: string) => void;
   onContinue: () => void;
   onApprove: (id: string, decision: "once" | "session" | "deny") => void;
@@ -52,12 +53,12 @@ export function Thread(p: Props) {
         {blocks.map((b) => {
           switch (b.kind) {
             case "user":
-              return <UserMessage key={b.id} text={b.text} />;
+              return <UserMessage key={b.id} text={b.text} onOpenFile={p.onOpenFile} />;
             case "text":
               return <Markdown key={b.id} text={b.item.text} results={p.results} onOpenResult={p.onOpenResult} />;
             case "activity":
-              return <Activity key={b.id} steps={b.steps} figures={b.figures} live={p.busy && b === last}
-                               onOpenFigure={p.onOpenFigure} onOpenResult={p.onOpenResult} />;
+              return <Activity key={b.id} steps={b.steps} files={b.files} live={p.busy && b === last}
+                               onOpenFile={p.onOpenFile} onOpenResult={p.onOpenResult} />;
             case "ask":
               return <AskCard key={b.id} tool={b.tool} pending={b.tool.call_id === pendingAsk} onAnswer={p.onAnswer} />;
             case "notice":
@@ -90,13 +91,24 @@ export function Thread(p: Props) {
   );
 }
 
-function UserMessage({ text }: { text: string }) {
-  // 上传文件的前缀单独显示成附件行
+function UserMessage({ text, onOpenFile }: { text: string; onOpenFile: (url: string) => void }) {
+  const fileUrl = useFileUrl();
+  // 上传文件的前缀单独显示成附件行，点文件名在右侧面板看。格式见 app.py 的 with_uploads
   const m = text.match(/^\[用户上传了文件，在 inputs\/ 下：(.+?)\]\n\n([\s\S]*)$/);
+  const files = m ? m[1].split("、").map((label) => ({ label, name: label.replace(/（[^）]*）$/, "") })) : [];
   return (
     <div className="user-row">
       <div className="user-msg">
-        {m && <div className="attach-line">{m[1]}</div>}
+        {m && (
+          <div className="attach-line">
+            {files.map((f, i) => (
+              <button key={i} className="attach-file"
+                onClick={() => onOpenFile(fileUrl(`inputs/${encodeURIComponent(f.name)}`)!)}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+        )}
         {m ? m[2] : text}
       </div>
     </div>

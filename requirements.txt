@@ -13,10 +13,11 @@ pydantic>=2.0
 pydantic-settings>=2.0
 python-dotenv>=1.0
 
-# Web 界面（python run_web.py）
+# Web 界面（python run_web.py；openpyxl 用来在右侧面板预览 Excel）
 fastapi>=0.115
 uvicorn>=0.30
 python-multipart>=0.0.9
+openpyxl>=3.1
 
 # 测试（可选）
 pytest>=8.0
