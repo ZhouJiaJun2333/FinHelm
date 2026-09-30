@@ -26,6 +26,7 @@ from .core.events import (
     LLMResponded,
     StepLimitReached,
     StepStarted,
+    SubagentEvent,
     TextDelta,
     ToolCallRepeated,
     ToolDenied,
@@ -34,6 +35,7 @@ from .core.events import (
     TurnContinued,
     TurnEnded,
     TurnResumed,
+    TurnStarted,
 )
 from .core.messages import ToolCall, Usage
 from .mcp import Decision, McpTool
@@ -113,6 +115,10 @@ def make_console_sink(verbose: bool, results: ResultStore):
     def sink(event: Event) -> None:
         nonlocal streamed
         match event:
+            case SubagentEvent(task=task, agent=agent, title=title, event=inner):
+                if line := _subagent_line(inner, title):
+                    print(f"   │ [{agent}·{task}] {line}", flush=True)
+
             case StepStarted():
                 live.update(text=False, thinking=False)
                 streamed = ""
@@ -201,6 +207,27 @@ def make_console_sink(verbose: bool, results: ResultStore):
                       "可以 /compact 手动再试，成功后恢复")
 
     return sink
+
+
+def _subagent_line(event: Event, title: str) -> str:
+    """子 Agent 的过程缩成一行一件事：开始、调了什么工具、结果怎样、结束。它说的话不打（交回的结论主 Agent 会看到）。"""
+    match event:
+        case TurnStarted():
+            return f"▶ {title}"
+        case ToolStarted(name=name, arguments=args):
+            return f"🔧 {name}  {' '.join(str(args).split())[:120]}"
+        case ToolFinished(is_error=is_error, content=content, elapsed_ms=ms):
+            first = content.strip().splitlines()[0][:100] if content.strip() else ""
+            return f"{'❌' if is_error else '✅'} ({ms}ms) {first}"
+        case ToolDenied(name=name, reason=reason):
+            return f"⛔ 已拒绝 {name}：{reason}"
+        case StepLimitReached(max_steps=n):
+            return f"⚠️ 用完了 {n} 步，收尾"
+        case TurnEnded(interrupted=reason) if reason:
+            return f"■ 没做完：{reason}"
+        case TurnEnded():
+            return "■ 完成"
+    return ""
 
 
 # ---------------------------------------------------------------- /save

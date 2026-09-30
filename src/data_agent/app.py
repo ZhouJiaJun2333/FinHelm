@@ -38,6 +38,8 @@ from .tools.memory import ReadMemoryTool, RememberTool
 from .memory import Memory
 from .rag import Collection, IndexSpec, SearchSpec
 from .skills import BUILTIN, Skill, load_skills, usable
+from .subagents import BUILTIN as BUILTIN_AGENTS, Definition, DelegateTool, load_definitions
+from .subagents import usable as usable_agents
 
 
 @dataclass(slots=True)
@@ -57,6 +59,8 @@ class Application:
     sandboxes: dict[str, Sandbox] = field(default_factory=dict)   # "python" / "r"
     skills: list[Skill] = field(default_factory=list)             # 能用的技能（要的工具都在）
     skill_problems: list[str] = field(default_factory=list)       # 写坏了、被跳过的 SKILL.md
+    subagents: list[Definition] = field(default_factory=list)     # 能分派的子 Agent 类型（没开是空的）
+    subagent_problems: list[str] = field(default_factory=list)    # 写坏了、被跳过的子 Agent 定义
     memory: Memory | None = None                                  # 关了长期记忆是 None
     pending_uploads: list[Path] = field(default_factory=list)     # 上传了、还没告诉模型的文件
     mcp_clients: dict[str, McpClient] = field(default_factory=dict)  # 这次起的 MCP 服务器（共用的不在这里）
@@ -222,15 +226,73 @@ def build_application(
     if settings.ask_user:
         tools.register(AskUserTool())
 
-    # --- 上下文 ---
+    # 系统提示词：主 Agent 和子 Agent 按各自的工具拼，其余一样
+    def system_prompt(names: list[str], role: str = "") -> str:
+        return build_system_prompt(names, rules=rules, data_dir=data_dir is not None,
+                                   skills=usable(skills, names), memory="read_memory" in names,
+                                   collections=[(c.name, len(c.files())) for c in collections],
+                                   mcp=[(n, c.instructions) for n, c in mcp_servers.items()
+                                        if any(t.startswith(f"mcp__{n}__") for t in names)],
+                                   role=role)
+
+    session_context = _session_context(inspector, memory)
+    wrap_up = WRAP_UP_BEST_GUESS if settings.wrap_up == "best_guess" else WRAP_UP
+
+    # 子 Agent：全新的上下文，工具按类型从主 Agent 的里面挑（同一批实例，结果编号、沙箱、数据库都共用）
+    definitions: list[Definition] = []
+    agent_problems: list[str] = []
+    if settings.subagents:
+        found_agents, agent_problems = load_definitions([project / ".agents" / "agents", BUILTIN_AGENTS])
+        definitions = usable_agents(found_agents, [t.name for t in tools])
+
+    def spawn(definition: Definition, emit: Callable[[Event], None]) -> Agent:
+        child_tools = ToolRegistry(t for t in tools if t.name in definition.allowed([t.name for t in tools]))
+        names = [t.name for t in child_tools]
+        return Agent(llm=llm, tools=child_tools, system_prompt=system_prompt(names, definition.role()),
+                     context=_context(settings, llm, child_tools), max_steps=definition.max_steps,
+                     approval_hook=approval_hook, on_event=emit, session_context=session_context,
+                     wrap_up_prompt=wrap_up)
+
+    delegate = None
+    if definitions:
+        delegate = DelegateTool(definitions, spawn, results)
+        tools.register(delegate)
+
+    # --- Agent ---
+    agent = Agent(
+        llm=llm,
+        tools=tools,
+        system_prompt=system_prompt([t.name for t in tools]),
+        context=_context(settings, llm, tools),
+        max_steps=settings.max_steps,
+        approval_hook=approval_hook,
+        finish_turn_hook=finish_turn_hook,
+        on_event=on_event,
+        session_context=session_context,
+        wrap_up_prompt=wrap_up,
+        stream=settings.stream,
+    )
+    if delegate is not None:
+        delegate.bind(agent)
+
+    return Application(
+        agent=agent, db=db, inspector=inspector,
+        tools=tools, llm=llm, settings=settings, results=results, export_dir=export_dir,
+        work_dir=work_dir, sandboxes=sandboxes, skills=skills, skill_problems=skill_problems,
+        subagents=definitions, subagent_problems=agent_problems,
+        memory=memory, mcp_clients=mcp_owned, mcp_tools=mcp_tools, mcp_problems=mcp_problems,
+    )
+
+
+def _context(settings: Settings, llm: LLMProvider, tools: ToolRegistry) -> Context:
+    """先清理（几乎无损），清理完还超标再压缩（有损）。"""
     # 触发线不超过「窗口 - 余量」：换成小窗口的模型时不能等到 10 万才动手
     def cap(trigger: int) -> int:
         if llm.context_window:
             return min(trigger, llm.context_window - settings.context_reserve_tokens)
         return trigger
 
-    # 先清理（几乎无损），清理完还超标再压缩（有损）
-    context = Context([
+    return Context([
         ClearOldToolResults(
             trigger_tokens=cap(settings.context_clear_trigger_tokens),
             keep_recent=settings.context_keep_tool_results,
@@ -243,32 +305,6 @@ def build_application(
             keep_recent_tokens=settings.context_compact_keep_recent_tokens,
         ),
     ])
-
-    # --- Agent ---
-    agent = Agent(
-        llm=llm,
-        tools=tools,
-        system_prompt=build_system_prompt([t.name for t in tools], rules=rules,
-                                          data_dir=data_dir is not None, skills=skills,
-                                          memory=memory is not None,
-                                          collections=[(c.name, len(c.files())) for c in collections],
-                                          mcp=[(name, c.instructions) for name, c in mcp_servers.items()]),
-        context=context,
-        max_steps=settings.max_steps,
-        approval_hook=approval_hook,
-        finish_turn_hook=finish_turn_hook,
-        on_event=on_event,
-        session_context=_session_context(inspector, memory),
-        wrap_up_prompt=WRAP_UP_BEST_GUESS if settings.wrap_up == "best_guess" else WRAP_UP,
-        stream=settings.stream,
-    )
-
-    return Application(
-        agent=agent, db=db, inspector=inspector,
-        tools=tools, llm=llm, settings=settings, results=results, export_dir=export_dir,
-        work_dir=work_dir, sandboxes=sandboxes, skills=skills, skill_problems=skill_problems,
-        memory=memory, mcp_clients=mcp_owned, mcp_tools=mcp_tools, mcp_problems=mcp_problems,
-    )
 
 
 def _chain(first: ApprovalHook, then: ApprovalHook | None) -> ApprovalHook:

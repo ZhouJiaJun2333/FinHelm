@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from ..core.agent import InterruptedTurn
 from ..core.context import Entry, Marker
-from ..core.events import Event, ToolFinished
+from ..core.events import Event, SubagentEvent, ToolFinished
 from ..core.messages import Message
 from ..core.state import AgentState
 from ..tools.sandbox import Execution, saved_figures
@@ -70,6 +70,9 @@ def details_json(details: Any, file_url: FileUrl) -> dict[str, Any] | None:
 
 
 def event_json(event: Event, file_url: FileUrl) -> dict[str, Any]:
+    if isinstance(event, SubagentEvent):
+        return {"type": "SubagentEvent", "data": {"task": event.task, "agent": event.agent, "title": event.title,
+                                                   "event": event_json(event.event, file_url)}}
     data = {f.name: getattr(event, f.name) for f in dataclasses.fields(event)}
     if isinstance(event, ToolFinished):
         data["details"] = details_json(event.details, file_url)

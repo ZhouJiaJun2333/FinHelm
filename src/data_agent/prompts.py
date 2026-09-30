@@ -106,10 +106,11 @@ WRAP_UP_BEST_GUESS = (
 def build_system_prompt(tools: Collection[str], *, rules: str = "", data_dir: bool = False,
                         skills: Sequence[Skill] = (), memory: bool = False,
                         collections: Sequence[tuple[str, int]] = (),
-                        mcp: Sequence[tuple[str, str]] = ()) -> str:
+                        mcp: Sequence[tuple[str, str]] = (), role: str = "") -> str:
     """tools：实际注册了的工具名；rules：项目约定原文；data_dir：有没有只读挂在 /data/ 的数据；
     skills：能用的技能，只列名字和描述，正文靠 load_skill 读；memory：开没开长期记忆（目录由应用附在最后）；
-    collections：挂上的知识库 (名字, 文档数)，有 search_docs 时才讲；mcp：外部 MCP 服务器 (名字, 它给的用法说明)。"""
+    collections：挂上的知识库 (名字, 文档数)，有 search_docs 时才讲；mcp：外部 MCP 服务器 (名字, 它给的用法说明)；
+    role：子 Agent 的角色说明（subagents/ 下的定义正文），给了就是子 Agent 的提示词。"""
     sql = "run_sql" in tools
     sandbox = bool({"run_python", "run_r"} & set(tools))
     steps = list(_SQL_STEPS) if sql else []
@@ -124,6 +125,10 @@ def build_system_prompt(tools: Collection[str], *, rules: str = "", data_dir: bo
     if "run_r" in tools:
         steps.append(_R_STEP)
     steps.append("用自然语言给结论，并说明用了哪些数据、怎么算出来的（哪些表、什么口径、什么方法和参数）")
+    identity = ("你是 FinHelm，一个严谨的数据分析 Agent：用工具查询、计算用户的数据来回答问题。\n\n" if not role else
+                "你是 FinHelm 的子 Agent：主 Agent 把一个任务分派给你，你做完把结果交回给它。"
+                "你不能直接和用户对话，任务说明就是你知道的全部背景。\n\n"
+                f"## 你的角色\n{role.strip()}\n\n")
 
     principles = [
         "只基于实际查出来、算出来的数字下结论，绝不编造。",
@@ -140,7 +145,7 @@ def build_system_prompt(tools: Collection[str], *, rules: str = "", data_dir: bo
           if "view_image" in tools else []),
     ]
     return (
-        "你是 FinHelm，一个严谨的数据分析 Agent：用工具查询、计算用户的数据来回答问题。\n\n## 工作流程\n"
+        identity + "## 工作流程\n"
         + "\n".join(f"{i}. {step}" for i, step in enumerate(steps, 1))
         + (f"\n\n## 项目约定（很重要）\n{rules.strip()}\n" if rules.strip() else "\n")
         + (_SKILLS.format(skills="\n".join(f"- `{s.name}`：{s.description}" for s in skills)) if skills else "")

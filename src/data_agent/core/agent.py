@@ -232,9 +232,9 @@ class Agent:
             if self.interrupted is not None:
                 self._save(self.interrupted)
             self.context.restore(self._turn_snapshot)
-            self._emit(TurnEnded(interrupted=progress.reason, awaiting_user=waiting))
+            self.emit(TurnEnded(interrupted=progress.reason, awaiting_user=waiting))
             raise
-        self._emit(TurnEnded(answer=answer))
+        self.emit(TurnEnded(answer=answer))
         return answer
 
     def _progress(self, reason: str = "", pending: PendingQuestion | None = None) -> InterruptedTurn:
@@ -266,7 +266,7 @@ class Agent:
 
     # ------------------------------------------------------------------
     def _run_turn(self, user_input: str) -> str:
-        self._emit(TurnStarted(user_input))
+        self.emit(TurnStarted(user_input))
         self.context.add(Message.user(user_input))
         self._calls_this_turn.clear()
         self._checkpoint()
@@ -284,8 +284,8 @@ class Agent:
         self._calls_this_turn = Counter(_call_key(c) for e in turn.entries if isinstance(e, Message)
                                         for c in e.tool_calls)
         if asked is not None:
-            self._emit(TurnResumed(turn.steps, message))
-            self._emit(ToolFinished(name=asked.name, content=answer.content, is_error=False, elapsed_ms=0,
+            self.emit(TurnResumed(turn.steps, message))
+            self.emit(ToolFinished(name=asked.name, content=answer.content, is_error=False, elapsed_ms=0,
                                     call_id=asked.call_id))
             return self._loop(turn.steps + 1)
         last = turn.entries[-1]
@@ -294,7 +294,7 @@ class Agent:
         if message:
             # 不是新问题，是这一轮里的补充：标 synthetic，不算回合开头
             self.context.add(Message.user(message).with_meta(synthetic=True))
-        self._emit(TurnResumed(turn.steps, message))
+        self.emit(TurnResumed(turn.steps, message))
         return self._loop(turn.steps + 1)
 
     def _loop(self, start: int) -> str:
@@ -325,7 +325,7 @@ class Agent:
                 # 最后一步不补：接下来的收尾提示就是这一步的「继续」，两条说的是一回事
                 nudge = decision.nudge or "请继续完成上面的任务。"
                 self.context.add(Message.user(nudge).with_meta(synthetic=True))
-                self._emit(TurnContinued(step=step, nudge=nudge))
+                self.emit(TurnContinued(step=step, nudge=nudge))
 
             self._checkpoint()
 
@@ -333,7 +333,7 @@ class Agent:
 
     def _request(self, step: int) -> LLMResponse:
         """请求一次模型：先整理上下文，再请求、记账、发事件。stop_reason 由调用方判断。"""
-        self._emit(StepStarted(step))
+        self.emit(StepStarted(step))
         system = self._render_system_prompt()
         tools = self.tools.schemas()
 
@@ -342,7 +342,7 @@ class Agent:
 
         response = self._chat(step, system, tools)
         self.session_usage += response.usage      # 被截断的回复同样收费，先记账
-        self._emit(LLMResponded(
+        self.emit(LLMResponded(
             step=step,
             text=response.text,
             tool_calls=[c.name for c in response.tool_calls],
@@ -368,7 +368,7 @@ class Agent:
                        else "回答是空的" if not response.text else "")
         except Exception as exc:  # noqa: BLE001 —— 收尾是尽力而为，失败就用兜底，不能把这一轮搞没
             failure = f"{type(exc).__name__}: {exc}"
-        self._emit(StepLimitReached(self.max_steps, wrapped_up=not failure, failure=failure))
+        self.emit(StepLimitReached(self.max_steps, wrapped_up=not failure, failure=failure))
         if not failure:
             self.context.add(response.to_message())
             return response.text
@@ -385,7 +385,7 @@ class Agent:
         try:
             return self._call_llm(step, system, tools)
         except ContextOverflow:
-            self._emit(ContextOverflowed(step))
+            self.emit(ContextOverflowed(step))
             if not self._maintain(system, tools, force=True):
                 raise
             return self._call_llm(step, system, tools)
@@ -395,7 +395,7 @@ class Agent:
         if not self.stream:
             return self.llm.chat(messages=messages, tools=tools, system=system)
         return self.llm.stream(messages=messages, tools=tools, system=system,
-                               on_delta=lambda text, thinking: self._emit(TextDelta(step, text, thinking)))
+                               on_delta=lambda text, thinking: self.emit(TextDelta(step, text, thinking)))
 
     def _maintain(self, system: str, tools: list, *, force: bool = False) -> list[Event]:
         """让上下文整理一次。system / tools 用来量大小，写摘要时原样带上以命中缓存。
@@ -413,11 +413,11 @@ class Agent:
             raise
         for event in events:
             self.session_usage += event.usage      # 写摘要也是一次收费的调用，失败了也收
-            self._emit(event)
+            self.emit(event)
             if isinstance(event, ContextEditFailed):
                 self._compaction_failures += 1
                 if self._compaction_failures == MAX_COMPACTION_FAILURES:
-                    self._emit(AutoCompactionPaused(self._compaction_failures))
+                    self.emit(AutoCompactionPaused(self._compaction_failures))
             elif isinstance(event, ContextEdited) and event.used_model:
                 self._compaction_failures = 0
         return events
@@ -457,14 +457,14 @@ class Agent:
     def _execute(self, call: ToolCall, asked: PendingQuestion | None = None) -> PendingQuestion | None:
         """执行一次调用，结果进历史。工具要问用户（NeedsUserInput）就返回这个问题，结果先空着。
         asked：同一批里已经有一个问题在等了，再问的直接回绝。"""
-        self._emit(ToolStarted(name=call.name, arguments=call.arguments, call_id=call.id))
+        self.emit(ToolStarted(name=call.name, arguments=call.arguments, call_id=call.id))
 
         if self.approval_hook is not None:
             allowed, reason = self.approval_hook(call)
             if not allowed:
                 # 被拒绝也要给模型一条结果，否则 tool_call 没有配对，它也不知道发生了什么
                 self.context.add(Message.tool_result(call.id, f"用户拒绝执行：{reason}", is_error=True))
-                self._emit(ToolDenied(name=call.name, reason=reason, call_id=call.id))
+                self.emit(ToolDenied(name=call.name, reason=reason, call_id=call.id))
                 return None
 
         started = time.perf_counter()
@@ -473,7 +473,7 @@ class Agent:
             result = self.tools.invoke(call.name, call.arguments)
         except NeedsUserInput as ask:
             if asked is None:
-                self._emit(UserAsked(call.name, ask.question, ask.options, call_id=call.id))
+                self.emit(UserAsked(call.name, ask.question, ask.options, call_id=call.id))
                 return PendingQuestion(call.id, call.name, ask.question, ask.options)
             result = ToolOutput.error(ONE_QUESTION)
         finally:
@@ -489,12 +489,12 @@ class Agent:
 
         self.context.add(Message.tool_result(call.id, content, is_error=result.is_error,
                                              summary=result.summary, images=result.images))
-        self._emit(ToolFinished(
+        self.emit(ToolFinished(
             name=call.name, content=content, is_error=result.is_error,
             elapsed_ms=elapsed_ms, details=result.details, call_id=call.id,
         ))
         if count >= REPEAT_WARN_AT:
-            self._emit(ToolCallRepeated(call.name, count))
+            self.emit(ToolCallRepeated(call.name, count))
         return None
 
     def cancel_tool(self) -> None:
@@ -504,8 +504,9 @@ class Agent:
         if tool is not None:
             tool.cancel()
 
-    def _emit(self, event: Event) -> None:
-        """先更新状态再通知订阅者：订阅者收到事件时读 self.state 已经是新的（和 pi 的 processEvents 一样）。"""
+    def emit(self, event: Event) -> None:
+        """先更新状态再通知订阅者：订阅者收到事件时读 self.state 已经是新的（和 pi 的 processEvents 一样）。
+        子 Agent 的事件（SubagentEvent）也从这里发出去。"""
         self.state = reduce(self.state, event)
         self.on_event(event)
 
@@ -535,7 +536,7 @@ class Agent:
         self._system = None
         self._compaction_failures = 0
         self.interrupted = None
-        self._emit(ConversationReset())
+        self.emit(ConversationReset())
 
 
 def _after_tool_results(entries: list[Entry]) -> int:

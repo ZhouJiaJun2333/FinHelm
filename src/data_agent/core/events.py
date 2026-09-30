@@ -162,12 +162,24 @@ class ContextOverflowed:
     step: int
 
 
+@dataclass(slots=True)
+class SubagentEvent:
+    """子 Agent 的事件，包一层从主 Agent 发出去（delegate 工具）。都走主 Agent 这一路，
+    界面按 task 分开显示；停止也在这里生效：订阅者在任何一个事件上抛 Stopped，子 Agent 和主 Agent 一起停。"""
+
+    task: str                # 这次分派里的任务号（t1、t2…），界面据此分组
+    agent: str               # 子 Agent 类型（explore…）
+    title: str               # 任务的一句话标题
+    event: "Event"
+
+
 Event = (
     TurnStarted | TurnEnded | StepStarted | TextDelta | ConversationReset
     | LLMResponded | ToolStarted | ToolFinished | ToolDenied | ToolCallRepeated | UserAsked
     | TurnContinued | TurnResumed
     | StepLimitReached
     | ContextEdited | ContextEditFailed | AutoCompactionPaused | ContextOverflowed
+    | SubagentEvent
 )
 
 
