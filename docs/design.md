@@ -35,6 +35,7 @@ README 的展开：每一块为什么这么写、参考了谁、踩过什么坑�
 │   ├── settings.py             配置（.env）
 │   ├── prompts.py              系统提示词
 │   ├── skills/                 ★ 技能目录（catalog.py）和内置技能（builtin/<名字>/SKILL.md）
+│   ├── subagents/              ★ 子 Agent：类型定义（catalog.py、builtin/*.md）、delegate 工具（tool.py）、交付前复核（verify.py）
 │   ├── memory.py               ★ 长期记忆：两层目录、一条一个文件、索引
 │   ├── cli.py                  终端界面（只管显示）
 │   ├── web/                    Web 后端（FastAPI）：runner.py 一个会话一个后台线程，事件 SSE 推给浏览器；auth.py 账号
@@ -404,6 +405,45 @@ python run.py --resume
 两边读的是同一份文件，上次没跑完的那一轮也会接上（Web 里是「已中断 · 继续」，命令行是 `/continue`）。
 
 ---
+
+## 多 Agent：子 Agent
+
+参考 Claude Code 的 Agent 工具、pi 的 subagent 扩展。不做 Agent 团队、互发消息、协调者模式：大多数任务「一个 Agent + 偶尔委派」就够。
+
+**形态**：子 Agent 是主 Agent 的一个工具 `delegate(tasks=[{agent, title, prompt}])`，一次 1～4 个任务同时跑，主 Agent 等全部做完再继续；只分派一层。
+子 Agent 从全新的上下文开始，只拿到任务说明（看不到主对话，所以说明要写全：目标、已知的表和字段、口径、交回什么），
+中间过程不进主上下文，只交回结论、新产生的结果编号和文件清单。
+
+**类型**用 Markdown 定义（`src/data_agent/subagents/builtin/`，项目可以在 `.agents/agents/` 加或覆盖），字段 name / description / tools / max_steps，正文是角色说明：
+
+| 类型 | 工具 | 用途 |
+|:--|:--|:--|
+| `explore` | 看表结构、只读 SQL、检索文档、读文件 | 摸清数据在哪、口径是什么，交回压缩后的发现 |
+| `analyst` | 全部 | 完整做完一个边界清楚的子问题 |
+| `verifier` | 全部 | 拿到原问题和主 Agent 的答案，换一条路独立重算 |
+
+**看得到什么、能做什么**：
+- 子 Agent 没有 `delegate`（只一层）、`ask_user`（不能直接问用户，拿不准写明假设）、`remember`（长期记忆只由主 Agent 写）。
+- 共用：结果编号（子 Agent 查的 r7 主 Agent 直接引用）、数据库、知识库、MCP 和审批。
+- 隔离：沙箱每个子 Agent 各起一个容器（变量互不干扰；超时硬杀、取消都靠杀整个容器，所以不在同一个容器里多开内核）；
+  容器里的 `/work/figures` 挂到宿主机的 `figures/<任务号>/`，模型照常往 `figures/` 存，同名文件不会互相覆盖。
+
+**几个子 Agent 同时跑会冲突吗**：库只读、记忆只主 Agent 写、内核隔离、主子不同时动手，这些不会；
+结果编号加锁并记下是哪个任务产出的；文件靠上面的挂载分开。会「冲突」的是结论：两个任务口径不同、数字对不上。
+这个不防，并排交回让主 Agent 核对（工具说明里要求它核对，不许随便挑一个）。同一次分派里说明一模一样的任务直接拒绝（花两遍钱，错也错得一样）。
+
+**事件和停止**：子 Agent 的事件包成 `SubagentEvent(task, agent, title, event)` 经主 Agent 发出，一次发一个。
+停止机制不用改：订阅者在任何一个事件上抛异常，子 Agent 停下，兄弟任务在它们的下一个事件上也停，正在跑的工具取消。
+子 Agent 花的 token 记进主 Agent 的账（评测、界面只看这一个数）。
+过程存在 `sessions/<id>/subagents/<任务号>.jsonl`，Web 界面重新打开会话时按 `delegate` 结果里的任务号读回来，嵌套显示在那一步下面。
+
+**什么时候分派**：条件只写在工具说明里时，模型面对自己能做完的任务从不分派；写进系统提示词后（要翻很多表或文档只要结论的 → `explore`；
+两块以上彼此独立、每块好几步的 → 多个 `analyst`；几步能做完的自己做），摸两个库的底会分派，简单问题不会。
+
+**交付前复核（`VERIFY`）**：做成机制不靠自觉——主 Agent 每轮第一次打算收工时推一句，先派 `verifier` 重算再回答；离步数上限不到两步不推。
+
+**默认关**：DABstep dev 上主上下文最大 7～8 万 token（窗口 100 万），隔离省不下什么，模型也不分派；
+复核 27 次只改对 1 次、准确率不变，花费 ×1.8。同一个模型复核自己，理解题意时错得一样。详见 [evaluation.md](evaluation.md#多-agent子-agent-和交付前复核)。
 
 ## 安全：三道独立防线
 
