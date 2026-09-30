@@ -266,3 +266,12 @@ def test_子Agent的沙箱_figures挂到自己的目录(tmp_path):
         assert paths.resolve(raw) == (figures / "a.png").resolve()
         assert paths.display(paths.resolve(raw)) == "figures/a.png"
     assert paths.resolve("inputs/d.csv") == (tmp_path / "inputs" / "d.csv").resolve()
+
+
+def test_同一次分派里任务说明一模一样_拒绝(tmp_path):
+    llm = ScriptedProvider([delegate(("explore", "甲", "查订单  表"), ("analyst", "乙", "查订单 表")), say("好")])
+    events = []
+    build_application(settings(tmp_path), llm=llm, on_event=collect_sink(events)).agent.run("q")
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert finished.is_error and "第 1 个和第 2 个任务的说明一模一样" in finished.content
+    assert llm.calls == 2                     # 子 Agent 一个都没起

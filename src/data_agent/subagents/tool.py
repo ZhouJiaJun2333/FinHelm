@@ -37,6 +37,7 @@ DESCRIPTION = """\
 适合：要翻很多表、文档才能摸清的查探（你只需要结论）；彼此独立、能分开做的子问题。
 不适合：一两步就能做完的事（分派本身有开销）；要和用户确认的事（子 Agent 不能问用户）；
 后一步要用前一步结果的（分两次分派，或者自己做）。
+几个任务之间不要重叠：划清各自负责哪一块，同一件事不要派两次（花两遍钱，还会交回两份对不上的结果）。
 
 写任务说明（prompt）：子 Agent 什么都不知道，写清楚目标、已知的表和字段、口径、要交回什么，
 不要写「按上面说的做」。
@@ -134,6 +135,12 @@ class DelegateTool(Tool):
         unknown = sorted({t.agent for t in args.tasks} - set(self.definitions))
         if unknown:
             raise ValueError(f"没有子 Agent 类型 {'、'.join(unknown)}。可用的：{'、'.join(self.definitions)}")
+        # 一模一样的任务派两次只会花两遍钱（同一个模型错也错得一样，当核对也没用）。部分重叠认不出来，靠说明约束
+        seen: dict[str, int] = {}
+        for i, task in enumerate(args.tasks, 1):
+            if (first := seen.setdefault(" ".join(task.prompt.split()), i)) != i:
+                raise ValueError(f"第 {first} 个和第 {i} 个任务的说明一模一样。同一件事只派一次；"
+                                 "想让它们分别做不同的部分，就把各自负责哪一块写清楚。")
         with self._lock:
             self._abort = None
             ids = [f"t{self._count + i}" for i in range(1, len(args.tasks) + 1)]
