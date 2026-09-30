@@ -1,79 +1,85 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Download, Image, Table2, X } from "lucide-react";
+import { Code2, Download, Image, Table2, X } from "lucide-react";
 import { api } from "../api";
 import type { Table } from "../types";
 import { DataTable } from "./DataTable";
 
 export type PanelTarget = { kind: "table"; ref: string } | { kind: "figure"; url: string };
 
+export const sameTarget = (a: PanelTarget, b: PanelTarget) =>
+  a.kind === b.kind && (a.kind === "table" ? a.ref === (b as typeof a).ref : a.url === (b as typeof a).url);
+
 type Props = {
   session: string;
   results: Table[];
-  figures: string[];
-  target: PanelTarget;
+  tabs: PanelTarget[];
+  active: PanelTarget;
   onSelect: (t: PanelTarget) => void;
+  onCloseTab: (t: PanelTarget) => void;
   onClose: () => void;
 };
 
-// 右侧面板（相当于 Claude 的 artifacts）：这次对话的结果表和图
-export function ResultPanel({ session, results, figures, target, onSelect, onClose }: Props) {
+// 右侧面板（Claude 的文件面板）：打开过的结果表和图，一个标签一个
+export function ResultPanel({ session, results, tabs, active, onSelect, onCloseTab, onClose }: Props) {
   const [full, setFull] = useState<Table | null>(null);
   const [showSql, setShowSql] = useState(false);
-  const preview = target.kind === "table" ? results.find((t) => t.ref === target.ref) : undefined;
+  const preview = active.kind === "table" ? results.find((t) => t.ref === active.ref) : undefined;
 
   // 快照里只带前 20 行，完整的按需取
   useEffect(() => {
     setFull(null);
-    if (target.kind !== "table" || !preview || preview.rows.length >= preview.row_count) return;
+    if (!preview || preview.rows.length >= preview.row_count) return;
     let alive = true;
-    api.result(session, target.ref).then((t) => alive && setFull(t)).catch(() => {});
+    api.result(session, preview.ref).then((t) => alive && setFull(t)).catch(() => {});
     return () => { alive = false; };
-  }, [session, target, preview]);
+  }, [session, preview]);
 
   const table = full ?? preview;
+  const name = (t: PanelTarget) => {
+    if (t.kind === "figure") return t.url.split("?")[0].split("/").pop();
+    const r = results.find((x) => x.ref === t.ref);
+    return r?.title || t.ref;
+  };
+
   return (
     <section className="panel">
       <div className="panel-tabs">
-        {results.map((t) => (
-          <button key={t.ref} className={`tab${target.kind === "table" && target.ref === t.ref ? " active" : ""}`}
-            onClick={() => onSelect({ kind: "table", ref: t.ref })} title={t.title || t.sql}>
-            <Table2 size={13} /> {t.ref}{t.title ? ` · ${t.title}` : ""}
-          </button>
+        {tabs.map((t) => (
+          <div key={t.kind === "table" ? t.ref : t.url} className={`tab${sameTarget(t, active) ? " active" : ""}`}>
+            <button className="tab-main" onClick={() => onSelect(t)}>
+              {t.kind === "table" ? <Table2 size={13} /> : <Image size={13} />}
+              <span className="ellipsis">{name(t)}</span>
+            </button>
+            <button className="tab-x" onClick={() => onCloseTab(t)}><X size={12} /></button>
+          </div>
         ))}
-        {figures.map((u, i) => (
-          <button key={u} className={`tab${target.kind === "figure" && target.url === u ? " active" : ""}`}
-            onClick={() => onSelect({ kind: "figure", url: u })}>
-            <Image size={13} /> 图 {i + 1}
-          </button>
-        ))}
-        <button className="icon-btn panel-close" title="关闭面板" onClick={onClose}><X size={17} /></button>
+        <span className="spacer" />
+        {table && (
+          <>
+            {table.sql && (
+              <button className={`icon-btn${showSql ? " on" : ""}`} title="SQL" onClick={() => setShowSql(!showSql)}>
+                <Code2 size={16} />
+              </button>
+            )}
+            <a className="icon-btn" title="下载 CSV" href={api.csvUrl(session, table.ref)}><Download size={16} /></a>
+          </>
+        )}
+        <button className="icon-btn" title="关闭" onClick={onClose}><X size={16} /></button>
       </div>
 
-      {target.kind === "figure" ? (
-        <div className="panel-body figure-view"><img src={target.url} alt="" /></div>
+      {active.kind === "figure" ? (
+        <div className="panel-body figure-view"><img src={active.url} alt="" /></div>
       ) : table ? (
         <div className="panel-body">
           <div className="panel-head">
-            <div>
-              <div className="panel-title">{table.title || `结果 ${table.ref}`}</div>
-              <div className="muted small">
-                {table.ref} · {table.row_count} 行 × {table.columns.length} 列 · 来自 {table.source === "sql" ? "SQL" : table.source === "r" ? "R" : "Python"}
-                {table.truncated && " · 超过行数上限，只取了前面这些"}
-              </div>
-            </div>
-            <a className="btn" href={api.csvUrl(session, table.ref)}><Download size={14} /> 下载 CSV</a>
+            <div className="panel-title">{table.title || `结果 ${table.ref}`}</div>
+            <div className="faint small">{table.ref} · {table.row_count} 行 × {table.columns.length} 列</div>
           </div>
-          {table.sql && (
-            <div className={`sql-toggle${showSql ? " open" : ""}`}>
-              <button onClick={() => setShowSql(!showSql)}><ChevronRight size={14} className="chev" /> SQL</button>
-              {showSql && <pre className="code">{table.sql}</pre>}
-            </div>
-          )}
+          {showSql && table.sql && <pre className="code panel-sql">{table.sql}</pre>}
           <DataTable table={table} />
-          {!full && table.rows.length < table.row_count && <div className="muted small pad">加载全部行…</div>}
         </div>
       ) : (
-        <div className="panel-body muted pad">没有这个结果</div>
+        <div className="panel-body faint pad">没有这个结果</div>
       )}
     </section>
   );

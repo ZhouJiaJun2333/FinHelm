@@ -46,7 +46,7 @@ from .messages import LLMResponse, Message, ToolCall, Usage
 from .provider import LLMProvider
 from .state import AgentState, reduce
 from .tokens import ContextEstimate, estimate_context, estimate_overhead
-from .tools import NeedsUserInput, ToolOutput, ToolRegistry
+from .tools import NeedsUserInput, Tool, ToolOutput, ToolRegistry
 
 # 执行工具前的审批钩子：返回 (是否放行, 拒绝理由)
 ApprovalHook = Callable[[ToolCall], "tuple[bool, str]"]
@@ -189,6 +189,7 @@ class Agent:
         self.interrupted: InterruptedTurn | None = None
         self._turn_snapshot: object = None
         self._steps_done = 0
+        self._running_tool: Tool | None = None      # 正在执行的工具，cancel_tool() 用
 
     # ------------------------------------------------------------------
     def run(self, user_input: str) -> str:
@@ -467,6 +468,7 @@ class Agent:
                 return None
 
         started = time.perf_counter()
+        self._running_tool = self.tools.get(call.name)
         try:
             result = self.tools.invoke(call.name, call.arguments)
         except NeedsUserInput as ask:
@@ -474,6 +476,8 @@ class Agent:
                 self._emit(UserAsked(call.name, ask.question, ask.options, call_id=call.id))
                 return PendingQuestion(call.id, call.name, ask.question, ask.options)
             result = ToolOutput.error(ONE_QUESTION)
+        finally:
+            self._running_tool = None
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
         key = _call_key(call)
@@ -492,6 +496,13 @@ class Agent:
         if count >= REPEAT_WARN_AT:
             self._emit(ToolCallRepeated(call.name, count))
         return None
+
+    def cancel_tool(self) -> None:
+        """别的线程调（界面点了停止）：让正在执行的工具尽快结束，它的结果是一条错误。
+        工具不支持取消就什么都不发生；要停下整轮，调用方另外在下一个事件上中断（见 web/runner.py）。"""
+        tool = self._running_tool
+        if tool is not None:
+            tool.cancel()
 
     def _emit(self, event: Event) -> None:
         """先更新状态再通知订阅者：订阅者收到事件时读 self.state 已经是新的（和 pi 的 processEvents 一样）。"""

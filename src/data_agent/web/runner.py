@@ -190,11 +190,13 @@ class SessionRunner:
         self._start(self.app.agent.compact)
 
     def stop(self) -> None:
-        """停在下一个事件上（模型每吐一个字就是一个事件）。工具正跑着的要等它跑完。"""
+        """停在下一个事件上（模型每吐一个字就是一个事件）。正在跑的工具能取消的就取消
+        （沙箱杀内核、SQL 取消查询、MCP 不再等），它的结果是一条「用户中断」，之后照常停下。"""
         if self.busy:
             self._stop = True
             for approval in list(self._approvals.values()):
                 approval["event"].set()               # 在等审批的直接当拒绝
+            self.app.agent.cancel_tool()
 
     def reset(self) -> None:
         if self.busy:

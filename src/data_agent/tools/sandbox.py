@@ -83,6 +83,7 @@ class Sandbox:
         self._proc: subprocess.Popen | None = None
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._log: Any = None
+        self._cancelled = False
 
     # ------------------------------------------------------------ 构造
     @classmethod
@@ -121,6 +122,7 @@ class Sandbox:
     # ------------------------------------------------------------ 执行
     def run(self, code: str) -> Execution:
         self._ensure_started()
+        self._cancelled = False
         deadline = time.monotonic() + self.timeout_s + self.grace_s
         try:
             self._send({"op": "exec", "code": code, "timeout": self.timeout_s})
@@ -142,6 +144,8 @@ class Sandbox:
         except EOFError:
             detail = self._log_tail()
             self.close()
+            if self._cancelled:
+                return Execution(error="用户中断了执行，内核已重启。", restarted=True)
             return Execution(error="内核意外退出（常见原因是内存超限）。" + (f"\n{detail}" if detail else ""),
                              restarted=True)
 
@@ -214,6 +218,17 @@ class Sandbox:
         self._log.seek(0)
         return self._log.read().decode("utf-8", errors="replace")[-chars:].strip()
 
+    def cancel(self) -> None:
+        """别的线程调：杀掉正在执行的内核，run() 那边读到 EOF 返回「用户中断」。收尾（close）留给 run() 做。"""
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        self._cancelled = True
+        if self.kill_command:
+            subprocess.run(self.kill_command, capture_output=True, timeout=30)
+        if proc.poll() is None:
+            proc.kill()
+
     def close(self) -> None:
         """杀掉内核。下次 run() 会重新启动一个空的。"""
         if self._proc is not None:
@@ -244,6 +259,9 @@ class SandboxTool(Tool):
 
     def __init__(self, sandbox: Sandbox) -> None:
         self.sandbox = sandbox
+
+    def cancel(self) -> None:
+        self.sandbox.cancel()
 
     def run(self, args: Args) -> ToolOutput:
         ex = self.sandbox.run(args.code)

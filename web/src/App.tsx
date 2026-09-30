@@ -1,33 +1,54 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, Eraser, MoreHorizontal, PanelLeftOpen, PanelRight, SquarePen } from "lucide-react";
-import { api } from "./api";
-import { useSession } from "./useSession";
-import type { AgentState, SessionSummary } from "./types";
+import { useCallback, useEffect, useState } from "react";
+import { ChevronDown, PanelLeftOpen, PanelRight, SquarePen } from "lucide-react";
+import { api, Unauthorized } from "./api";
+import { LOGGED_OUT, useSession } from "./useSession";
+import type { AgentState, Me, SessionSummary, Trashed } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { Composer } from "./components/Composer";
-import { ApprovalCard, InterruptedCard, ItemView } from "./components/Messages";
-import { ResultPanel, type PanelTarget } from "./components/ResultPanel";
+import { Thread } from "./components/Thread";
+import { ResultPanel, sameTarget, type PanelTarget } from "./components/ResultPanel";
 import { Logo } from "./components/Logo";
+import { Login } from "./components/Login";
+import { Menu } from "./components/Menu";
 import { SessionContext } from "./sessionContext";
 
 const idFromHash = () => decodeURIComponent(location.hash.replace(/^#\/?s\//, "")) || null;
-
-// 窄屏（手机）上侧栏和面板是盖在对话上面的
+// 窄屏（手机）上侧栏和面板盖在对话上面
 const narrow = () => window.innerWidth <= 900;
 
-const SUGGESTIONS = ["库里有哪些表？各有多少行？", "2025 年哪个大区的销售额最高？", "按月看一下订单量的趋势，画张图"];
+const SUGGESTIONS = ["库里有哪些表？", "2025 年哪个大区的销售额最高？", "按月看订单量的趋势"];
 
 export default function App() {
+  const [me, setMe] = useState<Me | null>(null);
+  const loadMe = useCallback(() => api.me().then(setMe).catch(() => {}), []);
+  useEffect(() => { loadMe(); }, [loadMe]);
+  useEffect(() => {
+    const out = () => setMe((m) => (m ? { ...m, user: null } : m));
+    window.addEventListener(LOGGED_OUT, out);
+    return () => window.removeEventListener(LOGGED_OUT, out);
+  }, []);
+
+  if (!me) return null;
+  if (me.auth && !me.user) return <Login onDone={loadMe} />;
+  return <Workspace me={me} onLogout={() => api.logout().finally(loadMe)} />;
+}
+
+function Workspace({ me, onLogout }: { me: Me; onLogout: () => void }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [trash, setTrash] = useState<Trashed[]>([]);
   const [current, setCurrent] = useState<string | null>(idFromHash);
   const [sidebar, setSidebar] = useState(() => !narrow());
-  const [panel, setPanel] = useState<PanelTarget | null>(null);
+  const [tabs, setTabs] = useState<PanelTarget[]>([]);
+  const [active, setActive] = useState<PanelTarget | null>(null);
   const [uploads, setUploads] = useState<{ name: string; size: number }[]>([]);
   const [queued, setQueued] = useState<string | null>(null);     // 新对话的第一句：等连上再发
-  const [menu, setMenu] = useState(false);
   const { view, run } = useSession(current);
 
-  const refresh = useCallback(() => api.sessions().then(setSessions).catch(() => {}), []);
+  const guard = useCallback(<T,>(p: Promise<T>) => p.catch((e) => {
+    if (e instanceof Unauthorized) window.dispatchEvent(new Event(LOGGED_OUT));
+  }), []);
+  const refresh = useCallback(() => guard(api.sessions().then(setSessions)), [guard]);
+  const refreshTrash = useCallback(() => guard(api.trash().then(setTrash)), [guard]);
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
     const onHash = () => setCurrent(idFromHash());
@@ -40,7 +61,8 @@ export default function App() {
   const open = (id: string | null) => {
     location.hash = id ? `/s/${id}` : "";
     setCurrent(id);
-    setPanel(null);
+    setTabs([]);
+    setActive(null);
     setUploads([]);
     if (narrow()) setSidebar(false);
   };
@@ -77,159 +99,131 @@ export default function App() {
     setUploads((u) => [...u, ...saved]);
   };
 
-  const pendingAsk = view.interrupted?.pending?.call_id ?? null;
-  const answer = (a: string) => current && run(() => pendingAsk && a === "" ? api.resume(current, "") : api.send(current, a));
-  const figures = useMemo(() => view.items.flatMap((it) =>
-    it.kind === "tool" && it.details?.kind === "execution" ? it.details.figures : []), [view.items]);
-  const showPanel = (t: PanelTarget | null) => {
+  const showPanel = (t: PanelTarget) => {
     // 窄屏上打开面板时收起侧栏，给对话留地方（Claude desktop 也这样）
-    if (t && !panel && window.innerWidth < 1400) setSidebar(false);
-    setPanel(t);
+    if (!active && window.innerWidth < 1400) setSidebar(false);
+    setTabs((ts) => (ts.some((x) => sameTarget(x, t)) ? ts : [...ts, t]));
+    setActive(t);
   };
-  const openResult = (ref: string) => showPanel({ kind: "table", ref });
-  const title = view.items.find((it) => it.kind === "user")?.text.replace(/^\[用户上传了文件[^\]]*\]\n\n/, "") ?? "";
+  const closeTab = (t: PanelTarget) => {
+    const rest = tabs.filter((x) => !sameTarget(x, t));
+    setTabs(rest);
+    if (active && sameTarget(active, t)) setActive(rest.at(-1) ?? null);
+  };
+
+  const rename = async (id: string, title: string) => { await guard(api.rename(id, title)); refresh(); };
+  const remove = async (id: string) => {
+    if (!confirm("删除这个对话？可以在「最近删除」里恢复。")) return;
+    await guard(api.remove(id).then(() => { if (id === current) open(null); }).catch((e) => alert(e.message)));
+    refresh();
+    refreshTrash();
+  };
+  const restore = async (id: string) => { await guard(api.restore(id)); refresh(); refreshTrash(); };
+
+  const pendingAsk = !view.busy ? view.interrupted?.pending ?? null : null;
+  const answer = (a: string) => current && run(() => (a ? api.send(current, a) : api.resume(current, "")));
+  const figures = view.items.flatMap((it) => it.kind === "tool" && it.details?.kind === "execution" ? it.details.figures : []);
+  const firstQuestion = view.items.find((it) => it.kind === "user")?.text.replace(/^\[用户上传了文件[^\]]*\]\n\n/, "") ?? "";
+  const title = sessions.find((s) => s.id === current)?.title || firstQuestion.split("\n")[0] || "新对话";
   const busy = view.busy || !!queued;
   const landing = !current || (view.ready && view.items.length === 0 && !busy);
   const canUpload = view.info ? view.info.sandbox : true;
+  const footer = <ContextInfo model={me.model} state={view.state} />;
 
   return (
     <SessionContext.Provider value={current}>
-    <div className={`app${sidebar ? "" : " no-sidebar"}${panel ? " with-panel" : ""}`}>
-      {sidebar && <Sidebar sessions={sessions} current={current} onSelect={open} onNew={() => open(null)}
-                           onCollapse={() => setSidebar(false)} />}
+      <div className="app">
+        {sidebar && (
+          <Sidebar project={me.project} user={me.auth ? me.user : null} sessions={sessions} trash={trash}
+            current={current} onSelect={open} onNew={() => open(null)} onCollapse={() => setSidebar(false)}
+            onRename={rename} onDelete={remove} onRestore={restore} onShowTrash={refreshTrash} onLogout={onLogout} />
+        )}
 
-      <main className="main">
-        <header className="topbar">
-          {!sidebar && (
+        <main className="main">
+          <header className="topbar">
+            {!sidebar && (
+              <>
+                <button className="icon-btn" title="展开侧栏" onClick={() => setSidebar(true)}><PanelLeftOpen size={16} /></button>
+                <button className="icon-btn" title="新对话" onClick={() => open(null)}><SquarePen size={16} /></button>
+              </>
+            )}
+            {!landing && current && (
+              <Menu trigger={(toggle) => (
+                <button className="title-btn" onClick={toggle}>
+                  <span className="ellipsis">{title}</span><ChevronDown size={14} />
+                </button>
+              )} items={[
+                { label: "重命名", onClick: () => { const t = prompt("重命名", title); if (t?.trim()) rename(current, t); } },
+                { label: "压缩上下文", disabled: busy, onClick: () => run(() => api.compact(current)) },
+                { label: "清空对话", disabled: busy, onClick: () => { api.reset(current).catch(() => {}); } },
+                { label: "删除", danger: true, disabled: busy, onClick: () => remove(current) },
+              ]} />
+            )}
+            <span className="spacer" />
+            {view.error && <span className="faint small">{view.error}</span>}
+            {view.results.length + figures.length > 0 && (
+              <button className={`icon-btn${active ? " on" : ""}`} title="结果"
+                onClick={() => active ? setActive(null) : showPanel(tabs.at(-1) ??
+                  (view.results.length ? { kind: "table", ref: view.results.at(-1)!.ref } : { kind: "figure", url: figures.at(-1)! }))}>
+                <PanelRight size={16} />
+              </button>
+            )}
+          </header>
+
+          {landing ? (
+            <div className="landing">
+              <div className="greet"><Logo size={30} /><h1>今天想分析点什么？</h1></div>
+              <Composer busy={busy} placeholder="问一个关于数据的问题…" uploads={uploads} canUpload={canUpload}
+                autoFocus footer={footer} onSend={send} onStop={() => {}} onUpload={upload} />
+              <div className="suggestions">
+                {SUGGESTIONS.map((s) => <button key={s} onClick={() => send(s)}>{s}</button>)}
+              </div>
+            </div>
+          ) : (
             <>
-              <button className="icon-btn" title="展开侧栏" onClick={() => setSidebar(true)}><PanelLeftOpen size={17} /></button>
-              <button className="icon-btn" title="新对话" onClick={() => open(null)}><SquarePen size={17} /></button>
+              <Thread items={view.items} results={view.results} busy={busy} interrupted={view.interrupted}
+                approvals={view.approvals}
+                onOpenResult={(ref) => showPanel({ kind: "table", ref })}
+                onOpenFigure={(url) => showPanel({ kind: "figure", url })}
+                onAnswer={answer}
+                onContinue={() => current && run(() => api.resume(current))}
+                onApprove={(rid, d) => current && guard(api.approve(current, rid, d))} />
+              <div className="composer-dock">
+                <Composer busy={busy} disabled={!!pendingAsk} uploads={uploads} canUpload={canUpload} footer={footer}
+                  placeholder={pendingAsk ? "请先回答上面的问题" : "接着问…"}
+                  onSend={send} onStop={() => current && guard(api.stop(current))} onUpload={upload} />
+              </div>
             </>
           )}
-          <div className="topbar-title">{landing ? "" : title.split("\n")[0] || "新对话"}</div>
-          {view.state && !landing && <StatusPill state={view.state} busy={busy} />}
-          {view.state && !landing && <ContextMeter state={view.state} window={view.info?.context_window ?? null} />}
-          {view.results.length + figures.length > 0 && (
-            <button className={`btn ghost${panel ? " active" : ""}`} onClick={() => showPanel(panel ? null :
-                view.results.length ? { kind: "table", ref: view.results.at(-1)!.ref } : { kind: "figure", url: figures.at(-1)! })}>
-              <PanelRight size={15} /> 结果 {view.results.length + figures.length}
-            </button>
-          )}
-          {current && !landing && (
-            <div className="menu-wrap">
-              <button className="icon-btn" onClick={() => setMenu(!menu)}><MoreHorizontal size={17} /></button>
-              {menu && (
-                <div className="menu" onMouseLeave={() => setMenu(false)}>
-                  <button disabled={busy} onClick={() => { setMenu(false); run(() => api.compact(current)); }}>
-                    <Archive size={14} /> 压缩上下文
-                  </button>
-                  <button disabled={busy} onClick={() => { setMenu(false); api.reset(current).catch(() => {}); }}>
-                    <Eraser size={14} /> 清空对话
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-        </header>
+        </main>
 
-        {view.error && <div className="banner">{view.error}</div>}
-
-        {landing ? (
-          <div className="landing">
-            <div className="greet"><Logo size={34} /><h1>今天想分析点什么？</h1></div>
-            <Composer busy={busy} placeholder="问一个关于数据的问题，或者上传文件…" uploads={uploads} canUpload={canUpload}
-              autoFocus onSend={send} onStop={() => {}} onUpload={upload} />
-            <div className="suggestions">
-              {SUGGESTIONS.map((s) => <button key={s} onClick={() => send(s)}>{s}</button>)}
-            </div>
-            {view.info && (
-              <div className="env muted small">
-                {view.info.model} · {view.info.database ? "已连数据库" : "未连数据库"} · {view.info.sandbox ? "沙箱可用" : "无沙箱"}
-                {view.info.skills.length > 0 && ` · 技能 ${view.info.skills.join("、")}`}
-                {view.info.mcp.length > 0 && ` · MCP ${view.info.mcp.join("、")}`}
-              </div>
-            )}
-          </div>
-        ) : (
-          <>
-            <Conversation>
-              {view.items.map((it) => (
-                <ItemView key={it.id} item={it} results={view.results} pendingAsk={busy ? null : pendingAsk}
-                  onOpenResult={openResult} onAnswer={answer} />
-              ))}
-              {busy && view.state?.status === "thinking" && !lastIsStreaming(view.items) && (
-                <div className="working"><Logo size={16} /><span className="shimmer">思考中…</span></div>
-              )}
-              {view.approvals.map((a) => (
-                <ApprovalCard key={a.id} req={a} onDecide={(d) => current && api.approve(current, a.id, d)} />
-              ))}
-              {!busy && view.interrupted && !view.interrupted.pending && (
-                <InterruptedCard turn={view.interrupted} onContinue={() => current && run(() => api.resume(current))} />
-              )}
-            </Conversation>
-            <div className="composer-dock">
-              <Composer busy={busy} uploads={uploads} canUpload={canUpload}
-                placeholder={pendingAsk && !busy ? "写下你的回答，或者点上面的选项…" : "接着问…"}
-                onSend={send} onStop={() => current && api.stop(current)} onUpload={upload} />
-            </div>
-          </>
+        {active && current && (
+          <ResultPanel session={current} results={view.results} tabs={tabs} active={active}
+            onSelect={setActive} onCloseTab={closeTab} onClose={() => setActive(null)} />
         )}
-      </main>
-
-      {panel && current && (
-        <ResultPanel session={current} results={view.results} figures={figures} target={panel}
-          onSelect={setPanel} onClose={() => setPanel(null)} />
-      )}
-    </div>
+      </div>
     </SessionContext.Provider>
   );
 }
 
-function lastIsStreaming(items: ReturnType<typeof useSession>["view"]["items"]) {
-  const last = items.at(-1);
-  return last?.kind === "assistant" && last.streaming;
-}
-
-// 贴着底部时新内容来了自动往下滚；用户往上翻了就不打扰
-function Conversation({ children }: { children: React.ReactNode }) {
-  const box = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
-  useEffect(() => {
-    const el = box.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  });
+// 输入框下面右边：模型名 + 上下文用量小圆环
+function ContextInfo({ model, state }: { model: string; state: AgentState | null }) {
+  const total = state?.context_window;
+  const used = state?.context_tokens ?? 0;
+  const pct = total && used ? Math.min(1, used / total) : 0;
+  const r = 6, c = 2 * Math.PI * r;
   return (
-    <div className="scroll" ref={box}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-      }}>
-      <div className="thread">{children}</div>
-    </div>
-  );
-}
-
-function StatusPill({ state, busy }: { state: AgentState; busy: boolean }) {
-  const [text, cls] =
-    state.status === "asking" ? ["等你回答", "ask"]
-    : !busy ? ["空闲", "idle"]
-    : state.status === "tools" ? ["执行工具", "work"]
-    : ["思考中", "work"];
-  return <span className={`pill ${cls}`}><span className="pill-dot" />{text}{busy && state.step ? ` · 第 ${state.step} 步` : ""}</span>;
-}
-
-function ContextMeter({ state, window }: { state: AgentState; window: number | null }) {
-  const total = state.context_window ?? window;
-  if (!total || !state.context_tokens) return null;
-  const pct = Math.min(1, state.context_tokens / total);
-  const r = 7, c = 2 * Math.PI * r;
-  return (
-    <span className="meter" title={`上下文 ${state.context_tokens.toLocaleString()} / ${total.toLocaleString()} token`}>
-      <svg width="18" height="18" viewBox="0 0 18 18">
-        <circle cx="9" cy="9" r={r} className="meter-bg" />
-        <circle cx="9" cy="9" r={r} className="meter-fg" strokeDasharray={`${c * pct} ${c}`} transform="rotate(-90 9 9)" />
-      </svg>
-      {(pct * 100).toFixed(pct < 0.1 ? 1 : 0)}%
+    <span className="context-info">
+      <span>{model}</span>
+      {pct > 0 && (
+        <span className="meter" title={`上下文 ${used.toLocaleString()} / ${total!.toLocaleString()} token（${(pct * 100).toFixed(1)}%）`}>
+          <svg width="15" height="15" viewBox="0 0 15 15">
+            <circle cx="7.5" cy="7.5" r={r} className="meter-bg" />
+            <circle cx="7.5" cy="7.5" r={r} className="meter-fg" strokeDasharray={`${Math.max(c * pct, 1.5)} ${c}`}
+              transform="rotate(-90 7.5 7.5)" />
+          </svg>
+        </span>
+      )}
     </span>
   );
 }

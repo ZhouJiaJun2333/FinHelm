@@ -86,6 +86,10 @@ class Tool(ABC):
             "parameters": params,
         }
 
+    def cancel(self) -> None:
+        """从别的线程调：让正在跑的 run() 尽快结束（抛异常或返回错误都行）。
+        做不到的工具不用管，停止时会等它跑完。"""
+
     @abstractmethod
     def run(self, args: Any) -> "str | ToolOutput":
         """args 是校验过的 Args 实例。失败就抛异常。返回字符串，或带 summary / details 的 ToolOutput。"""

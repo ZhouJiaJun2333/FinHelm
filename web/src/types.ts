@@ -77,7 +77,9 @@ export type Info = {
   database: boolean;
 };
 
-export type SessionSummary = { id: string; title: string; updated: number };
+export type SessionSummary = { id: string; title: string; updated: number; busy: boolean };
+export type Trashed = { id: string; title: string; deleted: number };
+export type Me = { auth: boolean; user: string | null; project: string; model: string };
 
 // 服务器推来的一条 SSE 消息
 export type ServerMessage = { type: string; data: any; state?: AgentState };

@@ -418,23 +418,47 @@ CLI 里每走一步还写一次 `checkpoint.json`），`resume()` 接回历史�
 
 ### Web 界面
 
-`python run_web.py`。布局学 Claude desktop（左边会话列表、中间对话、右边结果面板），配色和标是自己的。
-Web 界面就是换了一个事件订阅者，`core/` 没动。
+`python run_web.py`。整体照 Claude desktop：左边会话列表、中间对话、右边结果面板；过程信息（思考、调工具）是淡灰小字，
+默认收起，不在界面上解释自己。强调色和标是自己的。Web 界面就是换了一个事件订阅者，`core/` 没动。
 
 - **后端**（FastAPI，`src/data_agent/web/`）：一个打开的会话 = 一套 `Application` + 一个跑回合的后台线程（Agent 是同步的）。
   事件从那个线程出来，经 `loop.call_soon_threadsafe` 交给各个页面的 asyncio 队列，SSE 推出去；发消息、回答、停止是普通 POST。
   页面连上时先拿一份快照（历史换成时间线条目 + `agent.state`），之后接着收事件。快照和推送用同一把锁：
   快照之前的事件已经在快照里，之后的一定进队列。
 - **前端**（React + Vite + TS，`web/`）：`timeline.ts` 是 TypeScript 版的 reduce，(条目, 事件) → 新条目；
-  状态栏（思考中 / 执行工具 / 等你回答、第几步、上下文用量）直接读服务器随事件带来的 `state`。
+  `blocks.ts` 再把一段连续的「思考 + 工具调用」合成一行（「用了 3 个工具 ›」，只有一个工具时写它在干什么，跑的时候是「正在查询数据库…」），
+  点开是每一步，每一步还能点开看 SQL、代码和结果。
 - **停止**：点停止后，下一个事件上抛 `Stopped`（和 Ctrl-C 一样是 `BaseException`，不会被「尽力而为」的 `except Exception` 吞掉），
-  走原来的事务回滚 + 检查点，页面上是「已停止 · 做完了 n 步 · 继续」。模型每吐一个字就是一个事件，所以回答中途能马上停；
-  工具正在跑的要等它跑完。
-- **ask_user**：问题是一张带编号选项的卡片，点选项或者直接在输入框里写就是回答（`resume`），「让它自己判断」= 不回答。
-- **MCP 审批**：外部工具第一次调用时，跑回合的线程等页面点「这次允许 / 本会话都允许 / 拒绝」（10 分钟没人点当拒绝）。
-- **结果**：`{{r3}}` 在回答里是一张可展开的表格卡片，右边面板看全部行、看 SQL、下载 CSV（和 `/save` 同一个函数）；
-  沙箱画的图显示在工具卡片里，回答里用相对路径引用的图（`figures/a.png`）换成会话 work 目录的地址。
-- 只监听 127.0.0.1：没有登录，连上的人能让 Agent 跑 SQL、跑代码。文件接口只给会话 work 目录里的文件（防 `../`）。
+  走原来的事务回滚 + 检查点。正在跑的工具也能停：`Tool.cancel()` 从别的线程调，沙箱杀内核（下次是新内核）、
+  SQL 用 `cancel_safe()` 取消查询、MCP 发 `notifications/cancelled` 并且不再等，工具的结果是一条「用户中断」的错误，模型接着跑时看得到。
+  做不到的工具（读文件、检索）很快就跑完，等它就是了。
+- **ask_user**：问题 + 编号选项，最后一项「其他」点开在卡片里写；「跳过」= 不回答（让它按最合理的理解做并说明假设）。
+  等回答的时候下面的输入框是灰的。
+- **MCP 审批**：外部工具第一次调用时，跑回合的线程等页面点「允许一次 / 本会话允许 / 拒绝」（10 分钟没人点当拒绝）。
+- **结果**：`{{r3}}` 和沙箱画的图做成预览卡（缩略图 + 标题 + 打开），右边面板一个结果一个标签，看全部行、看 SQL、下载 CSV（和 `/save` 同一个函数）。
+  回答里用相对路径引用的图（`figures/a.png`）换成会话 work 目录的地址。文件接口只给 work 目录里的文件（防 `../`）。
+- **改名、删除**：标题存在会话目录的 `meta.json`；删除是把整个会话目录挪进 `sessions/.trash/`，侧栏「最近删除」里点恢复就挪回来。
+- **账号**：没建账号就是单用户，只许监听本机（`--host` 设成别的会拒绝启动）。`python run_web.py adduser 名字` 建了账号就要登录：
+  密码只存 scrypt 哈希（`~/.finhelm/web/users.json`），登录凭证是签了名的 cookie（名字 + 过期时间 + HMAC，30 天），服务器重启不用重新登录，
+  删掉账号马上失效。每个人的会话在 `sessions/<名字>/`、长期记忆在 `~/.finhelm/users/<名字>/`，互相看不到。
+  没做：注册页、改密码的页面、管理员（都走命令行）。
+
+**数据都在哪、怎么恢复**：
+
+| 东西 | 位置 | 说明 |
+|---|---|---|
+| 对话历史 | `sessions/<会话ID>/session.jsonl` | 每轮成功后追加一行一条（消息 + 上下文标记），只追加不改 |
+| 没跑完的那一轮 | `sessions/<会话ID>/checkpoint.json` | 每走一步重写一次，这一轮做完就删 |
+| 查询结果 r1、r2… | `sessions/<会话ID>/results.jsonl` | 界面的结果面板、`/save` 都从这里拿 |
+| 导出的 CSV / 上传的文件 / 图 | `sessions/<会话ID>/exports/`、`work/inputs/`、`work/figures/` | |
+| 改过的标题 | `sessions/<会话ID>/meta.json` | |
+| 删掉的会话 | `sessions/.trash/<会话ID>/` | 界面「最近删除」恢复，或者手动把目录挪回 `sessions/` |
+| 长期记忆 | `~/.finhelm/memory/`、`~/.finhelm/projects/<项目>/memory/` | 开了账号的在 `~/.finhelm/users/<名字>/` 下面 |
+| 账号 | `~/.finhelm/web/users.json`、`secret` | |
+
+`sessions/` 相对启动目录（`SESSIONS_DIR` 可改），在 `.gitignore` 里，不进仓库 —— 要备份就拷这个目录。
+恢复一段对话：Web 界面在侧栏点它（地址是 `#/s/<会话ID>`，可以收藏）；命令行 `python run.py --resume <会话ID>`。
+两边读的是同一份文件，上次没跑完的那一轮也会接上（Web 里是「已中断 · 继续」，命令行是 `/continue`）。
 
 ---
 
@@ -964,7 +988,7 @@ python -m evals.financebench.e2e --resume evals/runs/<目录> --modes rag_all,ra
 | **流式输出** | 已实现：`LLMProvider.stream()` + `TextDelta` 事件 | 见「运行状态和流式输出」一节。工具参数的流式（边生成边显示 SQL）没做 |
 | **人工审批** | 已实现：`build_application(approval_hook=...)` | 传个函数，工具执行前弹确认 |
 | **自定义结束条件** | 已实现：`build_application(finish_turn_hook=...)` | 见概念 8 |
-| **Web 界面** | 已实现：`web/`（后端 `src/data_agent/web/`） | 见「Web 界面」一节。没做：多用户和登录、工具执行到一半的取消、会话改名和删除 |
+| **Web 界面** | 已实现：`web/`（后端 `src/data_agent/web/`） | 见「Web 界面」一节。没做：注册 / 改密码的页面、会话搜索、分享 |
 | **多 Agent** | 把 `Agent` 包成一个 `Tool` | 子 Agent 就是一个工具，天然递归 |
 | **持久化会话** | 已实现：`session/` | 每轮成功之后把新增的历史追加进 `session.jsonl`，`--resume` 读回来。以后要分支（从某一轮重来），学 pi 给每条记录加 id / parentId |
 | **中途问用户** | 已实现：`tools/ask_user.py`，`AwaitingUser` + `Agent.resume(回答)` | 以后 Web 界面：拿到 `AwaitingUser` 就把问题发给前端，下一个请求带着回答调 `resume` |

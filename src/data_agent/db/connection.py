@@ -32,6 +32,7 @@ class Database:
         self._statement_timeout_ms = statement_timeout_ms
         # SQL 不写 schema 前缀时去哪找表（BIRD 的标准 SQL 都不带前缀）
         self._search_path = search_path
+        self._active: psycopg.Connection | None = None     # 正在跑查询的连接，cancel() 用
 
     # ------------------------------------------------------------------
     def _connect(self) -> psycopg.Connection:
@@ -58,15 +59,25 @@ class Database:
         """执行一条只读查询。多取一行判断是不是还有更多，只返回 max_rows 行。"""
         started = time.perf_counter()
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(sql, params)
-            if cur.description is None:          # 不返回结果集的语句
-                return QueryResult([], [], False, 0)
-            columns = [d.name for d in cur.description]
-            rows = cur.fetchmany(max_rows + 1)
+            self._active = conn
+            try:
+                cur.execute(sql, params)
+                if cur.description is None:          # 不返回结果集的语句
+                    return QueryResult([], [], False, 0)
+                columns = [d.name for d in cur.description]
+                rows = cur.fetchmany(max_rows + 1)
+            finally:
+                self._active = None
 
         truncated = len(rows) > max_rows
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return QueryResult(columns, rows[:max_rows], truncated, elapsed_ms)
+
+    def cancel(self) -> None:
+        """别的线程调：取消正在跑的查询，query() 那边抛 QueryCanceled。"""
+        conn = self._active
+        if conn is not None:
+            conn.cancel_safe()
 
     def query_dicts(self, sql: str, params: tuple[Any, ...] | None = None) -> list[dict]:
         """内部用（schema 自省等），返回字典列表，不做行数限制。"""

@@ -3,9 +3,12 @@
     sessions/<id>/
         session.jsonl    对话历史（消息 + 标记），每轮成功之后追加
         checkpoint.json  没跑完的那一轮的进度（每走一步整个重写），这一轮提交了就删
+        meta.json        用户改过的标题（Web 界面的「重命名」）
         results.jsonl    查询结果 r1、r2…（tools/sql/results.py 写）
         exports/         /save 和 export_csv 写的 CSV
         work/            run_python 沙箱的工作目录（图表在 work/figures/）
+
+删除 = 整个目录挪进 <base>/.trash/，恢复就是挪回来。
 
 只记提交了的历史：Agent.run 是事务，失败的一轮会回滚，来一条写一条会在日志里留下半截回合
 （pi 不回滚，所以它来一条写一条）。/reset 在日志里记一行 reset。第一次真要写的时候才建目录。
@@ -16,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +29,7 @@ from ..core.context import Entry
 from .codec import decode, encode
 
 VERSION = 1
+TRASH = ".trash"
 
 
 class Session:
@@ -54,6 +59,10 @@ class Session:
     def work_dir(self) -> Path:
         return self.root / "work"
 
+    @property
+    def meta_path(self) -> Path:
+        return self.root / "meta.json"
+
     # ------------------------------------------------------------ 新建 / 打开
     @classmethod
     def create(cls, base: Path) -> "Session":
@@ -72,6 +81,47 @@ class Session:
         if not logs:
             raise FileNotFoundError(f"{base} 下还没有会话")
         return cls(logs[-1].parent)
+
+    # ------------------------------------------------------------ 标题、删除
+    def title(self) -> str:
+        """用户改过的标题，没改过是空的。"""
+        try:
+            return json.loads(self.meta_path.read_text(encoding="utf-8")).get("title", "")
+        except (OSError, ValueError):
+            return ""
+
+    def rename(self, title: str) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.meta_path.write_text(json.dumps({"title": title}, ensure_ascii=False), encoding="utf-8")
+
+    def trash(self) -> None:
+        """挪进 <base>/.trash/，不真删。"""
+        if self.root.exists():
+            bin_ = self.root.parent / TRASH
+            bin_.mkdir(exist_ok=True)
+            shutil.move(str(self.root), str(bin_ / self.id))
+
+    @classmethod
+    def trashed(cls, base: Path) -> list["Session"]:
+        return [cls(p) for p in (base / TRASH).glob("*") if (p / "session.jsonl").exists()]
+
+    @classmethod
+    def restore(cls, base: Path, session_id: str) -> "Session":
+        src = base / TRASH / session_id
+        if not (src / "session.jsonl").exists():
+            raise FileNotFoundError(f"回收站里没有这个会话：{session_id}")
+        if (base / session_id).exists():
+            raise FileExistsError(f"已经有同名的会话：{session_id}")
+        shutil.move(str(src), str(base / session_id))
+        return cls(base / session_id)
+
+    def checkpoint_question(self) -> str:
+        """没跑完的那一轮问的是什么。只读：不校验、不删（load_checkpoint 会删过期的，别的线程可能正在写）。"""
+        try:
+            first = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))["entries"][0]
+            return decode(first).content
+        except (OSError, ValueError, KeyError, IndexError, AttributeError):
+            return ""
 
     # ------------------------------------------------------------ 读
     def load(self) -> list[Entry]:

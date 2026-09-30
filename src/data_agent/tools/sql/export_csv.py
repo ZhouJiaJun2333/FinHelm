@@ -90,6 +90,9 @@ class ExportCsvTool(Tool):
         self.results = results
         self.out_dir = out_dir
 
+    def cancel(self) -> None:
+        self.db.cancel()
+
     def run(self, args: Args) -> str:
         table = self.results.get(args.ref)
         if table is None:

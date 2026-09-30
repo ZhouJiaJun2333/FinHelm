@@ -57,6 +57,9 @@ class RunSqlTool(Tool):
         # 和 export_csv、界面共用（app.py 注入）
         self.results = results if results is not None else ResultStore()
 
+    def cancel(self) -> None:
+        self.db.cancel()
+
     def run(self, args: Args) -> ToolOutput:
         sql = _validate(args.sql)
         result = self.db.query(sql, max_rows=FETCH_ROWS)

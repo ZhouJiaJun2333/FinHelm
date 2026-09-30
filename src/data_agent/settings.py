@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     db_statement_timeout_ms: int = 30_000
     # 每次对话一个子目录：日志、查询结果、导出的 CSV
     sessions_dir: str = "sessions"
+    # Web 界面的账号（users.json）和登录签名密钥。没建账号 = 单用户，只许本机访问
+    web_dir: str = "~/.finhelm/web"
     # 没有会话目录时（评测、测试）export_csv 写到这里
     export_dir: str = "outputs"
 

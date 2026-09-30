@@ -1,7 +1,7 @@
 // 连上一个会话的事件流：先收快照，之后每个事件改时间线和状态。
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "./api";
+import { api, Unauthorized } from "./api";
 import { reduce, withId } from "./timeline";
 import type { AgentState, ApprovalRequest, Info, Interrupted, Item, ServerMessage, Table } from "./types";
 
@@ -16,6 +16,8 @@ export type SessionView = {
   busy: boolean;
   error: string;
 };
+
+export const LOGGED_OUT = "finhelm:logged-out";
 
 const EMPTY: SessionView = {
   ready: false, items: [], state: null, interrupted: null, results: [], approvals: [], info: null, busy: false, error: "",
@@ -63,10 +65,16 @@ export function useSession(id: string | null) {
     ready.current = new Promise((r) => (resolve = r));
     source.onmessage = (e) => {
       const msg: ServerMessage = JSON.parse(e.data);
-      setView((v) => apply(v, msg));
+      setView((v) => apply({ ...v, error: "" }, msg));
       if (msg.type === "snapshot") resolve();
     };
-    source.onerror = () => setView((v) => ({ ...v, error: "和服务器的连接断了，正在重连…" }));
+    source.onerror = () => {
+      // 服务器返回错误（会话被删了）时浏览器不会重连
+      const closed = source.readyState === EventSource.CLOSED;
+      setView((v) => ({ ...v, error: closed ? "打不开这个会话" : "正在重连…" }));
+      // EventSource 看不到状态码：登录过期的话让 App 回登录页
+      api.me().then((me) => { if (me.auth && !me.user) window.dispatchEvent(new Event(LOGGED_OUT)); }).catch(() => {});
+    };
     return () => source.close();
   }, [id]);
 
@@ -78,6 +86,10 @@ export function useSession(id: string | null) {
     try {
       await fn();
     } catch (e) {
+      if (e instanceof Unauthorized) {
+        window.dispatchEvent(new Event(LOGGED_OUT));
+        return;
+      }
       setView((v) => ({ ...v, busy: false, items: reduce(v.items, { type: "error", data: { message: String((e as Error).message) } }) }));
     }
   }, []);

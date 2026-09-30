@@ -42,6 +42,9 @@ class McpTool(Tool):
         # 服务器自称只读才让上下文清理掉旧结果（清掉了要重调）；是不是真只读我们没法验证，审批照样要过
         self.rerunnable = bool((spec.get("annotations") or {}).get("readOnlyHint"))
 
+    def cancel(self) -> None:
+        self.client.cancel()
+
     def schema(self) -> dict[str, Any]:
         return {"name": self.name, "description": self.description, "parameters": self.input_schema}
 

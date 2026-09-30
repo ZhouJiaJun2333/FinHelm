@@ -8,6 +8,7 @@ stderr 也要有线程读掉：管道缓冲满了，子进程会卡在写日志�
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import os
@@ -107,6 +108,14 @@ class McpClient:
             err = msg["error"]
             raise McpError(f"MCP 服务器 {self.config.name} 报错（{err.get('code')}）：{err.get('message')}")
         return msg.get("result") or {}
+
+    def cancel(self) -> None:
+        """别的线程调：不再等还没回来的请求（它们报「用户取消」），并告诉服务器取消。"""
+        for request_id, box in list(self._pending.items()):
+            with contextlib.suppress(McpError):
+                self.notify("notifications/cancelled", {"requestId": request_id, "reason": "用户取消"})
+            with contextlib.suppress(queue.Full):
+                box.put_nowait({"error": {"code": -32800, "message": "用户取消了这次调用"}})
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         self._send({"jsonrpc": "2.0", "method": method, **({"params": params} if params else {})})

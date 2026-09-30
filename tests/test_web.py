@@ -11,6 +11,7 @@ from data_agent.core.messages import LLMResponse, ToolCall, Usage
 from data_agent.session import Session
 from data_agent.settings import Settings
 from data_agent.web.runner import SessionRunner
+from data_agent.web.auth import Users
 from data_agent.web.server import create_app
 
 from fakes import ScriptedProvider
@@ -21,7 +22,8 @@ FINAL = LLMResponse(text="华东最高", stop_reason="end_turn", usage=Usage(inp
 def settings(tmp_path, **kw) -> Settings:
     return Settings(provider="openai", openai_api_key="x", database_url="", memory_enabled=False,
                     mcp_enabled=False, python_sandbox=False, r_sandbox=False, docs_dirs="", ask_user=True,
-                    project_dir=str(tmp_path), sessions_dir=str(tmp_path / "sessions"), **kw)
+                    project_dir=str(tmp_path), sessions_dir=str(tmp_path / "sessions"),
+                    web_dir=str(tmp_path / "web"), memory_dir=str(tmp_path / "mem"), **kw)
 
 
 def ask(question="门槛多少？", options=("30 万", "40 万")) -> LLMResponse:
@@ -145,7 +147,7 @@ def test_新建会话_发消息_会话列表有标题(client):
     sid = client.post("/api/sessions").json()["id"]
     assert client.post(f"/api/sessions/{sid}/messages", json={"text": "  "}).status_code == 400
     assert client.post(f"/api/sessions/{sid}/messages", json={"text": "哪个大区最高"}).json() == {"ok": True}
-    runner = client.app.state.hub.runners[sid]
+    runner = client.app.state.hubs[""].runners[sid]
     runner._thread.join(5)
     sessions = client.get("/api/sessions").json()
     assert sessions[0] == {**sessions[0], "id": sid, "title": "哪个大区最高"}
@@ -154,9 +156,71 @@ def test_新建会话_发消息_会话列表有标题(client):
 def test_没有的会话404_文件不能跳出work目录(client):
     assert client.get("/api/sessions/不存在/results/r1").status_code == 404
     sid = client.post("/api/sessions").json()["id"]
-    work = client.app.state.hub.runners[sid].session.work_dir
+    work = client.app.state.hubs[""].runners[sid].session.work_dir
     (work / "figures").mkdir(parents=True)
     (work / "figures" / "a.png").write_bytes(b"png")
     assert client.get(f"/api/sessions/{sid}/files/figures/a.png").content == b"png"
     assert client.get(f"/api/sessions/{sid}/files/../session.jsonl").status_code == 404
     assert client.get(f"/api/sessions/{sid}/files/..%2F..%2F.env").status_code == 404
+
+
+def test_改名_删除进回收站_恢复(client):
+    sid = client.post("/api/sessions").json()["id"]
+    client.post(f"/api/sessions/{sid}/messages", json={"text": "第一个问题"})
+    client.app.state.hubs[""].runners[sid]._thread.join(5)
+
+    assert client.patch(f"/api/sessions/{sid}", json={"title": "  华东  销售 "}).json() == {"ok": True}
+    assert client.get("/api/sessions").json()[0]["title"] == "华东 销售"
+
+    assert client.delete(f"/api/sessions/{sid}").json() == {"ok": True}
+    assert sid not in [s["id"] for s in client.get("/api/sessions").json()]
+    assert [t["id"] for t in client.get("/api/trash").json()] == [sid]
+    assert client.get(f"/api/sessions/{sid}/events").status_code == 404
+
+    assert client.post(f"/api/trash/{sid}/restore").json() == {"ok": True}
+    assert client.get("/api/sessions").json()[0] == {**client.get("/api/sessions").json()[0], "id": sid, "title": "华东 销售"}
+    assert client.get("/api/trash").json() == []
+
+
+# ================================================================ 登录
+def test_账号_密码只存哈希_凭证能验_删号就失效(tmp_path):
+    users = Users(tmp_path)
+    with pytest.raises(ValueError):
+        users.add("../x", "12345678")
+    with pytest.raises(ValueError):
+        users.add("alice", "short")
+    users.add("alice", "correct horse")
+    assert "correct horse" not in users.path.read_text(encoding="utf-8")
+    assert users.verify("alice", "correct horse") and not users.verify("alice", "wrong one")
+    assert not users.verify("nobody", "correct horse")
+
+    token = users.token("alice")
+    assert users.check(token) == "alice"
+    assert users.check(token.replace("alice", "bob", 1)) is None          # 改了名字签名就对不上
+    assert users.check(users.token("alice", now=0)) is None               # 过期
+    users.remove("alice")
+    assert users.check(token) is None
+
+
+def test_建了账号就要登录_每个人只看得到自己的会话(tmp_path):
+    s = settings(tmp_path)
+    users = Users(tmp_path / "web")
+    users.add("alice", "alice-password")
+    users.add("bob", "bob-password")
+    with TestClient(create_app(s, llm=ScriptedProvider([FINAL]))) as c:
+        assert c.get("/api/me").json()["auth"] is True
+        assert c.get("/api/sessions").status_code == 401
+        assert c.post("/api/login", json={"name": "alice", "password": "nope"}).status_code == 401
+
+        assert c.post("/api/login", json={"name": "alice", "password": "alice-password"}).status_code == 200
+        assert c.get("/api/me").json()["user"] == "alice"
+        sid = c.post("/api/sessions").json()["id"]
+        c.post(f"/api/sessions/{sid}/messages", json={"text": "alice 的问题"})
+        c.app.state.hubs["alice"].runners[sid]._thread.join(5)
+        assert (tmp_path / "sessions" / "alice" / sid / "session.jsonl").exists()
+
+        c.post("/api/logout")
+        assert c.get("/api/sessions").status_code == 401
+        c.post("/api/login", json={"name": "bob", "password": "bob-password"})
+        assert c.get("/api/sessions").json() == []
+        assert c.get(f"/api/sessions/{sid}/events").status_code == 404
