@@ -95,7 +95,7 @@ export function ResultPanel({ session, results, tabs, active, onSelect, onCloseT
 function FileView({ url }: { url: string }) {
   switch (fileKind(url)) {
     case "image":
-      return <div className="panel-body figure-view"><img src={url} alt="" /></div>;
+      return <ImageView url={url} />;
     case "pdf":
       // 浏览器自带的 PDF 阅读器；关掉左边的缩略图栏，宽度撑满
       return <div className="panel-body"><iframe className="pdf-view" src={`${url}#navpanes=0&view=FitH`} title={fileName(url)} /></div>;
@@ -104,6 +104,16 @@ function FileView({ url }: { url: string }) {
     default:
       return <div className="panel-body faint pad">这个文件不能预览，可以点右上角下载。</div>;
   }
+}
+
+// 图默认缩到面板宽；300 dpi 的图缩下来小字发虚，点一下放大看细节，再点缩回去
+function ImageView({ url }: { url: string }) {
+  const [zoomed, setZoomed] = useState(false);
+  return (
+    <div className={`panel-body figure-view${zoomed ? " zoomed" : ""}`}>
+      <img src={url} alt="" title={zoomed ? "点击缩小" : "点击放大"} onClick={() => setZoomed(!zoomed)} />
+    </div>
+  );
 }
 
 // Excel / CSV：一个工作表一个按钮，下面是表格

@@ -226,6 +226,24 @@ fh_forest(m, rob = rb, file = "forest_rob", formats = c("png", "pdf", "tiff"))
                                           'attributes(rb)[c("tool", "domains", "labels")]; fh_forest(m, rob = rb_bad)').error
 
 
+def test_带亚组的森林图_上下左右都没被切(r):
+    # meta 自己算的高度漏了亚组的异质性、亚组间检验几行，图居中画，上下各被切掉一截
+    ex = ok(r, """
+d <- data.frame(study = paste("S", 1:12), me = 12 + (1:12) %% 3, se = 3, ne = 60, mc = 14, sc = 3.2, nc = 58,
+                g = rep(c("RL", "VL", "VM", "BF", "TA"), c(3, 3, 2, 2, 2)))
+m <- fh_meta_cont(d, "study", "me", "se", "ne", "mc", "sc", "nc", subgroup = "g")
+fh_forest(m, file = "forest_sub", formats = "png")
+""")
+    from PIL import Image
+
+    img = Image.open(next(f for f in ex.figures if f.name == "forest_sub.png")).convert("L")
+    w, h = img.size
+    px = img.load()
+    edge = 30                                 # 300 dpi 下 0.1 英寸
+    for x0, y0, x1, y1 in ((0, 0, w, edge), (0, h - edge, w, h), (0, 0, edge, h), (w - edge, 0, w, h)):
+        assert all(px[x, y] > 240 for x in range(x0, x1, 3) for y in range(y0, y1, 3)), (x0, y0, x1, y1)
+
+
 def test_漏斗图_敏感性分析_导出(r):
     ok(r, STUDIES)
     ex = ok(r, 'm <- fh_meta_bin(d, "study", "ee", "ne", "ec", "nc")\nfh_funnel(m)\nfh_sensitivity(m)\nfh_export(m)')

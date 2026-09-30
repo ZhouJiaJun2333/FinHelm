@@ -169,17 +169,20 @@ fh_methods <- function(m) {
   invisible(paths)
 }
 
-# meta 的森林图只算得出高度：先画在很宽的画布上，量出内容实际多宽，再按这个宽度出图
+# meta 的森林图算不准尺寸：宽度不给，高度漏算亚组的异质性、亚组间检验那几行（图居中画，上下各被切一截）。
+# 先画在又宽又高的画布上，量出内容实际占多大，再按这个尺寸出图。字号、行高是绝对单位，不随画布变
 .forest_size <- function(draw) {
   pdf(NULL)
   dims <- tryCatch(draw(), finally = dev.off())
-  height <- dims$figheight$total_height + 0.3
+  tall <- dims$figheight$total_height * 1.5 + 2
   tmp <- tempfile(fileext = ".png")
-  png(tmp, width = 30, height = height, units = "in", res = 100, type = "cairo")
+  png(tmp, width = 30, height = tall, units = "in", res = 100, type = "cairo")
   tryCatch(draw(), finally = dev.off())
   img <- png::readPNG(tmp)
-  ink <- which(colSums(img[, , 1] < 0.95 | img[, , 2] < 0.95 | img[, , 3] < 0.95) > 0)
-  c(width = (max(ink) - min(ink)) / 100 + 0.4, height = height)
+  ink <- img[, , 1] < 0.95 | img[, , 2] < 0.95 | img[, , 3] < 0.95
+  cols <- which(colSums(ink) > 0)
+  rows <- which(rowSums(ink) > 0)
+  c(width = (max(cols) - min(cols)) / 100 + 0.4, height = (max(rows) - min(rows)) / 100 + 0.4)
 }
 
 fh_forest <- function(m, file = "forest", rob = NULL, label_left = NULL, label_right = NULL,
