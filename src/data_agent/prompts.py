@@ -43,6 +43,16 @@ _SKILLS = """
 {skills}
 """
 
+# 只写在工具说明里时，模型面对自己能做完的任务从不分派（2026-09-30 四个问题 0/4），判断条件要写进提示词
+_DELEGATE = """
+## 子 Agent（delegate）
+遇到下面这些情况，主动用 `delegate` 分派：子 Agent 用全新的上下文做完只交回结论，你的上下文保持干净，几个任务同时跑。
+- 要翻很多张表、很多份文档才能摸清、而你只需要结论的查探 → 交给 `explore`；几块互不相关的查探（比如两个库各摸一遍）分给几个 `explore` 同时做。
+- 两块以上彼此独立、每块都要好几步（查数、计算、画图）的分析 → 每块一个 `analyst` 同时做，你负责拆分、汇总和核对口径。
+- 几步就能做完的自己做：分派要写任务说明，子 Agent 还要重新看表结构，开销不小。
+- 要先问用户的（口径有歧义）先问清楚再分派；后一步要用前一步结果的，分两次分派或者自己做。
+"""
+
 _MEMORY = """
 ## 长期记忆
 你有跨会话的长期记忆：`remember` 写，`read_memory` 读，已有的记忆目录在这段提示词的最后。
@@ -150,6 +160,7 @@ def build_system_prompt(tools: Collection[str], *, rules: str = "", data_dir: bo
         + (f"\n\n## 项目约定（很重要）\n{rules.strip()}\n" if rules.strip() else "\n")
         + (_SKILLS.format(skills="\n".join(f"- `{s.name}`：{s.description}" for s in skills)) if skills else "")
         + (_MEMORY.format(conflict=_ASK_CONFLICT if "ask_user" in tools else _NO_ASK_CONFLICT) if memory else "")
+        + (_DELEGATE if "delegate" in tools else "")
         + _mcp_section(mcp)
         + _result_refs(sql, sandbox=sandbox)
         + "\n## 原则\n" + "\n".join(f"- {p}" for p in principles) + "\n"
